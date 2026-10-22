@@ -1,0 +1,15 @@
+<Bindings>
+	<Binding name="CRAFTPLAN_MAP" header="CRAFTPLAN">
+		if CraftPlan and CraftPlan.ToggleMap then CraftPlan.ToggleMap() end
+	</Binding>
+	<Binding name="CRAFTPLAN_COLLAPSE" header="CRAFTPLAN">
+		if CraftPlan and CraftPlan.ToggleCollapsed then CraftPlan.ToggleCollapsed() end
+	</Binding>
+	<Binding name="CLICK CraftPlanFishCast:LeftButton" header="CRAFTPLAN">
+	</Binding>
+	<Binding name="CLICK CraftPlanFishLure:LeftButton" header="CRAFTPLAN">
+	</Binding>
+	<Binding name="CRAFTPLAN_FISH_SWAP" header="CRAFTPLAN">
+		if CraftPlan and CraftPlan.FishSwap then CraftPlan.FishSwap() end
+	</Binding>
+</Bindings>

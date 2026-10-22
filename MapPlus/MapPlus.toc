@@ -1,0 +1,10 @@
+## Interface: 30300
+## Title: MapPlus
+## Notes: Карта мира: галочка «Убрать туман войны» — показывает районы, где вы ещё не были
+## Notes-ruRU: Карта мира: галочка «Убрать туман войны» — показывает районы, где вы ещё не были
+## Version: 0.1.0
+## X-Sirus-Category: 11
+## SavedVariables: MapPlusDB
+
+Data.lua
+MapPlus.lua

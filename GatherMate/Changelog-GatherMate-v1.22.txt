@@ -1,0 +1,25 @@
+------------------------------------------------------------------------
+r682 | kagaro | 2009-12-11 17:45:40 +0000 (Fri, 11 Dec 2009) | 1 line
+Changed paths:
+   A /tags/v1.22 (from /trunk:681)
+
+Tagging as v1.22
+------------------------------------------------------------------------
+r681 | kagaro | 2009-12-10 19:49:09 +0000 (Thu, 10 Dec 2009) | 1 line
+Changed paths:
+   M /trunk/GatherMate.toc
+
+GatherMate: toc update
+------------------------------------------------------------------------
+r680 | next96 | 2009-10-14 05:56:16 +0000 (Wed, 14 Oct 2009) | 3 lines
+Changed paths:
+   A /trunk/Artwork/Mine/cobalt.tga
+   D /trunk/Artwork/Mine/cobolt.tga
+   M /trunk/Artwork/Mine/saronite.tga
+   M /trunk/Artwork/Mine/titanium.tga
+   M /trunk/Constants.lua
+
+GatherMate :
+- Northrend Mine Image fix
+- cobolt -> cobalt fix
+------------------------------------------------------------------------
