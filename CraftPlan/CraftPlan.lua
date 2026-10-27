@@ -312,8 +312,47 @@ end
 
 local function ItemOfLink(link) return link and tonumber(link:match("item:(%d+)")) end
 
--- Сколько предмета есть: в сумках (игра знает всегда) и в банке (аддон запоминает, когда банк открыт)
-local function BagCount(r) return GetItemCount(r.id or r.name) or 0 end
+-- Сколько предмета есть: в сумках (игра знает всегда) и в банке (аддон запоминает, когда банк открыт).
+-- К сумкам добавляем хранилище для ингредиентов Sirus (контейнер -4): крафт берёт из него где угодно.
+-- Его содержимое запоминается; если игра его сейчас не отдаёт — берём запомненное.
+local BagCount
+do
+	local REAGENT_BAG = -4
+	local ids, names, stamp
+	local function Add(id, name, n)
+		if id then ids[id] = (ids[id] or 0) + n end
+		if name then names[name] = (names[name] or 0) + n end
+	end
+	local function Scan()
+		ids, names = {}, {}
+		for bag = 0, NUM_BAG_SLOTS do
+			for slot = 1, GetContainerNumSlots(bag) or 0 do
+				local link = GetContainerItemLink(bag, slot)
+				if link then
+					local _, count = GetContainerItemInfo(bag, slot)
+					Add(ItemOfLink(link), link:match("%[(.-)%]"), count or 1)
+				end
+			end
+		end
+		local live = {}
+		for slot = 1, GetContainerNumSlots(REAGENT_BAG) or 0 do
+			local link = GetContainerItemLink(REAGENT_BAG, slot)
+			if link then
+				local _, count = GetContainerItemInfo(REAGENT_BAG, slot)
+				live[#live + 1] = { ItemOfLink(link), link:match("%[(.-)%]"), count or 1 }
+			end
+		end
+		-- пустой ответ вдали от банка не затирает запомненное (игра могла ещё не загрузить хранилище)
+		if #live > 0 or CraftPlan.bankIsOpen then DB().reagentBag = live end
+		for _, e in ipairs(DB().reagentBag or {}) do Add(e[1], e[2], e[3]) end
+	end
+	-- пересчёт не чаще раза за кадр: метку сбрасывает невидимый фрейм
+	CreateFrame("Frame"):SetScript("OnUpdate", function() stamp = nil end)
+	BagCount = function(r)
+		if not stamp then Scan() stamp = true end
+		return (r.id and ids[r.id]) or (r.name and names[r.name]) or 0
+	end
+end
 local function BankCount(r)
 	if DB().noBank then return 0 end -- «Учитывать банк» выключено
 	local bank = DB().bank
@@ -817,10 +856,22 @@ mapButton.icon:SetAllPoints(mapButton)
 mapButton.icon:SetTexture("Interface\\Icons\\INV_Misc_Map_01")
 mapButton:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 mapButton:SetScript("OnClick", function() if CraftPlan.ToggleMap then CraftPlan.ToggleMap() end end)
+-- под значком — сколько материалов маршрута до потолка уровня уже собрано (считает раздел «Маршрут прокачки»)
+mapButton.percent = mapButton:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+mapButton.percent:SetPoint("TOP", mapButton, "BOTTOM", 0, -3)
+CraftPlan.mapButton = mapButton
 mapButton:SetScript("OnEnter", function(self)
 	GameTooltip:SetOwner(self, "ANCHOR_BOTTOM")
 	GameTooltip:AddLine("Карта крафта", 0.4, 0.8, 1)
 	GameTooltip:AddLine("Что из чего делается во всех профессиях: материалы, стрелки, изделия.", 1, 1, 1, true)
+	local progress = CraftPlan.routeProgress
+	if progress and progress[1] then
+		GameTooltip:AddLine(" ")
+		GameTooltip:AddLine("Собрано материалов на маршрут до потолка вашего уровня (сумки и банк):", 1, 0.82, 0)
+		for _, t in ipairs(progress) do
+			GameTooltip:AddDoubleLine(t[1], math.floor(t[2] / (t[2] + t[3]) * 100) .. "%  (не хватает " .. t[3] .. " шт.)", 1, 1, 1, 1, 1, 1)
+		end
+	end
 	GameTooltip:Show()
 end)
 mapButton:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -1930,10 +1981,12 @@ local function DrawNeed()
 				Add(step .. ". " .. verb .. ": " .. (m.r.name or "?") .. " — |cffff6060" .. m.amount .. "|r   " .. WhereShort(m.r),
 					{ indent = 18, icon = m.r.icon, link = m.r.id and ("item:" .. m.r.id), action = function() WhereToGetReagent(m.r) end,
 						tip = "Не хватает " .. m.amount .. " шт. Щелчок — где взять: жилы, торговец или источники на карте." })
-				local pHint, pOre = CraftPlan.ProspectHint and CraftPlan.ProspectHint(m.r.id, m.amount)
+				local pHint, pOre, pUsual
+				if CraftPlan.ProspectHint then pHint, pOre, pUsual = CraftPlan.ProspectHint(m.r.id, m.amount) end
 				if pHint then
 					Add("|cff66ccff" .. pHint .. "|r", { indent = 30, icon = pOre and GetItemIcon(pOre),
-						tip = "По вашему журналу просеиваний. Кнопка «Просеять» — одно просеивание за щелчок." })
+						tip = (pUsual and "Что обычно даёт эта руда (на Sirus может отличаться). Просеете — аддон запишет в журнал."
+							or "По вашему журналу просеиваний.") .. " Кнопка «Просеять» — одно просеивание за щелчок." })
 				end
 				if not total[key] then
 					total[key] = { r = m.r, amount = 0, profs = {} }
@@ -1989,6 +2042,7 @@ local function DrawNeed()
 end
 
 local function NeedRefresh()
+	if CraftPlan.RouteRefresh then CraftPlan.RouteRefresh() end -- вкладка «Маршрут»
 	local sc = need:GetParent() -- область прокрутки вкладки «План» в окне карты
 	if sc ~= UIParent and sc:IsShown() then
 		need:SetWidth(math.max(300, sc:GetWidth() - 4))
@@ -1997,6 +2051,7 @@ local function NeedRefresh()
 		sc:UpdateScrollChildRect()
 	end
 end
+CraftPlan.NeedRefresh = NeedRefresh
 
 -- после каждого расчёта: обновить вкладку «План» и карту
 AfterPlan = function()
@@ -2032,8 +2087,12 @@ timer:SetScript("OnUpdate", function(self)
 	end
 	Refresh() -- карта и план обновятся, когда расчёт закончится (AfterPlan)
 end)
+-- Каждое событие откладывает пересчёт, но не дольше 3 секунд от первого: при «Создать все»
+-- события идут подряд, и иначе план пересчитался бы только после всей пачки
 local function RefreshSoon()
-	pending = GetTime() + REFRESH_DELAY
+	local now = GetTime()
+	if not timer:IsShown() then timer.first = now end
+	pending = math.min(now + REFRESH_DELAY, timer.first + 3)
 	timer:Show()
 end
 
@@ -2047,10 +2106,12 @@ events:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_LOGIN" then RestoreBar() end
 	if event == "BANKFRAME_OPENED" then
 		bankOpen = true
+		CraftPlan.bankIsOpen = true
 		ScanBank()
 		RefreshSoon()
 	elseif event == "BANKFRAME_CLOSED" then
-		bankOpen = false -- не сканируем: при закрытии банк уже может быть недоступен и запишется пустым
+		bankOpen = false
+		CraftPlan.bankIsOpen = false -- не сканируем: при закрытии банк уже может быть недоступен и запишется пустым
 	elseif event == "PLAYERBANKSLOTS_CHANGED" then
 		ScanBank()
 		RefreshSoon()
@@ -2272,6 +2333,7 @@ local function MakeTab(key, label, x)
 end
 MakeTab("graph", "Схема", 18)
 MakeTab("plan", "План", 112)
+MakeTab("route", "Маршрут", 206)
 
 local hint = map:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
 hint:SetPoint("BOTTOMLEFT", map, "BOTTOMLEFT", 20, 12)
@@ -3063,9 +3125,16 @@ local function Draw()
 		if key == tab then b:LockHighlight() else b:UnlockHighlight() end
 	end
 	if tab == "plan" then
+		if CP.HideRouteTab then CP.HideRouteTab() end
 		DrawPlanTab()
 		return
 	end
+	if tab == "route" then -- шкалы маршрута до потолка уровня (раздел «Маршрут прокачки»)
+		for _, w in ipairs({ graphTools, scroll, hint, searchLabel, allowCheck, bankCheck, oreCheck, needScroll }) do w:Hide() end
+		CP.ShowRouteTab(map)
+		return
+	end
+	if CP.HideRouteTab then CP.HideRouteTab() end
 	allowCheck:Hide()
 	bankCheck:Hide()
 	oreCheck:Hide()
@@ -3772,6 +3841,42 @@ local PROSPECT_SPELL = 31252 -- Просеивание
 local ORES = { 2770, 2771, 2772, 3858, 10620, 23424, 23425, 36909, 36912, 36910 } -- руда, которую можно просеять
 local IS_ORE = {}
 for _, id in ipairs(ORES) do IS_ORE[id] = true end
+-- Что обычно выпадает при просеивании (данные 3.3.5; на Sirus может отличаться — журнал важнее)
+-- и с какого навыка ювелирного дела руда просеивается. Нужно маршруту и подсказкам, пока журнал пуст
+do
+	local TBC = { 23077, 21929, 23112, 23079, 23117, 23107, 23436, 23439, 23440, 23437, 23438, 23441 }
+	local WOTLK = { 36917, 36920, 36923, 36926, 36929, 36932, 36918, 36921, 36924, 36927, 36930, 36933 }
+	local function With(list, ...)
+		local t = {}
+		for _, v in ipairs(list) do t[#t + 1] = v end
+		for _, v in ipairs({ ... }) do t[#t + 1] = v end
+		return t
+	end
+	CraftPlan.PROSPECT = {
+		[2770] = { 774, 818, 1210 },                                  -- медная: малахит, тигровый глаз, камень теней
+		[2771] = { 1210, 1206, 1705, 1529, 3864, 7909 },              -- оловянная
+		[2772] = { 1529, 3864, 1705, 7909, 7910 },                    -- железная
+		[3858] = { 3864, 7909, 7910, 12361, 12799, 12800, 12364 },    -- мифриловая
+		[10620] = { 7910, 12361, 12799, 12800, 12364 },               -- ториевая
+		[23424] = TBC,                                                -- оскверненного железа
+		[23425] = With(TBC, 24243),                                   -- адамантитовая (+ адамантитовый порошок)
+		[36909] = WOTLK,                                              -- кобальтовая
+		[36912] = WOTLK,                                              -- саронитовая
+		[36910] = With(WOTLK, 36919, 36922, 36925, 36928, 36931, 36934, 46849), -- титановая (+ эпические, порошок)
+	}
+	CraftPlan.PROSPECT_REQ = { [2770] = 20, [2771] = 50, [2772] = 125, [3858] = 175, [10620] = 250,
+		[23424] = 275, [23425] = 325, [36909] = 350, [36912] = 400, [36910] = 450 }
+	-- Руда, из которой обычно просеивается камень, — по порядку ORES (от простой к сложной)
+	CraftPlan.ProspectOres = function(gem)
+		local list = {}
+		for _, ore in ipairs(ORES) do
+			for _, g in ipairs(CraftPlan.PROSPECT[ore]) do
+				if g == gem then list[#list + 1] = ore break end
+			end
+		end
+		return list
+	end
+end
 local LOOT_WAIT = 5 -- сколько секунд после просеивания ждём окно добычи
 
 local function Print(msg)
@@ -4021,6 +4126,14 @@ local function AddProspectTooltip(tip)
 	if #parts > 0 then
 		tip:AddLine("Просеиванием (ваш журнал): " .. table.concat(parts, ", "), 0.4, 0.8, 1, true)
 		tip:Show()
+		return
+	end
+	for _, ore in ipairs(CraftPlan.ProspectOres(id)) do
+		parts[#parts + 1] = (GetItemInfo(ore) or ("руда " .. ore)) .. " (навык " .. CraftPlan.PROSPECT_REQ[ore] .. ")"
+	end
+	if #parts > 0 then
+		tip:AddLine("Просеиванием (обычно): " .. table.concat(parts, ", "), 0.4, 0.8, 1, true)
+		tip:Show()
 	end
 end
 for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do
@@ -4041,7 +4154,23 @@ function CraftPlan.ProspectHint(itemID, amount)
 			end
 		end
 	end
-	if not best then return nil end
+	if not best then
+		-- журнал о камне молчит: руда, из которой он обычно просеивается (сначала та, что в сумках
+		-- и по навыку; иначе самая простая)
+		local rank = JewelRank() or 0
+		local pick
+		for _, ore in ipairs(CraftPlan.ProspectOres(itemID)) do
+			local ok = rank >= CraftPlan.PROSPECT_REQ[ore]
+			local have = ok and GetItemCount(ore) >= 5
+			if not pick or (have and not pick.have) or (ok and not pick.ok) then pick = { ore = ore, ok = ok, have = have } end
+			if have then break end
+		end
+		if not pick then return nil end
+		local name = GetItemInfo(pick.ore) or ("руда " .. pick.ore)
+		local note = pick.have and "есть в сумках" or (pick.ok and "её нет в сумках"
+			or ("нужно ювелирное дело " .. CraftPlan.PROSPECT_REQ[pick.ore]))
+		return "можно просеять из: " .. name .. " (" .. note .. "; обычно, журнал пуст)", pick.ore, true
+	end
 	local oreName = GetItemInfo(best.ore) or ("руда " .. best.ore)
 	if not best.have then
 		return "можно просеять из: " .. oreName .. " (её нет в сумках)", best.ore
@@ -4584,6 +4713,7 @@ local function StartScan()
 			if not key then
 				self:SetScript("OnUpdate", nil)
 				recipes, scanning = found, false
+				CraftPlan.recipeItems = found -- нужен маршруту прокачки
 				Update()
 				return
 			end
@@ -4607,6 +4737,1699 @@ waitFrame:SetScript("OnUpdate", function(self, elapsed)
 	waited = 0
 	StartScan()
 	if recipes or scanning then self:SetScript("OnUpdate", nil) end
+end)
+end)()
+
+----------------------------------------------------------------------------------------------
+-- Маршрут прокачки до потолка навыка для вашего уровня (вкладка «План»): по каждой профессии — какие рецепты делать на каждом
+-- отрезке навыка, что выучить (у учителя или купить рецепт у торговца) и что собрать или купить.
+-- Рецепты, пороги цвета и материалы — CraftPlanRouteData (из файлов клиента, в конце файла).
+-- С какого навыка рецепт учится, клиент не знает: аддон записывает это в окне учителя профессии
+-- (все строки, в том числе «недоступные»). Пока учителя профессии не открывали, считается, что
+-- рецепт учится с жёлтого порога (то есть оранжевым не бывает) — маршрут предварительный.
+-- Выбор: на каждом очке навыка — рецепт с наименьшей ценой очка (материалы / шанс роста навыка),
+-- смена рецепта стоит дополнительно (выучить, новые материалы), поэтому отрезки длинные.
+;(function()
+local MAX_SKILL = 450
+local MIN_CHANCE = 0.34 -- рецепты с меньшим шансом роста навыка не берём
+local MARGIN = 1.2      -- материалы для созданий «с шансом» — с запасом
+-- Потолки навыка и уровень персонажа, с которого учитель обычно их даёт
+local TIERS = { { 75, 5 }, { 150, 10 }, { 225, 20 }, { 300, 35 }, { 375, 50 }, { 450, 65 } }
+-- Цель маршрута — самый высокий потолок, который учитель даст на вашем уровне; и следующий за ним
+local function LevelCap(level)
+	local cap, nextT = TIERS[1][1], nil
+	for _, t in ipairs(TIERS) do
+		if t[2] <= level then cap = t[1] elseif not nextT then nextT = t end
+	end
+	return cap, nextT
+end
+local GATHER = {
+	["Горное дело"] = { kind = "Mining", db = "GatherMateMineDB", icon = "Interface\\Icons\\Trade_Mining", verb = "Копать" },
+	["Травничество"] = { kind = "Herb Gathering", db = "GatherMateHerbDB", icon = "Interface\\Icons\\Trade_Herbalism", verb = "Собирать" },
+}
+-- Цена штуки материала по источнику (условные усилия: купить проще, чем выбить с мобов)
+local COST = { vendor = 1, ore = 2, object = 2.5, fish = 3, mob = 3, gem = 4, ah = 6, craft = 0.3 }
+local KIND_ORDER = { ore = 1, object = 2, mob = 3, fish = 4, gem = 5, vendor = 6, ah = 7 }
+
+-- Камни копаются из жил вместе с рудой (в базе Questie у них вместо жил сундуки и сотни мобов).
+-- Номера жил GatherMate, как в ORE_NODES. В ORE_NODES не кладём: там жила — одна руда (фильтр жил)
+local STONE_NODES = {
+	[2835] = { 201 },                -- грубый камень: медь
+	[2836] = { 202, 204, 209 },      -- крупный камень: олово, серебро
+	[2838] = { 203, 205, 210 },      -- тяжелый камень: железо, золото
+	[7912] = { 206, 207, 208, 211 }, -- твердый камень: мифрил, истинное серебро
+	[12365] = { 212, 213, 214, 215 }, -- массивный камень: торий
+}
+-- Жилы, из которых копается предмет (руда или камень), или nil
+local function MinedNodes(id) return ORE_NODES[id] or STONE_NODES[id] end
+-- Зоны жил предмета: руда — как в плане (OreZones), камень — по его жилам
+local function MinedZones(id)
+	if ORE_NODES[id] then return OreZones(id) end
+	local nodes = STONE_NODES[id]
+	if not (nodes and GatherMate and GatherMate.zoneData and GatherMateMineDB) then return nil end
+	local set = {}
+	for _, n in ipairs(nodes) do set[n] = true end
+	local list, seen = {}, {}
+	for zoneName, zd in pairs(GatherMate.zoneData) do
+		local db = zd[3] and GatherMateMineDB[zd[3]]
+		if db and not seen[zd[3]] then
+			seen[zd[3]] = true
+			local c = 0
+			for _, nodeID in pairs(db) do
+				if set[nodeID] then c = c + 1 end
+			end
+			if c > 0 then list[#list + 1] = { zoneName, c } end
+		end
+	end
+	table.sort(list, function(a, b) return a[2] > b[2] end)
+	return list
+end
+
+-- Мобы для фарма — не выше вашего уровня + MOB_LEVEL_UP (по наименьшему уровню моба в базе Questie)
+local MOB_LEVEL_UP = 5
+local function MobFits(q, npc)
+	local ok, lvl = pcall(q.QueryNPCSingle, npc, "minLevel")
+	return ok and lvl and lvl <= UnitLevel("player") + MOB_LEVEL_UP
+end
+
+-- Места сбора — жилы, травы, косяки рыбы, облака газа, а не сундуки, ящики и прочие контейнеры:
+-- из них материал не нафармить. Узел GatherMate (по названию, без учёта регистра) — место сбора;
+-- остальные объекты Questie — если в названии нет слов-контейнеров (названия трав у Questie и
+-- GatherMate иногда расходятся: «Жизнекорень» и «Корень жизни»)
+local function Lower(str)
+	str = str:gsub("\208\129", "\209\145")
+	str = str:gsub("\208([\144-\159])", function(c) return "\208" .. string.char(c:byte() + 32) end)
+	str = str:gsub("\208([\160-\175])", function(c) return "\209" .. string.char(c:byte() - 32) end)
+	return str:lower()
+end
+local gatherNames
+local GATHER_TYPES = { "Mining", "Herb Gathering", "Fishing", "Extract Gas" }
+local CONTAINER_WORDS = { "сундук", "ящик", "сейф", "бочк", "бочон", "мешок", "кулек", "кулёк", "корзин", "тайник", "ларец", "шкатулк",
+	"chest", "crate", "box", "barrel", "sack", "cache", "strongbox" }
+local function GatherObjects(q, list)
+	if not list then return nil end
+	if not gatherNames then
+		gatherNames = {}
+		local ids = GatherMate and GatherMate.nodeIDs
+		for _, t in ipairs(GATHER_TYPES) do
+			for name in pairs(ids and ids[t] or {}) do gatherNames[Lower(name)] = true end
+		end
+	end
+	local out = {}
+	for _, obj in pairs(list) do
+		local ok, name = pcall(q.QueryObjectSingle, obj, "name")
+		local good = false
+		if ok and name then
+			name = Lower(name)
+			good = gatherNames[name] == true
+			if not good then
+				good = true
+				for _, w in ipairs(CONTAINER_WORDS) do
+					if name:find(w, 1, true) then good = false break end
+				end
+			end
+		end
+		if good then out[#out + 1] = obj end
+	end
+	return out
+end
+
+local function QDB()
+	local q = QuestieLoader and QuestieLoader:ImportModule("QuestieDB")
+	if q and q.QueryItemSingle then return q end
+end
+
+local function ItemName(id)
+	local name = GetItemInfo(id)
+	if name then return name end
+	local q = QDB()
+	local ok, n = false, nil
+	if q then ok, n = pcall(q.QueryItemSingle, id, "name") end
+	return (ok and n) or ("предмет " .. id)
+end
+
+-- Рецепты профессии из таблицы: { spell, name, y, g, acq, item, made, cd, reag = { {id, count} } }
+local parsed = {}
+local function Recipes(sk)
+	if parsed[sk] then return parsed[sk] end
+	local list = {}
+	for _, line in ipairs(CraftPlanRouteData and CraftPlanRouteData[sk] or {}) do
+		local spell, name, y, g, acq, item, made, reag, cd = strsplit("|", line)
+		local rec = { spell = tonumber(spell), name = name, y = tonumber(y), g = tonumber(g), acq = (acq == "1"),
+			item = tonumber(item), made = tonumber(made) or 1, cd = (cd == "1"), reag = {} }
+		for id, c in reag:gmatch("(%d+)%*(%d+)") do rec.reag[#rec.reag + 1] = { id = tonumber(id), count = tonumber(c) } end
+		list[#list + 1] = rec
+	end
+	parsed[sk] = list
+	return list
+end
+
+-- Шанс роста навыка: оранжевый — всегда, дальше убывает до серого порога (правило 3.3.5)
+local function Chance(y, g, r)
+	if r < y then return 1 end
+	if r >= g or g <= y then return 0 end
+	return (g - r) / (g - y)
+end
+
+local function SkillLines()
+	local t = {}
+	for i = 1, GetNumSkillLines() do
+		local name, isHeader, _, rank, _, _, max = GetSkillLineInfo(i)
+		if name and not isHeader then t[name] = { rank = rank, max = max } end
+	end
+	return t
+end
+
+-- Изученные рецепты (если окно профессии открывали)
+local function KnownSet(prof)
+	local p = DB().profs[prof]
+	if not (p and p.scanned) then return nil end
+	local set = {}
+	for _, rec in ipairs(p.recipes) do set[rec.name] = true end
+	return set
+end
+
+----------------------------------------------------------------------------------------------
+-- Учитель: с какого навыка учится рецепт и сколько стоит. [навык][название] = { req, cost }
+local function ScanTrainer()
+	if not (IsTradeskillTrainer and IsTradeskillTrainer()) then return end
+	local db = DB()
+	db.learn = db.learn or {}
+	db.learnFull = db.learnFull or {}
+	local full = not GetTrainerServiceTypeFilter or GetTrainerServiceTypeFilter("unavailable")
+	local changed = false
+	for i = 1, GetNumTrainerServices() do
+		local name, _, kind = GetTrainerServiceInfo(i)
+		local ok, skill = pcall(GetTrainerServiceSkillLine, i)
+		local sk = ok and skill and SKILL_ID[skill]
+		if name and sk and kind ~= "header" then
+			local _, req = GetTrainerServiceSkillReq(i)
+			local t = db.learn[sk] or {}
+			db.learn[sk] = t
+			local cost = GetTrainerServiceCost(i) or 0
+			local old = t[name]
+			if not (old and old.req == (req or 0) and old.cost == cost) then changed = true end
+			t[name] = { req = req or 0, cost = cost }
+			if full then db.learnFull[sk] = true end
+		end
+	end
+	if changed and CraftPlan.NeedRefresh then CraftPlan.NeedRefresh() end
+end
+
+local trainerFrame = CreateFrame("Frame")
+trainerFrame:RegisterEvent("TRAINER_SHOW")
+trainerFrame:RegisterEvent("TRAINER_UPDATE")
+trainerFrame:SetScript("OnEvent", function() pcall(ScanTrainer) end)
+
+----------------------------------------------------------------------------------------------
+-- Рецепты-предметы, которые продают торговцы вашей фракции: [профессия][название] = { item, vendors }.
+-- ctx.taught[профессия][название] — любой рецепт-предмет (с мобов, за репутацию): у учителя его нет.
+-- Список предметов-рецептов собирает раздел «Торговцы рецептами» (CraftPlan.recipeItems)
+-- ctx.owned[профессия][название] = { item, where } — рецепт-предмет уже лежит у вас (сумки, банк)
+local function OwnedWhere(item)
+	if BagCount({ id = item }) > 0 then return "в сумках" end
+	local bank = DB().bank
+	if bank and bank[item] then return "в банке" end
+end
+local function Books(ctx)
+	local books = {}
+	local Townsfolk = QuestieLoader and QuestieLoader:ImportModule("Townsfolk")
+	for _, r in ipairs(CraftPlan.recipeItems or {}) do
+		ctx.taught[r.prof] = ctx.taught[r.prof] or {}
+		ctx.taught[r.prof][r.name] = true
+		local where = ctx.profs[r.prof] and OwnedWhere(r.item)
+		if where then
+			ctx.owned[r.prof] = ctx.owned[r.prof] or {}
+			ctx.owned[r.prof][r.name] = { item = r.item, where = where }
+		end
+		if ctx.profs[r.prof] and not (books[r.prof] and books[r.prof][r.name]) then
+			local ok, set = false, nil
+			if Townsfolk and Townsfolk.PopulateVendors then ok, set = pcall(Townsfolk.PopulateVendors, Townsfolk, { r.item }, {}) end
+			if ok and set and next(set) then
+				local list = {}
+				for npc in pairs(set) do list[#list + 1] = npc end
+				books[r.prof] = books[r.prof] or {}
+				books[r.prof][r.name] = { item = r.item, vendors = list }
+			end
+		end
+	end
+	return books
+end
+
+-- С какого навыка учится рецепт-предмет: строка подсказки «Требуется: Кулинария (125)».
+-- Если предмета нет в кэше игры, подсказка запросит его у сервера — узнаем при следующем расчёте
+local routeTip
+local function BookReq(item, prof)
+	local db = DB()
+	db.bookReq = db.bookReq or {}
+	if db.bookReq[item] then return db.bookReq[item] end
+	routeTip = routeTip or CreateFrame("GameTooltip", "CraftPlanRouteTip", UIParent, "GameTooltipTemplate")
+	routeTip:SetOwner(UIParent, "ANCHOR_NONE")
+	routeTip:SetHyperlink("item:" .. item)
+	for i = 2, routeTip:NumLines() do
+		local fs = _G["CraftPlanRouteTipTextLeft" .. i]
+		local text = fs and fs:GetText()
+		local n = text and text:find(prof, 1, true) and tonumber(text:match("%((%d+)%)"))
+		if n then db.bookReq[item] = n break end
+	end
+	routeTip:Hide()
+	return db.bookReq[item]
+end
+
+----------------------------------------------------------------------------------------------
+-- Источник материала: самый лёгкий из известных — { kind, cost, rec, prof, ore }
+local function Source(id, ctx, depth)
+	local memo = ctx.src[id]
+	if memo then return memo end
+	local best = { kind = "ah", cost = COST.ah }
+	if ctx.visiting[id] then return best end
+	ctx.visiting[id] = true
+	local function Try(kind, cost, extra)
+		if cost < best.cost then
+			best = { kind = kind, cost = cost }
+			for k, v in pairs(extra or {}) do best[k] = v end
+		end
+	end
+	local r = { id = id }
+	if VendorInfo(r) then Try("vendor", COST.vendor) end
+	local q = ctx.q
+	if q then
+		-- руду торговцы не продают, хотя в базе Questie они бывают записаны (как и в 6е)
+		local ok, v = false, nil
+		if not MinedNodes(id) then ok, v = pcall(q.QueryItemSingle, id, "vendors") end
+		if ok and v and next(v) then Try("vendor", COST.vendor) end
+		ok, v = pcall(q.QueryItemSingle, id, "objectDrops")
+		if ok then v = GatherObjects(q, v) end
+		if ok and v and next(v) then Try("object", COST.object) end
+		ok, v = pcall(q.QueryItemSingle, id, "npcDrops")
+		if ok and v and next(v) then Try("mob", COST.mob) end
+	end
+	if MinedNodes(id) and ctx.lines["Горное дело"] then Try("ore", COST.ore) end
+	if FishInfo(r) then Try("fish", COST.fish) end
+	if ctx.gems[id] then Try("gem", COST.gem, { ore = ctx.gems[id] }) end
+	local pr = (depth < 3) and ctx.producers[id]
+	if pr then
+		local c = COST.craft
+		for _, rg in ipairs(pr.rec.reag) do c = c + rg.count * Source(rg.id, ctx, depth + 1).cost end
+		if pr.learnFrom then c = c + 0.5 end -- ещё выучить
+		Try("craft", c / pr.rec.made, { rec = pr.rec, prof = pr.prof, learnFrom = pr.learnFrom, guess = pr.guess })
+	end
+	ctx.visiting[id] = nil
+	ctx.src[id] = best
+	return best
+end
+
+local function CraftCost(rec, ctx)
+	local c = COST.craft
+	for _, rg in ipairs(rec.reag) do c = c + rg.count * Source(rg.id, ctx, 0).cost end
+	return c
+end
+
+-- Зоны, где GatherMate знает эту жилу/траву: { {зона, штук}, ... } по убыванию
+local function NodeZones(dbName, nodeID)
+	local nodes = _G[dbName]
+	if not (GatherMate and GatherMate.zoneData and nodes) then return {} end
+	local list, seen = {}, {}
+	for zoneName, zd in pairs(GatherMate.zoneData) do
+		local db = zd[3] and nodes[zd[3]]
+		if db and not seen[zd[3]] then
+			seen[zd[3]] = true
+			local c = 0
+			for _, id in pairs(db) do
+				if id == nodeID then c = c + 1 end
+			end
+			if c > 0 then list[#list + 1] = { zoneName, c } end
+		end
+	end
+	table.sort(list, function(a, b) return a[2] > b[2] end)
+	return list
+end
+
+local function ZonesText(zones, n)
+	local parts = {}
+	for i = 1, math.min(n or 3, #zones) do parts[#parts + 1] = zones[i][1] end
+	return table.concat(parts, ", ")
+end
+
+----------------------------------------------------------------------------------------------
+-- Кандидаты для профессии: { rec, how, from (с какого навыка можно), craft (цена создания), switch, ... }
+local function CraftCandidates(prof, sk, rank, target, ctx)
+	local known = KnownSet(prof)
+	local learn = DB().learn and DB().learn[sk]
+	local books = ctx.books[prof] or {}
+	local list = {}
+	for _, rec in ipairs(Recipes(sk)) do
+		if not rec.cd and rec.g > rank then
+			local c = { rec = rec }
+			local own = ctx.owned[prof] and ctx.owned[prof][rec.name]
+			if rec.acq or (known and known[rec.name]) then
+				c.how, c.from = "known", 0
+			elseif own then -- рецепт уже есть: выучить с навыка из подсказки предмета
+				local req = BookReq(own.item, prof)
+				c.how, c.from, c.item, c.where = "owned", req or rec.y, own.item, own.where
+				c.reqGuess = not req
+			elseif learn and learn[rec.name] then
+				c.how, c.from, c.price = "trainer", learn[rec.name].req, learn[rec.name].cost
+			elseif books[rec.name] then
+				local b = books[rec.name]
+				c.item, c.vendors = b.item, b.vendors
+				local req = BookReq(b.item, prof)
+				c.how, c.from = req and "book" or "book?", req or rec.y
+			elseif not learn and not (ctx.taught[prof] and ctx.taught[prof][rec.name]) then
+				c.how, c.from = "guess", rec.y
+			end
+			if c.how and c.from < target and c.from < rec.g then
+				c.craft = CraftCost(rec, ctx)
+				local learnCost = 0
+				if c.how == "trainer" then learnCost = 1 + (c.price or 0) / 10000
+				elseif c.how == "owned" then learnCost = 0.3
+				elseif c.how ~= "known" then learnCost = 4 end
+				c.learnCost = learnCost
+				c.switch = learnCost + 1.5 * c.craft -- смена рецепта: выучить и начать новые материалы
+				list[#list + 1] = c
+			end
+		end
+	end
+	return list
+end
+
+-- Жилы или травы: оранжевые до минимума+25, дальше шанс убывает до минимума+100
+local function NodeCandidates(g, rank, target)
+	local list = {}
+	local mins = GatherMate and GatherMate.nodeMinHarvest and GatherMate.nodeMinHarvest[g.kind]
+	local names = GatherMate and GatherMate.reverseNodeIDs and GatherMate.reverseNodeIDs[g.kind]
+	if not (mins and names) then return list end
+	local oreOf = {}
+	for ore, nodes in pairs(ORE_NODES) do
+		for _, n in ipairs(nodes) do oreOf[n] = ore end
+	end
+	for id, min in pairs(mins) do
+		if names[id] and min + 100 > rank and min < target then
+			local zones = NodeZones(g.db, id)
+			if #zones > 0 then
+				list[#list + 1] = { node = id, ore = oreOf[id], zones = zones, how = "known", from = min,
+					rec = { name = names[id], y = min + 25, g = min + 100 }, craft = 1, switch = 2 }
+			end
+		end
+	end
+	return list
+end
+
+-- Сколько раз рецепт создаётся из того, что уже есть (сумки, хранилище, банк), без промежуточного
+local function StockN(rec)
+	local n
+	for _, rg in ipairs(rec.reag or {}) do
+		local k = math.floor(TotalCount({ id = rg.id }) / rg.count)
+		if not n or k < n then n = k end
+	end
+	return n or 0
+end
+
+-- Лучший путь по очкам навыка. Возвращает seq[навык] = номер кандидата и навык, где путь оборвался.
+-- Пока на рецепт хватает материалов из запаса (c.stock созданий), создание стоит только COST.craft:
+-- то, что уже лежит у вас, выгоднее пустить в дело, чем добывать материалы на другой рецепт
+local function BestPath(cands, r0, target)
+	local prev, choice, prevUsed = {}, {}, {}
+	local prevBest, prevBestK = 0, nil
+	local stop = target
+	for r = r0, target - 1 do
+		local cur, ch, used = {}, {}, {}
+		local best, bestK = math.huge, nil
+		for k, c in ipairs(cands) do
+			local p = (c.from <= r) and Chance(c.rec.y, c.rec.g, r) or 0
+			if p >= MIN_CHANCE then
+				local stock = c.stock or 0
+				local stay = prev[k]
+				local sw = prevBest + ((stock > 0) and (c.learnCost or 0) + 1.5 * COST.craft or c.switch)
+				local u0 = 0
+				if stay and stay <= sw then
+					cur[k], ch[k], u0 = stay, k, prevUsed[k] or 0
+				else
+					cur[k], ch[k] = sw, prevBestK or 0
+				end
+				cur[k] = cur[k] + ((u0 < stock) and COST.craft or c.craft) / p
+				used[k] = u0 + 1 / p
+				if cur[k] < best then best, bestK = cur[k], k end
+			end
+		end
+		if not bestK then stop = r break end
+		choice[r] = ch
+		prev, prevBest, prevBestK, prevUsed = cur, best, bestK, used
+	end
+	local seq, k = {}, prevBestK
+	for r = stop - 1, r0, -1 do
+		seq[r] = k
+		k = choice[r][k]
+	end
+	return seq, stop
+end
+
+-- Отрезки: подряд один рецепт; режем и на потолках навыка (там нужен учитель)
+local function Segments(cands, seq, r0, stop, max)
+	local cuts = {}
+	for _, t in ipairs(TIERS) do
+		if t[1] >= max then cuts[t[1]] = true end
+	end
+	local segs, cur = {}, nil
+	for r = r0, stop - 1 do
+		local k = seq[r]
+		if not cur or cur.k ~= k or cuts[r] then
+			cur = { k = k, c = cands[k], from = r, to = r, expected = 0, orange = 0 }
+			segs[#segs + 1] = cur
+		end
+		local p = Chance(cur.c.rec.y, cur.c.rec.g, r)
+		cur.to = r + 1
+		cur.expected = cur.expected + 1 / p
+		if p >= 1 then cur.orange = cur.orange + 1 end
+	end
+	for _, s in ipairs(segs) do
+		s.times = s.orange + math.ceil((s.expected - s.orange) * MARGIN - 0.001)
+		s.chance = s.expected > s.orange + 0.001
+	end
+	return segs
+end
+
+----------------------------------------------------------------------------------------------
+-- Расчёт маршрутов всех профессий (запоминается, пока не изменились навыки и знания)
+local cache, cacheSig
+
+local function Signature(lines)
+	local parts = { UnitLevel("player"), CraftPlan.recipeItems and #CraftPlan.recipeItems or 0, QDB() and 1 or 0 }
+	local names = {}
+	for name in pairs(lines) do
+		if SKILL_ID[name] or GATHER[name] or name == "Снятие шкур" then names[#names + 1] = name end
+	end
+	table.sort(names)
+	local db = DB()
+	for _, name in ipairs(names) do
+		local sk = SKILL_ID[name]
+		local p = db.profs[name]
+		local n = 0
+		for _ in pairs(sk and db.learn and db.learn[sk] or {}) do n = n + 1 end
+		parts[#parts + 1] = name .. lines[name].rank .. "/" .. lines[name].max .. ":" .. n .. ":" .. (p and p.recipes and #p.recipes or 0)
+	end
+	for _ in pairs(db.bookReq or {}) do parts[#parts + 1] = "b" end
+	-- запас материалов: маршрут учитывает, на что уже хватает (BestPath)
+	local h, seen = 0, {}
+	for _, name in ipairs(names) do
+		local sk = SKILL_ID[name]
+		for _, rec in ipairs(sk and Recipes(sk) or {}) do
+			if rec.g > lines[name].rank then
+				for _, rg in ipairs(rec.reag) do
+					if not seen[rg.id] then
+						seen[rg.id] = true
+						h = (h * 31 + rg.id * (TotalCount({ id = rg.id }) + 1)) % 2147483647
+					end
+				end
+			end
+		end
+	end
+	parts[#parts + 1] = "s" .. h
+	for _, r in ipairs(CraftPlan.recipeItems or {}) do
+		if BagCount({ id = r.item }) > 0 or (db.bank and db.bank[r.item]) then parts[#parts + 1] = "o" .. r.item end
+	end
+	return table.concat(parts, ";")
+end
+
+local function Compute()
+	local lines = SkillLines()
+	local sig = Signature(lines)
+	if cache and sig == cacheSig then return cache end
+	local db = DB()
+	local ctx = { q = QDB(), src = {}, visiting = {}, producers = {}, gems = {}, lines = lines, profs = {}, taught = {} }
+	for name in pairs(lines) do
+		if SKILL_ID[name] then ctx.profs[name] = true end
+	end
+	-- что вы уже умеете создавать (для цепочек «руда — слиток — изделие»)
+	for prof in pairs(ctx.profs) do
+		local known = KnownSet(prof)
+		for _, rec in ipairs(Recipes(SKILL_ID[prof])) do
+			if rec.item > 0 and not rec.cd and (rec.acq or (known and known[rec.name])) and not ctx.producers[rec.item] then
+				ctx.producers[rec.item] = { rec = rec, prof = prof }
+			end
+		end
+	end
+	ctx.owned = {}
+	ctx.books = Books(ctx) -- заодно ctx.taught: рецепты, которые учатся по предмету
+	-- чего ещё не умеете, но выучите у учителя (например, выплавка тория при горном деле 167):
+	-- промежуточное лучше создать самому, чем искать на аукционе
+	for prof in pairs(ctx.profs) do
+		local sk = SKILL_ID[prof]
+		local learn = db.learn and db.learn[sk]
+		local taught = ctx.taught[prof] or {}
+		for _, rec in ipairs(Recipes(sk)) do
+			if rec.item > 0 and not rec.cd and not ctx.producers[rec.item] then
+				local from, own
+				own = ctx.owned[prof] and ctx.owned[prof][rec.name]
+				if own then
+					from = BookReq(own.item, prof) or rec.y
+				elseif learn and learn[rec.name] then
+					from = learn[rec.name].req
+				elseif not learn and not taught[rec.name] then
+					from = rec.y
+				end
+				if from then ctx.producers[rec.item] = { rec = rec, prof = prof, learnFrom = from, guess = not learn and not own, owned = own and own.where } end
+			end
+		end
+	end
+	-- камни из вашего журнала просеиваний
+	local journal = db.prospect and db.prospect.ore
+	for ore, t in pairs(journal or {}) do
+		for gem in pairs(t.gems or {}) do ctx.gems[gem] = ctx.gems[gem] or ore end
+	end
+	-- чего нет в журнале — что обычно даёт руда, которую ваше ювелирное дело уже просеивает
+	local jc = lines["Ювелирное дело"]
+	for ore, gems in pairs(jc and CraftPlan.PROSPECT or {}) do
+		if jc.rank >= CraftPlan.PROSPECT_REQ[ore] then
+			for _, gem in ipairs(gems) do
+				local cur = ctx.gems[gem]
+				-- из журнала не перебиваем; из таблицы — берём руду попроще
+				if not cur or (ctx.gemUsual and ctx.gemUsual[gem] and CraftPlan.PROSPECT_REQ[ore] < CraftPlan.PROSPECT_REQ[cur]) then
+					ctx.gems[gem] = ore
+					ctx.gemUsual = ctx.gemUsual or {}
+					ctx.gemUsual[gem] = true
+				end
+			end
+		end
+	end
+
+	local result = {}
+	local names = {}
+	for name in pairs(lines) do
+		if SKILL_ID[name] or GATHER[name] or name == "Снятие шкур" then names[#names + 1] = name end
+	end
+	table.sort(names)
+	for _, prof in ipairs(names) do
+		local l = lines[prof]
+		local cap, nextT = LevelCap(UnitLevel("player"))
+		local target = math.max(l.rank, math.min(cap, MAX_SKILL))
+		local route = { prof = prof, rank = l.rank, max = l.max, target = target, nextTier = nextT }
+		if l.rank < target and prof ~= "Снятие шкур" then
+			local cands = {}
+			local sk = SKILL_ID[prof]
+			if sk then
+				route.known = KnownSet(prof) ~= nil
+				route.learnSeen = db.learn and db.learn[sk] ~= nil
+				route.learnFull = db.learnFull and db.learnFull[sk]
+				cands = CraftCandidates(prof, sk, l.rank, target, ctx)
+			end
+			if GATHER[prof] then
+				for _, c in ipairs(NodeCandidates(GATHER[prof], l.rank, target)) do cands[#cands + 1] = c end
+				route.gather = GATHER[prof]
+			end
+			for _, c in ipairs(cands) do
+				if c.rec and c.rec.reag and not c.node then c.stock = StockN(c.rec) end
+			end
+			local seq, stop = BestPath(cands, l.rank, target)
+			route.stop = stop
+			route.segs = Segments(cands, seq, l.rank, stop, l.max)
+			route.cands = cands -- для «или»: другие рецепты на том же навыке
+		end
+		result[#result + 1] = route
+	end
+	cache, cacheSig = { routes = result, ctx = ctx }, sig
+	return cache
+end
+
+-- Материалы отрезка с учётом запаса: промежуточное создаётся из сырья, сырьё — в список «добыть».
+-- stock — общий для всех профессий остаток (сумки и банк), чтобы одно и то же не считалось дважды
+-- unsure — промежуточное делается по рецепту, который у учителя не подтверждён («примерно»):
+-- такое сырьё дополнительно не попадает в out.sure (список «Где фармить»)
+local function Expand(id, amount, ctx, stock, out, depth, unsure)
+	if stock[id] == nil then stock[id] = TotalCount({ id = id }) end
+	local use = math.min(stock[id], amount)
+	stock[id] = stock[id] - use
+	amount = amount - use
+	out.have[id] = (out.have[id] or 0) + use
+	if amount <= 0 then return end
+	local src = Source(id, ctx, 0)
+	if src.kind == "craft" and depth < 3 then
+		local times = math.ceil(amount / src.rec.made)
+		local key = src.rec.name
+		local cr = out.crafts[key]
+		if not cr then
+			cr = { rec = src.rec, prof = src.prof, times = 0, learnFrom = src.learnFrom, guess = src.guess, owned = src.owned }
+			out.crafts[key] = cr
+			out.craftOrder[#out.craftOrder + 1] = key
+		end
+		cr.times = cr.times + times
+		for _, rg in ipairs(src.rec.reag) do Expand(rg.id, rg.count * times, ctx, stock, out, depth + 1, unsure or src.guess) end
+		return
+	end
+	out.need[id] = (out.need[id] or 0) + amount
+	if out.sure and not unsure then out.sure[id] = (out.sure[id] or 0) + amount end
+end
+
+local function SourceText(id, src)
+	local r = { id = id }
+	local v = VendorInfo(r)
+	if src.kind == "vendor" then return "|cff88ff88купить у торговца" .. (v and (" " .. (v.npc or "")) or "") .. "|r" end
+	if src.kind == "ore" then
+		local zones = MinedZones(id)
+		return "|cffccccccжилы" .. (zones and zones[1] and (": " .. ZonesText(zones)) or "") .. "|r"
+	end
+	if src.kind == "fish" then
+		local _, where = FishInfo(r)
+		return "|cff66ddffловится: " .. (where or "?") .. "|r"
+	end
+	if src.kind == "gem" then return "|cff66ccffпросеять: " .. ItemName(src.ore) .. "|r" end -- руда из журнала или обычная
+	if src.kind == "craft" then
+		return "|cff66ccffсоздать: " .. src.rec.name .. " (" .. src.prof .. ")"
+			.. (src.learnFrom and (src.owned and (", рецепт " .. src.owned .. " — выучить с навыка " .. src.learnFrom)
+				or (", выучить у учителя " .. (src.guess and "примерно " or "") .. "с навыка " .. src.learnFrom)) or "") .. "|r"
+	end
+	if src.kind == "object" then return "|cffccccccсобрать (щёлкните — где)|r" end
+	if src.kind == "mob" then return "|cffccccccс мобов (щёлкните — где)|r" end
+	return "|cffff8040аукцион или щёлкните — где взять|r"
+end
+
+----------------------------------------------------------------------------------------------
+-- Вкладка «Маршрут» в окне карты крафта. По каждой профессии: шкала навыка от текущего до потолка для вашего уровня,
+-- разбитая на отрезки-рецепты (оранжевая часть — навык точно, жёлтая — с шансом, бледный отрезок —
+-- рецепт ещё не выучен), под шкалой значки рецептов, отметки потолков; ниже — карточка «Сейчас»:
+-- что делать первым, материалы «есть/нужно». Внизу — что собрать на весь маршрут, по источникам.
+-- Подробности — в подсказках, щелчки — как в плане (где взять, учителя, выбрать рецепт).
+local BAR_H = 16
+local SEG_ICON = 22
+local CARD_ICON = 36
+local MAT_ICON = 28
+local WHITE = "Interface\\Buttons\\WHITE8X8"
+local KIND_TITLE = { ore = "Жилы", object = "Собрать", mob = "С мобов", fish = "Рыбалка", gem = "Просеять", vendor = "Купить у торговца", ah = "Аукцион или с мобов" }
+
+local ui -- { scroll, content, pools }
+
+local function TipEnter(self)
+	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+	if self.link then
+		GameTooltip:SetHyperlink(self.link)
+		if self.title or self.lines then GameTooltip:AddLine(" ") end
+	end
+	if self.title then GameTooltip:AddLine(self.title) end
+	for _, l in ipairs(self.lines or {}) do GameTooltip:AddLine(l, 1, 1, 1, true) end
+	GameTooltip:Show()
+end
+local function TipLeave() GameTooltip:Hide() end
+local function OnClick(self) if self.action then self.action() end end
+
+-- Пулы: элементы создаются один раз и переиспользуются при каждой перерисовке
+local function Pool(kind, make)
+	local p = ui.pools[kind]
+	if not p then
+		p = { n = 0 }
+		ui.pools[kind] = p
+	end
+	p.n = p.n + 1
+	local f = p[p.n]
+	if not f then
+		f = make()
+		p[p.n] = f
+	end
+	f:Show()
+	return f
+end
+local function ResetPools()
+	for _, p in pairs(ui.pools) do
+		for i = 1, #p do p[i]:Hide() end
+		p.n = 0
+	end
+end
+
+local function Text(text, x, y, font, width)
+	font = font or "GameFontHighlightSmall"
+	local fs = Pool("text:" .. font, function() return ui.content:CreateFontString(nil, "OVERLAY", font) end)
+	fs:ClearAllPoints()
+	fs:SetPoint("TOPLEFT", ui.content, "TOPLEFT", x, y)
+	fs:SetWidth(width or 0)
+	fs:SetJustifyH("LEFT")
+	fs:SetText(text)
+	return fs
+end
+
+-- Строка-кнопка (предупреждение, «выучить», «купить рецепт»)
+local function TextButton(text, x, y, width, opts)
+	local b = Pool("tbtn", function()
+		local b = CreateFrame("Button", nil, ui.content)
+		b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		b.text:SetPoint("LEFT", b, "LEFT", 0, 0)
+		b.text:SetJustifyH("LEFT")
+		b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+		b:SetScript("OnEnter", TipEnter)
+		b:SetScript("OnLeave", TipLeave)
+		b:SetScript("OnClick", OnClick)
+		return b
+	end)
+	b.text:SetFontObject(opts.font or "GameFontHighlightSmall")
+	b.text:SetText(text)
+	b.text:SetWidth(width)
+	b:SetWidth(width)
+	b:SetHeight(math.max(14, b.text:GetStringHeight() + 2))
+	b:ClearAllPoints()
+	b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", x, y)
+	b.link, b.title, b.lines, b.action = opts.link, opts.title, opts.lines, opts.action
+	return b
+end
+
+local function Icon(tex, x, y, size, opts)
+	local b = Pool("icon", function()
+		local b = CreateFrame("Button", nil, ui.content)
+		b.tex = b:CreateTexture(nil, "ARTWORK")
+		b.tex:SetAllPoints(b)
+		b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+		b.count:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 1)
+		b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
+		b:SetScript("OnEnter", TipEnter)
+		b:SetScript("OnLeave", TipLeave)
+		b:SetScript("OnClick", OnClick)
+		return b
+	end)
+	b:SetWidth(size)
+	b:SetHeight(size)
+	b:ClearAllPoints()
+	b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", x, y)
+	b.tex:SetTexture(tex or "Interface\\Icons\\INV_Misc_QuestionMark")
+	b.tex:SetDesaturated(opts.gray and true or false)
+	b:SetAlpha(opts.alpha or 1)
+	b.count:SetText(opts.count or "")
+	b.link, b.title, b.lines, b.action = opts.link, opts.title, opts.lines, opts.action
+	return b
+end
+
+local function Rect(x, y, w, h, r, g, b, a)
+	local t = Pool("rect", function() return ui.content:CreateTexture(nil, "BORDER") end)
+	t:SetTexture(WHITE)
+	t:SetVertexColor(r, g, b, a or 1)
+	t:ClearAllPoints()
+	t:SetPoint("TOPLEFT", ui.content, "TOPLEFT", x, y)
+	t:SetWidth(math.max(1, w))
+	t:SetHeight(h)
+	return t
+end
+
+-- Отрезок шкалы: оранжевая часть слева, жёлтая справа; невыученный рецепт — бледнее
+local function Segment(x, y, w, frac, learned, opts)
+	local b = Pool("seg", function()
+		local b = CreateFrame("Button", nil, ui.content)
+		b.o = b:CreateTexture(nil, "ARTWORK")
+		b.o:SetTexture(WHITE)
+		b.o:SetVertexColor(1, 0.5, 0.15)
+		b.c = b:CreateTexture(nil, "ARTWORK")
+		b.c:SetTexture(WHITE)
+		b.c:SetVertexColor(0.95, 0.85, 0.1)
+		b:SetHighlightTexture(WHITE)
+		b:GetHighlightTexture():SetVertexColor(1, 1, 1, 0.3)
+		b:SetScript("OnEnter", TipEnter)
+		b:SetScript("OnLeave", TipLeave)
+		b:SetScript("OnClick", OnClick)
+		return b
+	end)
+	b:ClearAllPoints()
+	b:SetPoint("TOPLEFT", ui.content, "TOPLEFT", x, y)
+	b:SetWidth(math.max(2, w))
+	b:SetHeight(BAR_H)
+	local ow = math.floor(w * frac + 0.5)
+	b.o:ClearAllPoints()
+	b.o:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+	b.o:SetPoint("BOTTOMLEFT", b, "BOTTOMLEFT", 0, 0)
+	b.o:SetWidth(math.max(1, ow))
+	if ow > 0 then b.o:Show() else b.o:Hide() end
+	b.c:ClearAllPoints()
+	b.c:SetPoint("TOPRIGHT", b, "TOPRIGHT", 0, 0)
+	b.c:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 0, 0)
+	b.c:SetWidth(math.max(1, w - ow))
+	if w - ow > 0 then b.c:Show() else b.c:Hide() end
+	b:SetAlpha(learned and 1 or 0.45)
+	b.link, b.title, b.lines, b.action = opts.link, opts.title, opts.lines, opts.action
+	return b
+end
+
+----------------------------------------------------------------------------------------------
+-- Как получить рецепт отрезка: текст и действие по щелчку (nil — уже выучен)
+local function LearnInfo(prof, c, ctx)
+	if c.how == "known" then return nil end
+	if c.how == "trainer" then
+		return "|cffffd200Выучить у учителя|r с навыка " .. c.from .. ", " .. Money(c.price or 0),
+			function() ShowTrainers(prof) end
+	end
+	if c.how == "owned" then
+		return "|cffffd200Рецепт " .. c.where .. ":|r " .. ItemName(c.item) .. " — выучить "
+			.. (c.reqGuess and "примерно " or "") .. "с навыка " .. c.from .. (c.where == "в банке" and " (заберите из банка)" or ""),
+			function() if WhereToGet_ShowItem then WhereToGet_ShowItem(c.item) end end
+	end
+	if c.how == "book" or c.how == "book?" then
+		local vendors = {}
+		for i = 1, math.min(2, #c.vendors) do
+			local ok, n = false, nil
+			if ctx.q then ok, n = pcall(ctx.q.QueryNPCSingle, c.vendors[i], "name") end
+			vendors[#vendors + 1] = (ok and n) or "?"
+		end
+		return "|cffffd200Купить рецепт|r " .. ItemName(c.item) .. " у " .. table.concat(vendors, ", ")
+			.. (c.how == "book" and (" (с навыка " .. c.from .. ")") or ""),
+			function() if WhereToGet_ShowItem then WhereToGet_ShowItem(c.item) end end
+	end
+	return "|cffffd200Выучить у учителя|r — примерно с навыка " .. c.from .. " (точно — когда откроете окно учителя)",
+		function() ShowTrainers(prof) end
+end
+
+local function SegTimes(s)
+	if s.chance then return "~" .. math.ceil(s.expected - 0.001) .. " раз" end
+	return s.times .. " раз"
+end
+
+-- Подсказка отрезка
+-- Сколько раз можно создать рецепт прямо из сумок и банка (без промежуточного)
+local function StockCrafts(rec)
+	local n
+	for _, rg in ipairs(rec.reag) do
+		local k = math.floor(TotalCount({ id = rg.id }) / rg.count)
+		if not n or k < n then n = k end
+	end
+	return n or 0
+end
+
+-- Другие рецепты, которыми можно качать с начала отрезка: дешевле по цене очка — выше.
+-- Рецепт, на который уже есть материалы, — первым
+local ALT_COUNT = 4
+local function Alternatives(route, s)
+	local list, seen = {}, { [s.c.rec.name] = true }
+	for _, c in ipairs(route.cands or {}) do
+		local p = (c.from <= s.from) and Chance(c.rec.y, c.rec.g, s.from) or 0
+		if p >= MIN_CHANCE and not seen[c.rec.name] then
+			seen[c.rec.name] = true
+			local stock = c.node and 0 or StockCrafts(c.rec)
+			list[#list + 1] = { c = c, p = p, price = c.craft / p, stock = stock }
+		end
+	end
+	table.sort(list, function(a, b)
+		if (a.stock > 0) ~= (b.stock > 0) then return a.stock > 0 end
+		return a.price < b.price
+	end)
+	for i = #list, ALT_COUNT + 1, -1 do list[i] = nil end
+	return list
+end
+
+local function AltText(a, r)
+	local kind = KindAt(a.c.rec.y, a.c.rec.g, r)
+	local text = Hex(COLOR[kind]) .. a.c.rec.name .. "|r"
+	if a.c.node then return text end
+	if a.stock > 0 then text = text .. " |cff40ff40(есть материалы на " .. a.stock .. ")|r" end
+	if a.c.how ~= "known" then text = text .. " |cff999999(не выучен)|r" end
+	return text
+end
+
+local function SegLines(route, s, ctx)
+	local c, rec = s.c, s.c.rec
+	local lines = {}
+	lines[#lines + 1] = "Навык " .. s.from .. "-" .. s.to .. ": " .. SegTimes(s)
+		.. (s.orange > 0 and (", из них " .. s.orange .. " точно (оранжевые)") or "")
+		.. (s.chance and (", остальное с шансом — материалы с запасом на " .. s.times) or "")
+	lines[#lines + 1] = "|cffff8040Оранжевый до " .. rec.y .. "|r, |cff999999серый с " .. rec.g .. "|r."
+	if c.node then
+		lines[#lines + 1] = "Где GatherMate видел: " .. ZonesText(c.zones, 6) .. "."
+	else
+		local per = {}
+		for _, rg in ipairs(rec.reag) do per[#per + 1] = ItemName(rg.id) .. " x" .. rg.count end
+		lines[#lines + 1] = "На одно создание: " .. table.concat(per, ", ") .. "."
+		local text = LearnInfo(route.prof, c, ctx)
+		if text then lines[#lines + 1] = text .. "." end
+		if c.how == "known" then lines[#lines + 1] = "|cff999999Щелчок при открытом окне профессии — выбрать рецепт.|r" end
+	end
+	local alts = Alternatives(route, s)
+	if alts[1] then
+		lines[#lines + 1] = "|cffffd200Или на навыке " .. s.from .. ":|r"
+		for _, a in ipairs(alts) do lines[#lines + 1] = "  " .. AltText(a, s.from) end
+	end
+	return lines
+end
+
+local function SegIcon(route, c)
+	if c.node then return c.ore and GetItemIcon(c.ore) or route.gather.icon end
+	return c.rec.item > 0 and GetItemIcon(c.rec.item) or "Interface\\Icons\\Trade_Engraving"
+end
+
+local function SegLink(c)
+	if c.node then return nil end
+	return c.rec.item > 0 and ("item:" .. c.rec.item) or ("spell:" .. c.rec.spell)
+end
+
+local function SegAction(route, s, ctx)
+	local c = s.c
+	if c.node then return nil end
+	if c.how == "known" then return function() SelectRecipeByName(route.prof, c.rec.name, s.times) end end
+	local _, action = LearnInfo(route.prof, c, ctx)
+	return action
+end
+
+----------------------------------------------------------------------------------------------
+-- Для «Где фармить»: недостающее только по рецептам, которые у вас есть или подтверждены у учителя/торговца
+local farmNeed, farmOrder = {}, {}
+
+-- Одна профессия: заголовок, предупреждения, шкала, значки, карточка «Сейчас». Возвращает новый y
+local function DrawProf(route, ctx, stock, total, totalOrder, y, W)
+	local prof = route.prof
+	local level = UnitLevel("player")
+	local segs = route.segs or {}
+
+	-- материалы всего маршрута профессии (общий остаток сумок и банка тратится по порядку);
+	-- считаются и у свёрнутой профессии — нужны общему списку внизу
+	local firstOut
+	for k, s in ipairs(segs) do
+		if not s.c.node then
+			local out = { have = {}, need = {}, crafts = {}, craftOrder = {}, sure = {} }
+			for _, rg in ipairs(s.c.rec.reag) do Expand(rg.id, rg.count * s.times, ctx, stock, out, 0) end
+			if k == 1 then firstOut = out end
+			if s.c.how ~= "guess" then
+				for id, n in pairs(out.sure) do
+					if not farmNeed[id] then
+						farmNeed[id] = { amount = 0 }
+						farmOrder[#farmOrder + 1] = id
+					end
+					farmNeed[id].amount = farmNeed[id].amount + n
+				end
+			end
+			for id, n in pairs(out.need) do
+				if not total[id] then
+					total[id] = { amount = 0, profs = {}, kind = Source(id, ctx, 0).kind }
+					totalOrder[#totalOrder + 1] = id
+				end
+				total[id].amount = total[id].amount + n
+				total[id].profs[prof] = true
+			end
+		end
+	end
+
+	-- заголовок: плюс/минус и название — щелчок сворачивает профессию (db.routeFold)
+	local db = DB()
+	db.routeFold = db.routeFold or {}
+	local folded = db.routeFold[prof]
+	local function Toggle()
+		db.routeFold[prof] = not db.routeFold[prof]
+		CraftPlan.RouteRefresh()
+	end
+	local foldTip = { folded and "Щёлкните — развернуть." or "Щёлкните — свернуть." }
+	Icon(folded and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up", 8, y - 1, 18, { action = Toggle, lines = foldTip })
+	TextButton(prof, 30, y, 185, { font = "GameFontNormalLarge", action = Toggle, lines = foldTip })
+	Text("|cffffffff" .. route.rank .. "|r / " .. route.max .. (route.segs and route.target > route.rank and ("   |cff999999цель|r |cff40ff40" .. route.target .. "|r") or ""),
+		220, y - 3, "GameFontHighlight")
+	-- навык дошёл до потолка вашего уровня: дальше — когда подрастёте
+	local capText
+	if route.rank < MAX_SKILL and route.rank >= route.target and prof ~= "Снятие шкур" then
+		local t = route.nextTier
+		capText = "|cff40ff40Потолок для вашего уровня: " .. route.target .. ".|r"
+			.. (t and (" Дальше — до " .. t[1] .. " с " .. t[2] .. "-го уровня (у учителя).") or "")
+	end
+	if folded then
+		-- свёрнуто: только первый шаг одной строкой
+		local first = segs[1]
+		if capText then
+			Text(capText, 360, y - 4, "GameFontHighlightSmall", W - 370)
+		elseif first then
+			Text("|cff999999сейчас:|r " .. (first.c.node and (route.gather.verb .. ": ") or "") .. first.c.rec.name .. " — " .. SegTimes(first), 360, y - 4, "GameFontHighlightSmall", W - 370)
+		end
+		return y - 26
+	end
+	y = y - 24
+
+	if prof == "Снятие шкур" then
+		local lvl = (route.rank < 100) and (math.floor(route.rank / 10) + 10) or math.floor(route.rank / 5)
+		Text("Снимайте шкуры с животных до |cffffffff" .. lvl .. "|r уровня — навык растёт тем вернее, чем ближе их уровень к этому.", 20, y)
+		return y - 22
+	end
+	if route.rank >= MAX_SKILL then
+		Text("|cff40ff40Навык на максимуме.|r", 20, y)
+		return y - 22
+	end
+	if capText then
+		Text(capText, 20, y)
+		return y - 22
+	end
+	-- предупреждения
+	local function Warn(text, opts)
+		local b = TextButton(text, 20, y, W - 40, opts or {})
+		y = y - b:GetHeight() - 2
+	end
+	if SKILL_ID[prof] and not route.known then
+		Warn("|cffff8040Откройте окно профессии|r — аддон не знает, какие рецепты уже выучены.")
+	end
+	if SKILL_ID[prof] and not route.learnSeen then
+		Warn("|cffff8040Маршрут примерный:|r откройте окно учителя этой профессии (с «Недоступными») — аддон запишет, с какого навыка учатся рецепты. Щёлкните — учителя на карте.",
+			{ action = function() ShowTrainers(prof) end,
+				lines = { "Без учителя считается, что рецепт учится с жёлтого порога (оранжевым не бывает), поэтому созданий в маршруте больше, чем будет на деле." } })
+	elseif SKILL_ID[prof] and not route.learnFull then
+		Warn("|cffff8040В окне учителя включите показ «Недоступные»|r — тогда аддон увидит и рецепты на будущее.")
+	end
+
+	local x0, barW = 20, W - 40
+	local span = math.max(1, route.target - route.rank)
+	local function X(r) return x0 + math.floor((r - route.rank) / span * barW + 0.5) end
+
+	-- потолки: подпись над шкалой
+	y = y - 12
+	local caps = {}
+	local cap = route.max
+	for _, t in ipairs(TIERS) do
+		if t[1] >= cap and t[1] > route.rank and t[1] < route.target then
+			local nextCap, nextLevel
+			for _, u in ipairs(TIERS) do
+				if u[1] > t[1] then nextCap, nextLevel = u[1], u[2] break end
+			end
+			if nextCap then
+				caps[#caps + 1] = { at = t[1], to = nextCap, level = nextLevel }
+				cap = nextCap
+			end
+		end
+	end
+	if route.max <= route.rank and route.max < MAX_SKILL then
+		-- уже на потолке: отметка в самом начале
+		for _, t in ipairs(TIERS) do
+			if t[1] > route.max then table.insert(caps, 1, { at = route.rank, to = t[1], level = t[2] }) break end
+		end
+	end
+	for _, cp in ipairs(caps) do
+		local ok = level >= cp.level
+		local color = ok and "|cffffd200" or "|cffff4040"
+		TextButton(color .. cp.at .. ": потолок|r", X(cp.at) - 2, y + 2, 90,
+			{ font = "GameFontNormalSmall", action = function() ShowTrainers(prof) end, title = "Потолок навыка " .. cp.at,
+				lines = { "Учитель поднимет потолок до " .. cp.to .. " (обычно с " .. cp.level .. " уровня" .. (ok and "" or (", у вас " .. level)) .. ").", "Щёлкните — учителя на карте." } })
+	end
+	y = y - 12
+
+	-- шкала
+	Rect(x0 - 1, y + 1, barW + 2, BAR_H + 2, 0, 0, 0, 0.8)
+	Rect(x0, y, barW, BAR_H, 0.25, 0.25, 0.25, 0.9)
+	for _, s in ipairs(segs) do
+		local xa, xb = X(s.from), X(s.to)
+		local len = s.to - s.from
+		Segment(xa, y, xb - xa - 1, s.orange / math.max(1, len), s.c.how == "known",
+			{ link = SegLink(s.c), title = s.c.rec.name, lines = SegLines(route, s, ctx), action = SegAction(route, s, ctx) })
+	end
+	for _, cp in ipairs(caps) do
+		Rect(X(cp.at) - 1, y + 4, 2, BAR_H + 8, 1, level >= cp.level and 0.82 or 0.25, level >= cp.level and 0 or 0.25, 1)
+	end
+	Text("|cffaaaaaa" .. route.rank .. "|r", x0, y - BAR_H - 2, "GameFontHighlightSmall")
+	local endText = Text("|cffaaaaaa" .. route.target .. "|r", 0, y - BAR_H - 2, "GameFontHighlightSmall")
+	endText:ClearAllPoints()
+	endText:SetPoint("TOPRIGHT", ui.content, "TOPLEFT", x0 + barW, y - BAR_H - 2)
+	y = y - BAR_H - 4
+
+	-- значки рецептов под началом отрезков (если помещаются)
+	local lastRight = -100
+	for _, s in ipairs(segs) do
+		local x = X(s.from)
+		if x >= lastRight + 2 then
+			Icon(SegIcon(route, s.c), x, y - 12, SEG_ICON, { alpha = (s.c.how == "known") and 1 or 0.6,
+				link = SegLink(s.c), title = s.c.rec.name, lines = SegLines(route, s, ctx), action = SegAction(route, s, ctx) })
+			lastRight = x + SEG_ICON
+		end
+	end
+	y = y - 12 - SEG_ICON - 10
+
+	if route.stop < route.target then
+		Warn("|cffff4040С навыка " .. route.stop .. " нечем качать:|r нет известных рецептов. Откройте окно учителя (с «Недоступными»). Щёлкните — учителя на карте.",
+			{ action = function() ShowTrainers(prof) end })
+	end
+
+	-- карточка «Сейчас»
+	local s = segs[1]
+	if s then
+		local c = s.c
+		Rect(14, y + 4, W - 28, 1, 0.4, 0.4, 0.4, 0.6)
+		Text("|cff66ccffСЕЙЧАС|r", 20, y - 2, "GameFontNormalSmall")
+		Icon(SegIcon(route, c), 20, y - 16, CARD_ICON, { link = SegLink(c), title = c.rec.name, lines = SegLines(route, s, ctx), action = SegAction(route, s, ctx) })
+		local tx = 20 + CARD_ICON + 10
+		local verb = c.node and (route.gather.verb .. ": ") or ""
+		Text(verb .. "|cffffffff" .. c.rec.name .. "|r", tx, y - 16, "GameFontNormal")
+		local gain = s.chance and ((s.orange > 0 and ("|cffff8040" .. s.orange .. " точно|r, затем ") or "") .. "|cffffff00с шансом|r") or "|cffff8040навык точно|r"
+		Text(SegTimes(s) .. "  |cff999999навык " .. s.from .. " - " .. s.to .. "|r   " .. gain, tx, y - 32)
+		local cy = y - 16 - CARD_ICON - 4
+		local learnText, learnAction
+		if not c.node then learnText, learnAction = LearnInfo(prof, c, ctx) end
+		if learnText then
+			local b = TextButton(learnText, tx, cy, W - tx - 20, { action = learnAction, lines = { "Щёлкните — показать на карте." } })
+			cy = cy - b:GetHeight() - 2
+		end
+		if c.node then
+			Text("|cffccccccГде: " .. ZonesText(c.zones, 4) .. "|r", tx, cy)
+			cy = cy - 16
+		else
+			-- материалы: есть / нужно
+			local mx = tx
+			Text("|cff999999нужно:|r", tx, cy - 9)
+			mx = mx + 46
+			for _, rg in ipairs(c.rec.reag) do
+				local needN, have = rg.count * s.times, TotalCount({ id = rg.id })
+				local ok = have >= needN
+				local src = Source(rg.id, ctx, 0)
+				Icon(GetItemIcon(rg.id), mx, cy, MAT_ICON, { count = (ok and "|cff40ff40" or "|cffff6060") .. have .. "/" .. needN .. "|r",
+					link = "item:" .. rg.id, lines = { "Есть " .. have .. " (сумки и банк), нужно " .. needN .. " на этот отрезок.", SourceText(rg.id, src) .. "|r", "Щелчок — где взять." },
+					action = function() WhereToGetReagent({ id = rg.id, name = ItemName(rg.id) }) end })
+				mx = mx + MAT_ICON + 30
+			end
+			cy = cy - MAT_ICON - 6
+			-- промежуточное, которое надо сделать сначала
+			if firstOut and #firstOut.craftOrder > 0 then
+				Text("|cff999999сначала:|r", tx, cy - 7)
+				local cx = tx + 56
+				for _, key in ipairs(firstOut.craftOrder) do
+					local cr = firstOut.crafts[key]
+					local lines = { cr.prof .. ". Не хватает в сумках и банке — создайте из сырья.", "Щелчок при открытом окне профессии — выбрать рецепт." }
+					if cr.learnFrom and cr.owned then
+						table.insert(lines, 1, "|cffffd200Ещё не выучено:|r рецепт " .. cr.owned .. " — выучить с навыка " .. cr.learnFrom .. ".")
+					elseif cr.learnFrom then
+						table.insert(lines, 1, "|cffffd200Ещё не выучено:|r у учителя (" .. cr.prof .. ") " .. (cr.guess and "примерно " or "") .. "с навыка " .. cr.learnFrom .. ".")
+					end
+					Icon(cr.rec.item > 0 and GetItemIcon(cr.rec.item) or nil, cx, cy, 22, { count = "x" .. cr.times, alpha = cr.learnFrom and 0.6 or 1,
+						title = cr.rec.name .. " — " .. cr.times .. " раз", lines = lines,
+						action = function() SelectRecipeByName(cr.prof, cr.rec.name, cr.times) end })
+					cx = cx + 22 + 36
+				end
+				cy = cy - 22 - 6
+			end
+		end
+		-- другие рецепты на этом навыке: цифра — на сколько созданий уже есть материалы
+		local alts = Alternatives(route, s)
+		if alts[1] then
+			Text("|cff999999или:|r", tx, cy - 7)
+			local ax = tx + 46
+			for _, a in ipairs(alts) do
+				local ac = a.c
+				local lines = {}
+				local kind = KindAt(ac.rec.y, ac.rec.g, s.from)
+				lines[#lines + 1] = "На навыке " .. s.from .. ": " .. Hex(COLOR[kind]) .. (COLOR_NAME[kind] or "") .. "|r"
+					.. (kind == "optimal" and (" ещё " .. (ac.rec.y - s.from) .. " раз точно") or "") .. ". Серый с " .. ac.rec.g .. "."
+				if ac.node then
+					lines[#lines + 1] = "Где GatherMate видел: " .. ZonesText(ac.zones, 6) .. "."
+				else
+					local per = {}
+					for _, rg in ipairs(ac.rec.reag) do per[#per + 1] = ItemName(rg.id) .. " x" .. rg.count end
+					lines[#lines + 1] = "На одно создание: " .. table.concat(per, ", ") .. "."
+					lines[#lines + 1] = (a.stock > 0) and ("|cff40ff40Из сумок и банка — " .. a.stock .. " раз.|r") or "Материалов в сумках и банке нет."
+					local lt = LearnInfo(prof, ac, ctx)
+					if lt then lines[#lines + 1] = lt .. "." end
+					if ac.how == "known" then lines[#lines + 1] = "|cff999999Щелчок при открытом окне профессии — выбрать рецепт.|r" end
+				end
+				local action
+				if ac.how == "known" and not ac.node then
+					action = function() SelectRecipeByName(prof, ac.rec.name, math.max(1, a.stock)) end
+				elseif not ac.node then
+					local _, la = LearnInfo(prof, ac, ctx)
+					action = la
+				end
+				Icon(SegIcon(route, ac), ax, cy, 24, { count = (a.stock > 0) and ("|cff40ff40" .. a.stock .. "|r") or "",
+					alpha = (ac.how == "known") and 1 or 0.5, link = SegLink(ac), title = ac.rec.name, lines = lines, action = action })
+				ax = ax + 24 + 10
+			end
+			cy = cy - 24 - 6
+		end
+		y = cy
+	end
+	return y - 14
+end
+
+-- Внизу: что собрать на весь маршрут, по источникам
+-- Где фармить: локации, где больше всего недостающих материалов маршрута. Руда — по жилам, которые
+-- видел GatherMate; остальное — по базе Questie: места сбора, мобы (не для добываемого), торговцы
+-- своей фракции. Подземелья не берём. Запоминается, пока не изменился список недостающего
+local farmCache, farmSig
+local function FarmZones(total, totalOrder, ctx)
+	local ids = {}
+	for _, id in ipairs(totalOrder) do ids[#ids + 1] = id end
+	table.sort(ids)
+	local sig = table.concat(ids, ",") .. ":" .. tostring(ctx.lines["Горное дело"] and ctx.lines["Горное дело"].rank) .. ":" .. UnitLevel("player")
+	if farmCache and sig == farmSig then return farmCache end
+	local q = ctx.q
+	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
+	local ZoneDB = QuestieLoader and QuestieLoader:ImportModule("ZoneDB")
+	local faction = (UnitFactionGroup("player") == "Horde") and "H" or "A"
+	local zones = {}
+	local function ZoneName(area)
+		local ok, n = false, nil
+		if TrackerUtils and TrackerUtils.GetZoneNameByID then ok, n = pcall(TrackerUtils.GetZoneNameByID, TrackerUtils, area) end
+		return ok and n or nil
+	end
+	local function AddPts(name, area, id, kind, pts)
+		if not name or pts <= 0 then return end
+		local z = zones[name]
+		if not z then
+			z = { name = name, items = {}, order = {}, points = 0 }
+			zones[name] = z
+		end
+		z.area = z.area or area
+		local it = z.items[id]
+		if not it then
+			it = {}
+			z.items[id] = it
+			z.order[#z.order + 1] = id
+		end
+		it[kind] = (it[kind] or 0) + pts
+		z.points = z.points + pts
+	end
+	local function AddSpawns(spawns, id, kind, perZone)
+		for area, list in pairs(spawns or {}) do
+			local dungeon = ZoneDB and ZoneDB.IsDungeonZone and ZoneDB.IsDungeonZone(area)
+			if not dungeon then AddPts(ZoneName(area), area, id, kind, perZone or #list) end
+		end
+	end
+	local mining = ctx.lines["Горное дело"] and ctx.lines["Горное дело"].rank
+	local mins = GatherMate and GatherMate.nodeMinHarvest and GatherMate.nodeMinHarvest["Mining"]
+	local function CanMine(id)
+		if not mining then return false end
+		for _, node in ipairs(MinedNodes(id)) do
+			if not (mins and mins[node]) or mining >= mins[node] then return true end
+		end
+		return false
+	end
+	for _, id in ipairs(totalOrder) do
+		if MinedNodes(id) then
+			if CanMine(id) then
+				for _, z in ipairs(MinedZones(id) or {}) do AddPts(z[1], nil, id, "ore", z[2]) end
+			end
+		elseif q then
+			local ok, src = pcall(q.QueryItem, id, { "npcDrops", "objectDrops", "vendors" })
+			if ok and src then
+				src[2] = GatherObjects(q, src[2])
+				local gathered = src[2] and next(src[2])
+				for _, obj in pairs(src[2] or {}) do
+					local ok2, sp = pcall(q.QueryObjectSingle, obj, "spawns")
+					if ok2 then AddSpawns(sp, id, "object") end
+				end
+				if not gathered then
+					for _, npc in pairs(src[1] or {}) do
+						if MobFits(q, npc) then
+							local ok2, sp = pcall(q.QueryNPCSingle, npc, "spawns")
+							if ok2 then AddSpawns(sp, id, "mob") end
+						end
+					end
+				end
+				for _, npc in pairs(src[3] or {}) do
+					local ok2, f = pcall(q.QueryNPCSingle, npc, "friendlyToFaction")
+					if ok2 and f and f:find(faction, 1, true) then
+						local ok3, sp = pcall(q.QueryNPCSingle, npc, "spawns")
+						if ok3 then AddSpawns(sp, id, "vendor", 1) end
+					end
+				end
+			end
+		end
+	end
+	local list = {}
+	for _, z in pairs(zones) do list[#list + 1] = z end
+	table.sort(list, function(a, b)
+		if #a.order ~= #b.order then return #a.order > #b.order end
+		return a.points > b.points
+	end)
+	farmCache, farmSig = list, sig
+	return list
+end
+
+local function OpenZone(area)
+	local ZoneDB = QuestieLoader and QuestieLoader:ImportModule("ZoneDB")
+	local wmf = QuestieCompat and QuestieCompat.WorldMapFrame
+	if not (area and ZoneDB and ZoneDB.GetUiMapIdByAreaId and wmf) then return end
+	pcall(function()
+		local uiMapId = ZoneDB:GetUiMapIdByAreaId(area)
+		if uiMapId then
+			wmf:Show()
+			wmf:SetMapID(uiMapId)
+		end
+	end)
+end
+
+local FARM_ZONES = 8 -- сколько локаций показать
+local FARM_KIND = { ore = "жил", object = "мест сбора", mob = "мест мобов", vendor = "торговцев" }
+
+local function DrawFarmZones(total, totalOrder, ctx, y, W)
+	if #totalOrder == 0 then return y end
+	local list = FarmZones(total, totalOrder, ctx)
+	if #list == 0 then return y end
+	Rect(10, y + 4, W - 20, 2, 1, 0.82, 0, 0.5)
+	Text("Где фармить — локации, где можно собрать больше всего для маршрута", 10, y - 4, "GameFontNormalLarge")
+	Text("|cff999999Всё, чего не хватает на маршрут до потолка вашего уровня (сумки и банк учтены). Без материалов для рецептов «примерно» (не подтверждены у учителя). Руда — только та, что вы уже можете копать; мобы — не выше вашего уровня +" .. MOB_LEVEL_UP .. ".|r", 10, y - 24, "GameFontHighlightSmall", W - 20)
+	y = y - 42
+	local here = GetRealZoneText()
+	for i = 1, math.min(FARM_ZONES, #list) do
+		local z = list[i]
+		local name = (z.name == here) and ("|cff40ff40" .. z.name .. " (вы здесь)|r") or ("|cffffd200" .. z.name .. "|r")
+		TextButton(i .. ". " .. name .. "  |cff999999— материалов: " .. #z.order .. "|r", 20, y, 260,
+			{ font = "GameFontNormal", action = z.area and function() OpenZone(z.area) end or nil,
+				lines = { z.area and "Щёлкните — открыть карту этой локации." or "Жилы по данным GatherMate (видны на карте и миникарте)." } })
+		-- материалы локации значками: в подсказке — сколько мест и какого рода
+		local x = 290
+		table.sort(z.order, function(a, b) return (total[a] and total[a].amount or 0) > (total[b] and total[b].amount or 0) end)
+		for _, id in ipairs(z.order) do
+			if x + 30 > W - 10 then break end
+			local it = z.items[id]
+			local lines = { "Не хватает на маршрут: " .. (total[id] and total[id].amount or 0) .. "." }
+			for kind, label in pairs(FARM_KIND) do
+				if it[kind] then lines[#lines + 1] = "Здесь " .. label .. ": " .. it[kind] .. "." end
+			end
+			lines[#lines + 1] = "Щелчок — где взять."
+			Icon(GetItemIcon(id), x, y + 2, 24, { count = "|cffff6060" .. (total[id] and total[id].amount or "") .. "|r", link = "item:" .. id, lines = lines,
+				action = function() WhereToGetReagent({ id = id, name = ItemName(id) }) end })
+			x = x + 30
+		end
+		y = y - 30
+	end
+	return y - 6
+end
+
+local function DrawTotals(total, totalOrder, ctx, y, W)
+	if #totalOrder == 0 then return y end
+	Rect(10, y + 4, W - 20, 2, 1, 0.82, 0, 0.5)
+	Text("Что собрать и купить на весь маршрут", 10, y - 4, "GameFontNormalLarge")
+	y = y - 28
+	local groups, order = {}, {}
+	for _, id in ipairs(totalOrder) do
+		local k = total[id].kind
+		if not groups[k] then
+			groups[k] = {}
+			order[#order + 1] = k
+		end
+		table.insert(groups[k], id)
+	end
+	table.sort(order, function(a, b) return (KIND_ORDER[a] or 9) < (KIND_ORDER[b] or 9) end)
+	local step = MAT_ICON + 44
+	for _, k in ipairs(order) do
+		Text("|cffffd200" .. (KIND_TITLE[k] or k) .. "|r", 20, y)
+		y = y - 16
+		local list = groups[k]
+		table.sort(list, function(a, b) return total[a].amount > total[b].amount end)
+		local x = 20
+		for _, id in ipairs(list) do
+			if x + step > W - 10 then
+				x = 20
+				y = y - MAT_ICON - 6
+			end
+			local t = total[id]
+			local profs = {}
+			for p in pairs(t.profs) do profs[#profs + 1] = p end
+			table.sort(profs)
+			Icon(GetItemIcon(id), x, y, MAT_ICON, { count = "|cffff6060" .. t.amount .. "|r", link = "item:" .. id,
+				lines = { "Не хватает " .. t.amount .. " на весь маршрут (сумки и банк учтены).", "Для: " .. table.concat(profs, ", ") .. ".", SourceText(id, Source(id, ctx, 0)) .. "|r", "Щелчок — где взять." },
+				action = function() WhereToGetReagent({ id = id, name = ItemName(id) }) end })
+			x = x + step
+		end
+		y = y - MAT_ICON - 10
+	end
+	return y
+end
+
+local function DrawRoute()
+	if not (ui and ui.scroll:IsShown()) then return end
+	local W = math.max(500, ui.scroll:GetWidth() - 4)
+	ui.content:SetWidth(W)
+	ResetPools()
+	local y = -6
+	Text("|cff999999Шкала: |cffff8040оранжевое|r — навык точно, |cffffff00жёлтое|r — с шансом, бледное — рецепт ещё не выучен, чёрточки — потолки (к учителю). Наведите на отрезок или значок — подробности, щёлкните — действие.|r",
+		10, y, "GameFontHighlightSmall", W - 20)
+	y = y - 30
+	if not CraftPlanRouteData then
+		Text("|cffff4040Нет таблицы рецептов CraftPlanRouteData.|r", 10, y)
+		ui.content:SetHeight(60)
+		return
+	end
+	local data = Compute()
+	local ctx = data.ctx
+	local stock, total, totalOrder = {}, {}, {}
+	farmNeed, farmOrder = {}, {}
+	for _, route in ipairs(data.routes) do
+		y = DrawProf(route, ctx, stock, total, totalOrder, y, W)
+	end
+	y = DrawTotals(total, totalOrder, ctx, y, W)
+	y = DrawFarmZones(farmNeed, farmOrder, ctx, y, W)
+	ui.content:SetHeight(-y + 10)
+	ui.scroll:UpdateScrollChildRect()
+end
+
+-- Окно карты: показать/спрятать вкладку (вызывает Draw окна карты)
+function CraftPlan.ShowRouteTab(map)
+	if not ui then
+		ui = { pools = {} }
+		ui.scroll = CreateFrame("ScrollFrame", "CraftPlanRouteScroll", map, "UIPanelScrollFrameTemplate")
+		ui.scroll:SetPoint("TOPLEFT", map, "TOPLEFT", 18, -72)
+		-- галочка: источники материалов маршрута на карте текущей зоны (раздел ниже)
+		ui.check = CreateFrame("CheckButton", "CraftPlanRouteMapCheck", map, "UICheckButtonTemplate")
+		ui.check:SetWidth(24)
+		ui.check:SetHeight(24)
+		ui.check:SetPoint("TOPLEFT", map, "TOPLEFT", 18, -44)
+		_G["CraftPlanRouteMapCheckText"]:SetText("Показать на карте текущей зоны, где добыть и купить нужное для маршрута")
+		ui.check:SetScript("OnClick", function(self)
+			DB().routeMap = self:GetChecked() and true or false
+			if CraftPlan.UpdateRouteMap then CraftPlan.UpdateRouteMap(true, true) end
+		end)
+		ui.check:SetScript("OnEnter", function(self)
+			GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+			GameTooltip:AddLine("Источники для маршрута на карте")
+			GameTooltip:AddLine("Метки Questie только в зоне, где вы сейчас: мобы, с которых падают недостающие материалы, места сбора (жилы, травы и т.п.), торговцы материалами и рецептами маршрута. При смене зоны и когда материалов становится меньше — обновляется. Учителя — в меню Questie «Учитель профессии».", 1, 1, 1, true)
+			GameTooltip:Show()
+		end)
+		ui.check:SetScript("OnLeave", function() GameTooltip:Hide() end)
+		ui.scroll:SetPoint("BOTTOMRIGHT", map, "BOTTOMRIGHT", -36, 20)
+		ui.content = CreateFrame("Frame", nil, ui.scroll)
+		ui.content:SetWidth(800)
+		ui.content:SetHeight(400)
+		ui.scroll:SetScrollChild(ui.content)
+		ui.scroll:SetScript("OnSizeChanged", function() pcall(DrawRoute) end)
+	end
+	ui.scroll:Show()
+	ui.check:SetChecked(DB().routeMap)
+	ui.check:Show()
+	local ok, err = pcall(DrawRoute)
+	if not ok then
+		ResetPools()
+		Text("|cffff4040Маршрут: ошибка — " .. tostring(err) .. "|r", 10, -10, "GameFontHighlightSmall", 700)
+	end
+end
+function CraftPlan.HideRouteTab()
+	if ui then
+		ui.scroll:Hide()
+		ui.check:Hide()
+	end
+end
+-- после расчёта плана, записи учителя и т.п.
+function CraftPlan.RouteRefresh()
+	if ui and ui.scroll:IsShown() then pcall(DrawRoute) end
+	if CraftPlan.RouteProgressSoon then CraftPlan.RouteProgressSoon() end
+end
+
+----------------------------------------------------------------------------------------------
+-- Процент под значком карты крафта: сколько материалов маршрута уже лежит в сумках и банке.
+-- Штуки всех материалов (и сырья, и готовых слитков из запаса) — вместе: есть / (есть + не хватает)
+function CraftPlan.RouteProgress()
+	if not CraftPlanRouteData then return nil end
+	local data = Compute()
+	local stock, have, need, byProf = {}, 0, 0, {}
+	local needs, books = {}, {} -- для меток на карте: [предмет] = не хватает; [рецепт-предмет] = торговцы
+	for _, route in ipairs(data.routes) do
+		local h, n = 0, 0
+		for _, seg in ipairs(route.segs or {}) do
+			if not seg.c.node then
+				local out = { have = {}, need = {}, crafts = {}, craftOrder = {} }
+				for _, rg in ipairs(seg.c.rec.reag) do Expand(rg.id, rg.count * seg.times, data.ctx, stock, out, 0) end
+				for _, v in pairs(out.have) do h = h + v end
+				for id, v in pairs(out.need) do
+					n = n + v
+					needs[id] = (needs[id] or 0) + v
+				end
+				if seg.c.vendors and seg.c.item then books[seg.c.item] = seg.c.vendors end
+			end
+		end
+		if h + n > 0 then byProf[#byProf + 1] = { route.prof, h, n } end
+		have, need = have + h, need + n
+	end
+	CraftPlan.routeNeeds, CraftPlan.routeBooks = needs, books
+	if have + need == 0 then return nil end
+	return have / (have + need), byProf
+end
+
+local progressDue
+local function UpdateProgress()
+	local b = CraftPlan.mapButton
+	if not (b and b.percent) then return end
+	local ok, p, byProf = pcall(CraftPlan.RouteProgress)
+	if not (ok and p) then
+		b.percent:SetText("")
+		CraftPlan.routeProgress = nil
+		if CraftPlan.UpdateRouteMap then pcall(CraftPlan.UpdateRouteMap) end
+		return
+	end
+	local pct = math.floor(p * 100)
+	local color = (pct >= 100) and "|cff40ff40" or ((pct >= 50) and "|cffffd200" or "|cffff6060")
+	b.percent:SetText(color .. pct .. "%|r")
+	CraftPlan.routeProgress = byProf
+	if CraftPlan.UpdateRouteMap then pcall(CraftPlan.UpdateRouteMap) end
+end
+CraftPlan.RouteProgressSoon = function() progressDue = GetTime() + 0.5 end
+
+-- сумки, банк, навыки меняются — пересчитать не чаще раза в 2 секунды и не в бою
+local progressFrame = CreateFrame("Frame")
+for _, e in ipairs({ "PLAYER_ENTERING_WORLD", "BAG_UPDATE", "SKILL_LINES_CHANGED", "BANKFRAME_OPENED", "PLAYERBANKSLOTS_CHANGED", "PLAYER_LEVEL_UP" }) do
+	progressFrame:RegisterEvent(e)
+end
+-- открытая вкладка «Маршрут» перерисовывается тут же, не дожидаясь пересчёта плана
+local progressRedraw
+progressFrame:SetScript("OnEvent", function()
+	if not progressDue then progressDue = GetTime() + 2 end
+	progressRedraw = true
+end)
+progressFrame:SetScript("OnUpdate", function()
+	if progressDue and GetTime() >= progressDue and not InCombatLockdown() then
+		progressDue = nil
+		UpdateProgress()
+		if progressRedraw and ui and ui.scroll:IsShown() then pcall(DrawRoute) end
+		progressRedraw = nil
+	end
+end)
+
+----------------------------------------------------------------------------------------------
+-- Метки на карте (галочка на вкладке «Маршрут», db.routeMap): в зоне, где вы сейчас, — мобы,
+-- с которых падает недостающее маршруту, места сбора (объекты Questie: жилы, травы, сундуки),
+-- торговцы этими материалами (кроме руды) и рецептами маршрута. Рисуем метки Questie только
+-- для мест появления в текущей зоне (QuestieMap:DrawManualIcon — как его ShowNPC/ShowObject).
+local MAP_TYP_NPC, MAP_TYP_OBJ = "CraftPlanRouteN", "CraftPlanRouteO"
+local MAX_PINS = 80 -- источников за раз, чтобы не завалить карту
+local PIN_KIND = {
+	object = { order = 1, text = "собрать" },
+	vendor = { order = 2, text = "купить", icon = "Interface\\Icons\\INV_Misc_Coin_02" },
+	book = { order = 2, text = "рецепт", icon = "Interface\\Icons\\INV_Scroll_03" },
+	mob = { order = 3, text = "падает" },
+}
+local drawn, drawnSig = {}, nil
+
+local function CurrentArea()
+	if not (QuestieCompat and QuestieCompat.C_Map and QuestieLoader) then return nil end
+	local ZoneDB = QuestieLoader:ImportModule("ZoneDB")
+	local ok, uiMapId = pcall(QuestieCompat.C_Map.GetBestMapForUnit, "player")
+	if not (ok and uiMapId and ZoneDB and ZoneDB.GetAreaIdByUiMapId) then return nil end
+	local ok2, area = pcall(ZoneDB.GetAreaIdByUiMapId, ZoneDB, uiMapId)
+	return ok2 and area or nil
+end
+
+local function FriendlyNpc(q, npc)
+	local ok, f = pcall(q.QueryNPCSingle, npc, "friendlyToFaction")
+	local faction = (UnitFactionGroup("player") == "Horde") and "H" or "A"
+	return ok and f and f:find(faction, 1, true)
+end
+
+-- force — перерисовать, даже если ничего не поменялось; report — написать в чат, сколько отмечено
+function CraftPlan.UpdateRouteMap(force, report)
+	local QuestieMap = QuestieLoader and QuestieLoader:ImportModule("QuestieMap")
+	local q = QDB()
+	if not (QuestieMap and QuestieMap.DrawManualIcon and QuestieMap.UnloadManualFrames and q and q.QueryItem) then
+		if report then Print("Questie ещё не загрузил базу — попробуйте через минуту.") end
+		return
+	end
+	local on = DB().routeMap
+	local area = on and CurrentArea()
+	local needs, books = CraftPlan.routeNeeds or {}, CraftPlan.routeBooks or {}
+	local parts = { tostring(area), "L" .. UnitLevel("player") }
+	for id, n in pairs(needs) do parts[#parts + 1] = id .. "=" .. n end
+	for id in pairs(books) do parts[#parts + 1] = "b" .. id end
+	table.sort(parts)
+	local sig = table.concat(parts, ",")
+	if sig == drawnSig and not force then return end
+	drawnSig = sig
+	for _, e in ipairs(drawn) do QuestieMap:UnloadManualFrames(e[1], e[2]) end
+	drawn = {}
+	if not on then
+		if report then Print("метки маршрута убраны с карты.") end
+		return
+	end
+	if not area then
+		if report then Print("не удалось узнать текущую зону.") end
+		return
+	end
+
+	-- источник -> что с него взять
+	local sources = {} -- ключ "n123"/"o456" -> { id, obj, kind, lines, icon }
+	local function Add(id, obj, kind, item, text)
+		local key = (obj and "o" or "n") .. id
+		local e = sources[key]
+		if not e then
+			e = { id = id, obj = obj, kind = kind, lines = {} }
+			sources[key] = e
+		end
+		if PIN_KIND[kind].order < PIN_KIND[e.kind].order then e.kind = kind end
+		e.icon = e.icon or GetItemIcon(item)
+		e.lines[#e.lines + 1] = { ItemName(item), text }
+	end
+	for id, n in pairs(needs) do
+		local ok, src = pcall(q.QueryItem, id, { "npcDrops", "objectDrops", "vendors" })
+		if ok and src then
+			src[2] = GatherObjects(q, src[2])
+			-- добываемое (руда, камень, травы) берём только из жил и прочих мест сбора: в базе Questie
+			-- у него бывают случайные мобы (волки «роняют» железную руду), гоняться за ними незачем
+			local gathered = MinedNodes(id) or (src[2] and next(src[2]))
+			if not gathered then
+				for _, npc in pairs(src[1] or {}) do
+					if MobFits(q, npc) then Add(npc, false, "mob", id, "падает, нужно " .. n) end
+				end
+			end
+			for _, obj in pairs(src[2] or {}) do Add(obj, true, "object", id, "собрать, нужно " .. n) end
+			if not MinedNodes(id) then -- руду и камень торговцы не продают
+				for _, npc in pairs(src[3] or {}) do
+					if FriendlyNpc(q, npc) then Add(npc, false, "vendor", id, "купить, нужно " .. n) end
+				end
+			end
+		end
+	end
+	for item, vendors in pairs(books) do
+		for _, npc in ipairs(vendors) do Add(npc, false, "book", item, "рецепт для маршрута") end
+	end
+
+	-- только то, что есть в этой зоне; сначала места сбора и торговцы, потом мобы
+	local list = {}
+	for _, e in pairs(sources) do
+		local ok, rec
+		if e.obj then ok, rec = pcall(q.GetObject, q, e.id) else ok, rec = pcall(q.GetNPC, q, e.id) end
+		local spawns = ok and rec and rec.spawns and rec.spawns[area]
+		if spawns and spawns[1] then
+			e.rec, e.spawns = rec, spawns
+			list[#list + 1] = e
+		end
+	end
+	table.sort(list, function(a, b)
+		local oa, ob = PIN_KIND[a.kind].order, PIN_KIND[b.kind].order
+		if oa ~= ob then return oa < ob end
+		return #a.lines > #b.lines
+	end)
+	local counts = { object = 0, vendor = 0, book = 0, mob = 0 }
+	for i = 1, math.min(MAX_PINS, #list) do
+		local e = list[i]
+		local kind = PIN_KIND[e.kind]
+		local icon = kind.icon or e.icon or "Interface\\Icons\\INV_Misc_QuestionMark"
+		local typ = e.obj and MAP_TYP_OBJ or MAP_TYP_NPC
+		local data = {
+			id = e.id, Icon = icon, IconScale = 1, GetIconScale = function() return 1 end,
+			Type = "manual", spawnType = e.obj and "object" or "monster", Name = e.rec.name, IsObjectiveNote = false,
+			ManualTooltipData = { Title = "|cffffffff" .. (e.rec.name or "?") .. "|r  |cff66ccff(маршрут CraftPlan)|r", Body = e.lines, disableShiftToRemove = true },
+		}
+		-- у моба — уровень: «Длиннозуб-охотник (ур. 24-25)»
+		local lo, hi = e.rec.minLevel, e.rec.maxLevel
+		if e.kind == "mob" and lo then
+			local lvl = (hi and hi ~= lo) and (lo .. "-" .. hi) or tostring(lo)
+			data.ManualTooltipData.Title = "|cffffffff" .. (e.rec.name or "?") .. "|r |cffffd200(ур. " .. lvl .. ")|r  |cff66ccff(маршрут CraftPlan)|r"
+		end
+		if e.obj then data.objectData = e.rec else data.npcData = e.rec end
+		for _, coords in ipairs(e.spawns) do
+			pcall(QuestieMap.DrawManualIcon, QuestieMap, data, area, coords[1], coords[2], typ)
+		end
+		drawn[#drawn + 1] = { e.id, typ }
+		counts[e.kind] = counts[e.kind] + 1
+	end
+	if report then
+		if #list == 0 then
+			Print("в этой зоне нет известных источников для маршрута (жилы — на карте через GatherMate).")
+		else
+			Print(string.format("отмечено в зоне: места сбора — %d, торговцы — %d, мобы — %d%s. Откройте карту (M).",
+				counts.object, counts.vendor + counts.book, counts.mob, (#list > MAX_PINS) and (", ещё " .. (#list - MAX_PINS) .. " не показано") or ""))
+		end
+	end
+end
+
+-- смена зоны — метки для новой
+local zoneFrame = CreateFrame("Frame")
+zoneFrame:RegisterEvent("ZONE_CHANGED_NEW_AREA")
+zoneFrame:SetScript("OnEvent", function()
+	if DB().routeMap then pcall(CraftPlan.UpdateRouteMap) end
 end)
 end)()
 
@@ -10932,3 +12755,4992 @@ local buttonInit = CreateFrame("Frame")
 buttonInit:RegisterEvent("PLAYER_LOGIN")
 buttonInit:SetScript("OnEvent", WhereToGet_UpdateButton)
 end)()
+
+-- Рецепты для маршрута прокачки (SkillLineAbility.dbc + Spell.dbc из patch-ruRU-4.mpq):
+-- "заклинание|название|жёлтый с|серый с|1 = даётся с профессией|изделие|штук за раз|материал*штук;…|перезарядка"
+CraftPlanRouteData = {
+	[164] = {
+		"12260|Грубый медный жилет|15|55|1|10421|1|2840*4|0",
+		"2660|Грубое точило|15|55|1|2862|1|2835*1|0",
+		"3115|Грубое грузило|15|55|1|3239|1|2835*1;2589*1|0",
+		"2663|Медные наручи|20|60|1|2853|1|2840*2|0",
+		"3320|Грубый шлифовальный камень|45|85|0|3470|1|2835*2|0",
+		"2662|Медные плетеные штаны|50|90|0|2852|1|2840*4|0",
+		"2737|Медная палица|55|95|0|2844|1|2840*6;2880*1;2589*2|0",
+		"2738|Медный топор|60|100|0|2845|1|2840*6;2880*1;2589*2|0",
+		"3319|Медные плетеные сапоги|60|100|0|3469|1|2840*8|0",
+		"2665|Зернистое точило|65|80|0|2863|1|2836*1|0",
+		"2739|Медный короткий меч|65|105|0|2847|1|2840*6;2880*1;2589*2|0",
+		"3116|Зернистое грузило|65|80|0|3240|1|2836*1;2592*1|0",
+		"8880|Медный кинжал|70|110|0|7166|1|2840*6;2880*1;3470*1;2318*1|0",
+		"9983|Медный клеймор|70|110|0|7955|1|2840*10;2880*2;3470*1;2318*1|0",
+		"2661|Медный плетеный пояс|75|115|0|2851|1|2840*6|0",
+		"3293|Медный боевой топор|75|115|0|3488|1|2840*12;2880*2;774*2;3470*2;2318*2|0",
+		"3321|Медный плетеный нагрудник|75|115|0|3471|1|2840*8;3470*2|0",
+		"3326|Зернистый шлифовальный камень|75|100|0|3478|1|2836*2|0",
+		"43549|Тяжелый медный длинный меч|75|115|0|33791|1|2840*10;818*1;3470*2|0",
+		"3323|Рунические медные рукавицы|80|120|0|3472|1|2840*8;3470*2|0",
+		"3324|Рунические медные штаны|85|125|0|3473|1|2840*8;2321*2;3470*3|0",
+		"19666|Серебряная отмычка|100|120|0|15869|2|2842*1;3470*1|0",
+		"3325|Украшенные медные рукавицы|100|140|0|3474|1|2840*8;818*1;774*1|0",
+		"7408|Тяжелая медная кувалда|105|145|0|6214|1|2840*12;2880*2;2318*2|0",
+		"7818|Серебряный жезл|105|110|0|6338|1|2842*1;3470*2|0",
+		"2666|Рунический медный пояс|110|150|0|2857|1|2840*10|0",
+		"3294|Утолщенная секира|110|150|0|3489|1|2840*10;2880*2;2842*2;3470*2;2318*2|0",
+		"8366|Стальгорнская кольчуга|110|150|0|6730|1|2840*12;774*2;3470*2|0",
+		"2664|Рунические медные наручи|115|140|0|2854|1|2840*10;3470*3|0",
+		"2667|Руническая медная кираса|120|160|0|2864|1|2840*12;1210*1;3470*2|0",
+		"2674|Тяжелое точило|125|140|0|2871|1|2838*1|0",
+		"3117|Тяжелое грузило|125|140|0|3241|1|2838*1;2592*1|0",
+		"3337|Тяжелый шлифовальный камень|125|150|0|3486|1|2838*3|0",
+		"7817|Грубые бронзовые сапоги|125|155|0|6350|1|2841*6;3470*6|0",
+		"34979|Утолщенные бронзовые дротики|130|160|0|29201|1|2841*6;3470*2;2319*1|0",
+		"3292|Тяжелый медный палаш|135|175|0|3487|1|2840*14;2880*2;818*2;2319*2|0",
+		"3491|Большой бронзовый нож|135|165|0|3848|1|2841*6;2880*4;3470*2;818*1;2319*1|0",
+		"2740|Бронзовая палица|140|170|0|2848|1|2841*6;2880*4;2319*1|0",
+		"3328|Грубые бронзовые наплечники|140|170|0|3480|1|2841*5;3478*1|0",
+		"6517|Кинжал с жемчужной рукояткой|140|170|0|5540|1|2841*6;3466*1;5498*2;3478*2|0",
+		"8367|Стальгорнская кираса|140|180|0|6731|1|2840*16;818*2;3470*3|0",
+		"2668|Грубые бронзовые поножи|145|175|0|2865|1|2841*6|0",
+		"2670|Грубый бронзовый панцирь|145|175|0|2866|1|2841*7|0",
+		"2671|Грубые бронзовые наручи|145|175|0|2867|1|2841*4|0",
+		"2741|Бронзовый топор|145|175|0|2849|1|2841*7;2880*4;2319*1|0",
+		"19667|Золотая отмычка|150|170|0|15870|2|3577*1;3486*1|0",
+		"2672|Украшенные узором бронзовые наручи|150|180|0|2868|1|2841*5;3478*2|0",
+		"2742|Бронзовый короткий меч|150|180|0|2850|1|2841*5;2880*4;2319*2|0",
+		"8768|Железная скоба|150|155|0|7071|2|3575*1|0",
+		"14379|Золотой жезл|155|160|0|11128|1|3577*1;3478*2|0",
+		"3295|Смертоносный бронзовый короткий кинжал|155|185|0|3490|1|2841*4;3466*1;2459*1;1210*2;3478*2;2319*2|0",
+		"3330|Посеребренные бронзовые наплечники|155|185|0|3481|1|2841*8;2842*2;3478*2|0",
+		"9985|Бронзовый боевой молот|155|185|0|7956|1|2841*8;3466*1;2319*1|0",
+		"2673|Посеребренная бронзовая кираса|160|190|0|2869|1|2841*10;2842*2;3478*2|0",
+		"3296|Тяжелая бронзовая палица|160|190|0|3491|1|2841*8;3466*1;1206*1;1210*1;3478*2;2319*2|0",
+		"3331|Посеребренные бронзовые сапоги|160|190|0|3482|1|2841*6;2842*1;3478*2|0",
+		"9986|Бронзовый длинный меч|160|190|0|7957|1|2841*12;3466*2;2319*2|0",
+		"3333|Посеребренные бронзовые рукавицы|165|195|0|3483|1|2841*8;2842*1;3478*2|0",
+		"9987|Бронзовый боевой топор|165|195|0|7958|1|2841*14;3466*1;2319*2|0",
+		"6518|Радужный молот|170|200|0|5541|1|2841*10;3466*1;5500*1;3478*2;2319*2|0",
+		"8368|Стальгорнские рукавицы|170|200|0|6733|1|2841*8;1210*3;3478*4|0",
+		"2675|Сияющая серебряная кираса|175|205|0|2870|1|2841*20;1206*2;1705*2;5500*2;2842*4|0",
+		"3297|Тяжелый железный молот|175|205|0|3492|1|3575*6;3466*2;3391*1;1705*2;3478*2;2319*2|0",
+		"3334|Зеленые железные сапоги|175|205|0|3484|1|3575*6;3478*2;2605*1|0",
+		"12259|Посеребренные бронзовые поножи|180|205|0|10423|1|2841*12;2842*4;3478*2|0",
+		"3336|Зеленые железные рукавицы|180|210|0|3485|1|3575*4;5498*2;3478*2;2605*1|0",
+		"3494|Прочная железная кувалда|180|205|0|3851|1|3575*8;3466*2;3486*1;2842*4;4234*2|0",
+		"3506|Зеленые железные поножи|180|205|0|3842|1|3575*8;3486*1;2605*1|0",
+		"7221|Железный шип для щита|180|210|0|6042|1|3575*6;3478*4|0",
+		"3492|Закаленный железный короткий меч|185|210|0|3849|1|3575*6;3466*2;3486*1;1705*2;4234*3|0",
+		"3504|Зеленые железные наплечники|185|210|0|3840|1|3575*7;3486*1;2605*1|0",
+		"9811|Варварские железные наплечники|185|210|0|7913|1|3575*8;5635*4;3486*2|0",
+		"9813|Варварская железная кираса|185|210|0|7914|1|3575*20;3486*4|0",
+		"3501|Зеленые железные наручи|190|215|0|3835|1|3575*6;2605*1|0",
+		"7222|Железный противовес|190|215|0|6043|1|3575*4;3478*2;1705*1|0",
+		"3495|Позолоченный железный разрушитель|195|220|0|3852|1|3575*10;3577*4;1705*2;3466*2;4234*2;3486*2|0",
+		"3502|Зеленый железный шлем|195|220|0|3836|1|3575*12;3864*1;2605*1|0",
+		"3507|Золотые чешуйчатые поножи|195|220|0|3843|1|3575*10;3577*2;3486*1|0",
+		"19668|Отмычка из истинного серебра|200|220|0|15871|2|6037*1;7966*1|0",
+		"3493|Нефритовый змеиный клинок|200|225|0|3850|1|3575*8;3466*2;3486*2;1529*2;4234*3|0",
+		"3505|Золотые чешуйчатые наплечники|200|225|0|3841|1|3859*6;3577*2;3486*1|0",
+		"9814|Варварский железный шлем|200|225|0|7915|1|3575*10;5637*2;5635*2|0",
+		"9918|Твердое точило|200|210|0|7964|1|7912*1|0",
+		"9920|Твердый шлифовальный камень|200|210|0|7966|1|7912*4|0",
+		"9921|Твердое грузило|200|210|0|7965|1|7912*1;4306*1|0",
+		"14380|Жезл из истинного серебра|205|210|0|11144|1|6037*1;3486*1|0",
+		"15972|Блистающий стальной кинжал|205|230|0|12259|1|3859*10;3466*2;1206*1;7067*1;4234*1|0",
+		"3496|Палаш лунной стали|205|230|0|3853|1|3859*8;3466*2;3486*2;1705*3;4234*3|0",
+		"3508|Зеленый железный хауберк|205|230|0|3844|1|3575*20;3486*4;1529*2;1206*2;4255*1|0",
+		"9818|Варварские железные сапоги|205|230|0|7916|1|3575*12;5637*4;3486*2|0",
+		"3498|Массивный железный топор|210|235|0|3855|1|3575*14;3466*2;3486*2;3577*4;4234*2|0",
+		"3513|Полированные стальные сапоги|210|235|0|3846|1|3859*8;3864*1;1705*1;3486*2|0",
+		"7223|Золотые чешуйчатые наручи|210|235|0|6040|1|3859*5;3486*2|0",
+		"9820|Варварские железные перчатки|210|235|0|7917|1|3575*14;3486*3;5637*2|0",
+		"15973|Пылающий золотой клинок|215|240|0|12260|1|3859*10;3577*4;7068*2;4234*2|0",
+		"21913|Кромка Зимы|215|240|0|17704|1|3859*10;3829*1;7070*2;7069*2;4234*2|0",
+		"3503|Золотой чешуйчатый капюшон|215|240|0|3837|1|3859*8;3577*2;3486*2|0",
+		"7224|Стальная цепь для оружия|215|240|0|6041|1|3859*8;3486*2;4234*4|0",
+		"34981|Крутящиеся стальные топоры|220|240|0|29202|1|3859*5;7069*2;3486*2;4234*1|0",
+		"3511|Золотой чешуйчатый панцирь|220|245|0|3845|1|3859*12;3577*2;3486*4|0",
+		"11454|Инкрустированный мифриловый цилиндр|225|250|0|9060|1|3860*5;3577*1;6037*1|0",
+		"11643|Золотые чешуйчатые рукавицы|225|245|0|9366|1|3859*10;3577*4;3486*4|0",
+		"3497|Клинок ледяного тигра|225|250|0|3854|1|3859*12;1529*2;3829*2|0",
+		"3500|Серповидная секира тени|225|250|0|3856|1|3859*10;3864*2;3824*2|0",
+		"3515|Золотые чешуйчатые сапоги|225|250|0|3847|1|3859*10;3577*4;3486*4|0",
+		"9916|Стальная кираса|225|250|0|7963|1|3859*16;3486*3|0",
+		"9926|Тяжелый мифриловый наплечник|225|245|0|7918|1|3860*8;4234*6|0",
+		"9928|Тяжелые мифриловые латные рукавицы|225|245|0|7919|1|3860*6;4338*4|0",
+		"9931|Мифриловые чешуйчатые штаны|230|250|0|7920|1|3860*12|0",
+		"9933|Тяжелые мифриловые штаны|230|250|0|7921|1|3860*10|0",
+		"9935|Стальной латный шлем|235|255|0|7922|1|3859*14;3864*1;7966*1|0",
+		"9937|Мифриловые чешуйчатые наручи|235|255|0|7924|1|3860*8|0",
+		"9939|Мифриловый шип для щита|235|255|0|7967|1|3860*4;6037*2;7966*4|0",
+		"9993|Тяжелый мифриловый топор|235|260|0|7941|1|3860*12;3864*2;7966*1;4234*4|0",
+		"9942|Мифриловые чешуйчатые перчатки|240|260|0|7925|1|3860*8;4234*6;4338*4|0",
+		"9945|Изысканные мифриловые штаны|240|260|0|7926|1|3860*12;6037*1;7966*1|0",
+		"9950|Изысканные мифриловые перчатки|240|260|0|7927|1|3860*10;4338*6;6037*1;7966*1|0",
+		"9952|Изысканный мифриловый наплечник|245|265|0|7928|1|3860*12;6037*1;4304*6|0",
+		"9954|Рукавицы из истинного серебра|245|265|0|7938|1|3860*10;6037*8;7909*3;3864*3;5966*1;7966*2|0",
+		"9995|Синий блистающий топор|245|270|0|7942|1|3860*16;7909*2;7966*1;4304*4|0",
+		"9957|Орочьи боевые поножи|250|270|0|7929|1|3860*12;7067*1|0",
+		"9959|Тяжелая мифриловая кираса|250|270|0|7930|1|3860*16|0",
+		"9961|Мифриловый капюшон|250|270|0|7931|1|3860*10;4338*6|0",
+		"9997|Гибельный мифриловый клинок|250|275|0|7943|1|3860*14;6037*4;7966*1;4304*2|0",
+		"10001|Большая черная палица|255|280|0|7945|1|3860*16;7971*1;1210*4;7966*1;4304*2|0",
+		"16639|Массивный шлифовальный камень|255|260|0|12644|1|12365*4|0",
+		"16640|Массивное грузило|255|260|0|12643|1|12365*1;14047*1|0",
+		"16641|Массивное точило|255|260|0|12404|1|12365*1|0",
+		"9964|Мифриловые шпоры|255|275|0|7969|1|3860*4;7966*3|0",
+		"9966|Мифриловые чешуйчатые наплечники|255|275|0|7932|1|3860*14;4304*4|0",
+		"9968|Тяжелые мифриловые сапоги|255|275|0|7933|1|3860*14;4304*4|0",
+		"9970|Тяжелый мифриловый шлем|255|275|0|7934|1|3860*14;7909*1|0",
+		"10003|Ломатель|260|285|0|7954|1|3860*24;7075*4;6037*6;3864*5;1529*5;7966*4;4304*4|0",
+		"9972|Изысканная мифриловая кираса|260|280|0|7935|1|3860*16;6037*6;7077*1;7966*1|0",
+		"10005|Ослепительная мифриловая рапира|265|290|0|7944|1|3860*14;7909*1;1705*2;1206*2;7966*1;4338*2|0",
+		"9974|Кираса из истинного серебра|265|285|0|7939|1|3860*12;6037*12;7910*2;7971*2;7966*2|0",
+		"9979|Изысканные мифриловые сапоги|265|285|0|7936|1|3860*14;6037*2;4304*4;7966*1;7909*1|0",
+		"9980|Изысканный мифриловый шлем|265|285|0|7937|1|3860*16;6037*2;7966*1|0",
+		"10007|Фантомный клинок|270|295|0|7961|1|3860*28;7081*6;6037*8;3823*2;7909*6;7966*4;4304*2|0",
+		"10009|Рунический мифриловый молот|270|295|0|7946|1|3860*18;7075*2;7966*1;4304*4|0",
+		"16642|Ториевая броня|270|290|0|12405|1|12359*16;12361*1|0",
+		"16643|Ториевый пояс|270|290|0|12406|1|12359*8|0",
+		"10011|Гниль|275|300|0|7959|1|3860*28;7972*10;6037*10;7966*6;4304*6|0",
+		"16644|Ториевые наручи|275|295|0|12408|1|12359*8|0",
+		"19669|Арканитовая отмычка|275|285|0|15872|2|12360*1;12644*1|0",
+		"20201|Арканитовый жезл|275|285|0|16206|1|12360*3;12644*1|0",
+		"10013|Эбеновый нож|280|305|0|7947|1|3860*12;6037*6;7910*2;7966*1;4304*2|0",
+		"16645|Светозарный пояс|280|300|0|12416|1|12359*10;7077*2|0",
+		"36122|Поножи земной кузни|280|300|0|30069|1|3860*16;7075*2|0",
+		"36124|Закаленные ветрами поножи|280|300|0|30070|1|3860*16;7081*2|0",
+		"36125|Легкий клинок земной кузни|280|300|0|30071|1|3860*12;7075*4|0",
+		"36126|Легкий топор небесной кузни|280|300|0|30072|1|3860*12;7081*4|0",
+		"36128|Легкий углекованный молот|280|300|0|30073|1|3860*12;7077*4|0",
+		"10015|Защитник из истинного серебра|285|310|0|7960|1|3860*30;6037*16;7910*6;7081*4;7966*8;4304*6|0",
+		"15292|Распылитель из черного железа|285|305|0|11608|1|11371*18;7077*4|0",
+		"16646|Императорские латные наплечники|285|305|0|12428|1|12359*12;8170*6|0",
+		"16647|Императорский латный пояс|285|305|0|12424|1|12359*10;8170*6|0",
+		"16960|Ториевый большой меч|285|310|0|12764|1|12359*10;12644*2;8170*4|0",
+		"15293|Кольчуга из черного железа|290|310|0|11606|1|11371*10;7077*2|0",
+		"16648|Светозарная кираса|290|310|0|12415|1|12359*18;7077*2;7910*1|0",
+		"16649|Императорские латные наручи|290|310|0|12425|1|12359*12|0",
+		"16650|Доспех дикого терна|290|310|0|12624|1|12359*40;12655*2;12803*4;8153*4;12364*1|0",
+		"15294|Рассекатель из черного железа|295|315|0|11607|1|11371*26;7077*4|0",
+		"16651|Ториевый шип для щита|295|315|0|12645|1|12359*4;12644*4;7076*2|0",
+		"16965|Мрачнолесская секира|295|320|0|12769|1|12359*30;12803*6;8153*6;12799*6;12644*2;8170*8|0",
+		"16967|Инкрустированный ториевый молот|295|320|0|12772|1|12359*30;3577*4;6037*2;12361*2;8170*4|0",
+		"15295|Наплечники из черного железа|300|320|0|11605|1|11371*6;7077*1|0",
+		"16652|Ториевые сапоги|300|320|0|12409|1|12359*12;8170*8|0",
+		"16653|Ториевый шлем|300|320|0|12410|1|12359*12;7910*1|0",
+		"16969|Изысканный ториевый одноручный топор|300|325|0|12773|1|12359*10;12799*2;12644*2;8170*4|0",
+		"16970|Лезвие Рассвета|300|325|0|12774|1|12359*30;12655*4;7910*4;12361*4;12644*2;8170*4|0",
+		"22757|Точило стихий|300|320|0|18262|1|7067*2;12365*3|0",
+		"29654|Точило Скверны|300|310|0|23528|1|23445*1;22573*1|0",
+		"32655|Жезл из оскверненного железа|300|310|0|25843|1|23445*6|0",
+		"34607|Грузило Скверны|300|310|0|28420|1|23445*1;21877*1|0",
+		"15296|Латы из черного железа|305|325|0|11604|1|11371*20;7077*8|0",
+		"16654|Светозарные перчатки|305|325|0|12418|1|12359*18;7077*4|0",
+		"16667|Выкованная демоном кираса|305|325|0|12628|1|12359*40;12662*10;12361*4;7910*4|0",
+		"16971|Огромный ториевый боевой топор|305|330|0|12775|1|12359*12;12644*6;8170*6|0",
+		"16973|Зачарованный боевой молот|305|330|0|12776|1|12359*20;12655*6;12364*2;12804*4;8170*4|0",
+		"16978|Пылающая рапира|305|330|0|12777|1|12655*10;7078*4;7077*4;12800*2;12644*2|0",
+		"16655|Огненные латные рукавицы|310|330|0|12631|1|12359*20;12655*6;7078*2;7910*4|0",
+		"16656|Светозарные сапоги|310|330|0|12419|1|12359*14;7077*4|0",
+		"16660|Наплечники Вестника Рассвета|310|330|0|12625|1|12359*20;12360*4;12364*2;7080*2|0",
+		"16980|Руническое лезвие|310|335|0|12779|1|12359*30;12799*2;12644*2;8170*4|0",
+		"16983|Безмятежность|310|335|0|12781|1|12655*6;12360*2;12804*4;12799*2;12361*2;12364*1|0",
+		"23628|Тяжелый пояс Древобрюхов|310|330|0|19043|1|12359*12;7076*3;12803*3|0",
+		"23632|Ремень рассвета|310|330|0|19051|1|12359*8;6037*6;12811*1|0",
+		"29545|Латные перчатки из оскверненного железа|310|330|0|23482|1|23445*4|0",
+		"29551|Плетеный капюшон из оскверненного железа|310|330|0|23493|1|23445*4|0",
+		"16657|Императорские латные сапоги|315|335|0|12426|1|12359*18|0",
+		"16658|Императорский латный шлем|315|335|0|12427|1|12359*18;7910*1|0",
+		"16659|Светозарный венец|315|335|0|12417|1|12359*18;7077*4|0",
+		"16661|Рукавицы Бури|315|335|0|12632|1|12359*20;12655*4;7080*4;12361*4|0",
+		"16984|Вулканический молот|315|340|0|12792|1|12359*30;7077*4;7910*4;8170*4|0",
+		"16985|Порча|315|340|0|12782|1|12359*40;12360*2;12662*16;12808*8;12361*2;12644*2;8170*4|0",
+		"20872|Пламенный плетеный ремень|315|335|0|16989|1|11371*6;17010*3;17011*3|0",
+		"20874|Наручи из черного железа|315|335|0|17014|1|11371*4;17010*2;17011*2|0",
+		"29547|Латный пояс из оскверненного железа|315|335|0|23484|1|23445*4|0",
+		"16662|Ториевые поножи|320|340|0|12414|1|12359*12|0",
+		"16663|Имперское зерцало|320|340|0|12422|1|12359*20|0",
+		"16664|Рунические латные наплечники|320|340|0|12610|1|12359*20;12360*2;3577*6|0",
+		"16665|Рунические латные сапоги|320|340|0|12611|1|12359*20;12360*2;2842*10|0",
+		"16724|Шлем чистой души|320|340|0|12633|1|12359*20;12655*4;6037*6;3577*6;12800*2|0",
+		"16725|Светозарные поножи|320|340|0|12420|1|12359*20;7077*4|0",
+		"16726|Рунический латный шлем|320|340|0|12612|1|12359*30;12360*2;6037*2;12364*1|0",
+		"16728|Шлем великого вождя|320|340|0|12636|1|12359*40;12655*4;12799*6;12364*2|0",
+		"16729|Шлем Львиного Сердца|320|340|0|12640|1|12359*80;12360*12;12361*10;12800*4|0",
+		"16730|Императорские латные поножи|320|340|0|12429|1|12359*24|0",
+		"16731|Руническая кираса|320|340|0|12613|1|12359*40;12360*2;7910*1|0",
+		"16732|Рунические латные поножи|320|340|0|12614|1|12359*40;12360*2;7910*1|0",
+		"16741|Рукавицы цитадели|320|340|0|12639|1|12360*15;12655*20;7076*10;12361*4;12799*4|0",
+		"16742|Зачарованный ториевый шлем|320|340|0|12620|1|12360*6;12655*16;7076*6;12799*2;12800*1|0",
+		"16744|Зачарованные ториевые поножи|320|340|0|12619|1|12360*10;12655*20;7080*6;12361*2;12364*1|0",
+		"16745|Зачарованная ториевая кираса|320|340|0|12618|1|12360*8;12655*24;7076*4;7080*4;12364*2;12800*2|0",
+		"16746|Неуязвимый доспех|320|340|0|12641|1|12360*30;12655*30;12364*6;12800*6|0",
+		"16988|Молот титанов|320|340|0|12796|1|12359*50;12360*15;12809*4;12810*6;7076*10|0",
+		"16990|Арканитовый защитник|320|340|0|12790|1|12360*15;12800*8;12811*1;12799*4;12810*8;12644*2|0",
+		"16991|Аннигилятор|320|340|0|12798|1|12359*40;12360*12;12808*10;12364*8;12644*2;12810*4|0",
+		"16992|Ледяной страж|320|340|0|12797|1|12360*18;12361*8;12800*8;7080*4;12644*2;12810*4|0",
+		"16993|Молот бури искусной работы|320|340|0|12794|1|12655*20;12364*8;12799*8;7076*6;12810*4|0",
+		"16994|Арканитовый жнец|320|340|0|12784|1|12360*20;12810*6;12644*2|0",
+		"16995|Пронзатель сердец|320|340|0|12783|1|12360*10;12655*10;12810*2;7910*6;12800*6;12799*6;12644*4|0",
+		"20873|Пламенные плетеные наплечники|320|340|0|16988|1|11371*16;17010*4;17011*5|0",
+		"20876|Поножи из черного железа|320|340|0|17013|1|11371*16;17010*4;17011*6|0",
+		"20890|Разоритель из черного железа|320|340|0|17015|1|11371*16;17010*12;11382*2;12810*2|0",
+		"20897|Разрушитель из черного железа|320|340|0|17016|1|11371*18;17011*12;11382*2;12810*2|0",
+		"23629|Тяжелые сапоги Древобрюхов|320|340|0|19048|1|12360*4;7076*6;12803*6|0",
+		"23633|Перчатки рассвета|320|340|0|19057|1|12360*2;6037*10;12811*1|0",
+		"23636|Шлем из черного железа|320|340|0|19148|1|17011*4;17010*2;11371*4|0",
+		"23637|Рукавицы из черного железа|320|340|0|19164|1|17011*3;17010*5;17012*4;11371*4;11382*2|0",
+		"23638|Черное прощение|320|340|0|19166|1|17011*3;17010*6;12360*12;11382*1;11371*4|0",
+		"23639|Черное неистовство|320|340|0|19167|1|17011*5;17010*2;12360*16;11371*6|0",
+		"23650|Эбеновая рука|320|340|0|19170|1|17011*4;17010*7;12360*12;11371*8;12800*4|0",
+		"23652|Черный Страж|320|340|0|19168|1|17011*6;17010*6;12360*10;11371*6;12809*12|0",
+		"23653|Сумерки|320|340|0|19169|1|17011*8;17010*5;12360*10;11371*12;12364*4|0",
+		"24136|Кираса кровавого духа|320|340|0|19690|1|12359*20;19774*10;7910*2|0",
+		"24137|Наплечники кровавого духа|320|340|0|19691|1|12359*16;19774*8;7910*1|0",
+		"24138|Рукавицы кровавого духа|320|340|0|19692|1|12359*12;19774*6;12810*4|0",
+		"24139|Кираса темного духа|320|340|0|19693|1|12359*20;19774*14;12799*2|0",
+		"24140|Поножи темного духа|320|340|0|19694|1|12359*18;19774*12;12799*2|0",
+		"24141|Наплечники темного духа|320|340|0|19695|1|12359*16;19774*10;12799*1|0",
+		"24399|Сапоги из черного железа|320|340|0|20039|1|17011*3;17010*3;17012*4;11371*6|0",
+		"24912|Темнорунические рукавицы|320|340|0|20549|1|12359*12;20520*6;6037*6;12810*2|0",
+		"24913|Темнорунический шлем|320|340|0|20551|1|12359*16;20520*8;6037*8;11754*1|0",
+		"24914|Темноруническая кираса|320|340|0|20550|1|12359*20;20520*10;6037*10|0",
+		"27585|Тяжелый обсидиановый пояс|320|340|0|22197|1|22202*14;12655*4;7076*2|0",
+		"27586|Звездчатый обсидиановый щит|320|340|0|22198|1|22203*8;22202*24;12655*8;7076*4|0",
+		"27587|Толстая обсидиановая кираса|320|340|0|22196|1|22203*18;22202*40;12655*12;7076*10;12364*4|0",
+		"27588|Легкий обсидиановый пояс|320|340|0|22195|1|22202*14;12810*4|0",
+		"27589|Черный напоясник разрушителя|320|340|0|22194|1|22203*8;22202*24;12810*8;13512*1|0",
+		"27590|Обсидиановый кольчужный мундир|320|340|0|22191|1|22203*15;22202*36;12810*12;12809*10;12800*4|0",
+		"27829|Поножи титанов|320|340|0|22385|1|12360*12;12655*20;7076*10;13510*2|0",
+		"27830|Увещеватель|320|340|0|22384|1|12360*15;11371*10;12808*20;20520*20;15417*10;12753*2|0",
+		"27832|Клинок мудреца|320|340|0|22383|1|12360*12;20725*2;13512*2;12810*4|0",
+		"28242|Кираса ледяной погибели|320|340|0|22669|1|22682*7;12359*16;12360*2;7080*4|0",
+		"28243|Рукавицы ледяной погибели|320|340|0|22670|1|22682*5;12359*12;12360*2;7080*2|0",
+		"28244|Наручи ледяной погибели|320|340|0|22671|1|22682*4;12359*12;12360*2;7080*2|0",
+		"28461|Кираса железной лозы|320|340|0|22762|1|12655*6;19726*2;12360*2;12803*2|0",
+		"28462|Перчатки железной лозы|320|340|0|22763|1|12655*8;19726*1;12803*2|0",
+		"28463|Пояс железной лозы|320|340|0|22764|1|12655*6;12803*2|0",
+		"29552|Плетеные перчатки из оскверненного железа|320|340|0|23491|1|23445*5|0",
+		"29557|Секира из оскверненного железа|320|340|0|23497|1|23445*9|0",
+		"34982|Зачарованные ториевые клинки|320|340|0|29203|1|12655*2;12359*6;8170*1|0",
+		"16986|Кровавый коготь|325|350|0|12795|1|12655*10;12360*10;12662*8;7910*10;12644*2|0",
+		"16987|Черное копье|325|350|0|12802|1|12655*20;12804*20;12364*2;12800*2;12644*2|0",
+		"21161|Сульфуронский молот|325|350|0|17193|1|17203*8;11371*20;12360*50;7078*25;11382*10;17011*10;17010*10|0",
+		"29548|Латные сапоги из оскверненного железа|325|345|0|23487|1|23445*6|0",
+		"29549|Латные набедренники из оскверненного железа|325|345|0|23488|1|23445*8|0",
+		"29553|Плетеные наручи из оскверненного железа|325|345|0|23494|1|23445*6|0",
+		"29558|Молот из оскверненного железа|325|345|0|23498|1|23445*10|0",
+		"32284|Простая охранная руна|325|335|0|23559|1|23446*1|0",
+		"29556|Плетеный мундир из оскверненного железа|330|350|0|23490|1|23445*9|0",
+		"29565|Большой меч из оскверненного железа|330|350|0|23499|1|23445*12|0",
+		"29550|Кираса из оскверненного железа|335|355|0|23489|1|23445*10|0",
+		"29566|Адамантитовая кувалда|335|355|0|23502|1|23446*8|0",
+		"29568|Адамантитовый колун|340|360|0|23503|1|23446*8|0",
+		"29569|Адамантитовый кинжал|340|360|0|23504|1|23446*7;21887*2|0",
+		"29728|Простой оберег|340|350|0|23575|1|23446*1|0",
+		"36129|Тяжелая броня земной кузни|340|360|0|30074|1|23446*8;22452*4|0",
+		"36130|Закаленный бурей хауберк|340|360|0|30076|1|23446*8;21885*2;22451*2|0",
+		"36131|Закаленная ветрами рапира|340|360|0|30077|1|23446*6;22451*6|0",
+		"36133|Окованный камнем клеймор|340|360|0|30086|1|23446*10;22452*6|0",
+		"36134|Закаленный бурей топор|340|360|0|30087|1|23446*8;21885*3;22451*3|0",
+		"36135|Большой топор небесной кузни|340|360|0|30088|1|23446*10;22451*6|0",
+		"36136|Закаленный в лаве боевой молот|340|360|0|30089|1|23446*8;21884*6|0",
+		"36137|Большой молот земной кузни|340|360|0|30093|1|23446*12;22452*6|0",
+		"29571|Адамантитовая шпага|345|365|0|23505|1|23446*12|0",
+		"29603|Адамантитовые латные наручи|345|365|0|23506|1|23446*6;22452*2;21884*2|0",
+		"29605|Адамантитовые латные перчатки|345|365|0|23508|1|23446*8;21887*2;22452*3;21884*2|0",
+		"42688|Адамантитовая оружейная цепь|345|355|0|33185|1|23573*2;23449*1|0",
+		"29606|Адамантитовая кираса|350|370|0|23507|1|23446*12;22452*4;21884*2|0",
+		"29656|Адамантитовое точило|350|360|0|23529|1|23446*1;22573*2|0",
+		"32285|Сильная охранная руна|350|360|0|25521|1|23449*1|0",
+		"32656|Адамантитовый жезл|350|360|0|25844|1|23446*10|0",
+		"34608|Адамантитовое грузило|350|360|0|28421|1|23446*1;21877*2|0",
+		"29614|Наручи огненной гибели|360|380|0|23515|1|23445*6;21885*3;21884*2|0",
+		"34529|Плетеная рубашка Пустоты|360|380|0|23563|1|22456*20;22451*20;23573*6;23448*4;23449*8|0",
+		"34533|Кираса Королей|360|380|0|28483|1|23571*8;23573*6;23447*6;23449*8|0",
+		"34535|Огненный страж|360|380|0|28425|1|22456*20;22457*20;23448*14|0",
+		"34538|Клинок Львиного сердца|360|380|0|28428|1|23571*10;23449*14;23573*6|0",
+		"34541|Плоскостная кромка|360|380|0|28431|1|23571*5;22456*20;23573*2;23448*12|0",
+		"34543|Лунный Серп|360|380|0|28434|1|22451*12;22452*12;23571*4;23447*22|0",
+		"34545|Молот Драконьей длани|360|380|0|28437|1|21884*20;22452*20;23447*12;23449*8|0",
+		"34547|Гром|360|380|0|28440|1|22451*20;21885*20;23573*6;23449*12|0",
+		"34983|Шепчущие ножи из оскверненной стали|360|380|0|29204|1|23448*6;22451*2;21884*2;23793*1|0",
+		"52568|Кобальтовый пояс|360|380|0|39087|1|36916*4|0",
+		"52569|Кобальтовые сапоги|360|380|0|39088|1|36916*4|0",
+		"59405|Кобальтовая отмычка|360|370|0|43854|10|36916*4|0",
+		"29608|Зачарованный адамантитовый пояс|365|385|0|23510|1|23573*2;22445*8;22449*2|0",
+		"29611|Зачарованные адамантитовые сапоги|365|385|0|23511|1|23573*3;22445*12;22449*2|0",
+		"29615|Шлем огненной гибели|365|385|0|23516|1|23445*12;21885*5;21884*3|0",
+		"32657|Этерниевый жезл|365|375|0|25845|1|23447*4|0",
+		"29610|Зачарованная адамантитовая кираса|370|390|0|23509|1|23573*4;22445*20;22449*4|0",
+		"29616|Перчатки огненной гибели|370|390|0|23514|1|23445*8;21885*4;21884*4|0",
+		"29619|Перчатки из оскверненной стали|370|390|0|23517|1|23448*6|0",
+		"29620|Поножи из оскверненной стали|370|390|0|23518|1|23448*8|0",
+		"29628|Кориевый пояс|370|390|0|23524|1|23449*3;21885*2;22457*2|0",
+		"29629|Кориевые штаны|370|390|0|23523|1|23449*6;21885*4;22457*4|0",
+		"29657|Шип для щита из оскверненной стали|370|390|0|23530|1|23448*4;21884*4;22452*4|0",
+		"52572|Кобальтовые наплечники|370|380|0|39083|1|36916*4|0",
+		"54550|Кобальтовый треугольный щит|370|380|0|40668|1|36916*4|0",
+		"55834|Кобальтовые наручи|370|380|0|41974|1|36916*4|0",
+		"29613|Зачарованные адамантитовые поножи|375|395|0|23512|1|23573*4;22445*24;22449*4|0",
+		"29617|Кираса огненной гибели|375|395|0|23513|1|23445*16;21885*6;21884*4|0",
+		"29621|Шлем из оскверненной стали|375|395|0|23519|1|23448*8|0",
+		"29622|Рукавицы Железной башни|375|395|0|23532|1|23573*10;23571*2;22452*15;23572*1|0",
+		"29630|Кориевые сапоги|375|395|0|23525|1|23449*4;21885*3;22457*3|0",
+		"29642|Перчатки из яростной стали|375|395|0|23520|1|23445*8;21884*6;23449*3;22824*2|0",
+		"29643|Шлем из яростной стали|375|395|0|23521|1|23445*10;21884*10;23449*4;22824*4|0",
+		"29658|Рукавицы ярости Скверны|375|395|0|23531|1|23448*10;23571*3;23572*1|0",
+		"29662|Рукавицы стальной хватки|375|395|0|23533|1|23448*10;23571*5;23572*1|0",
+		"29663|Шлем бури|375|395|0|23534|1|23573*8;22451*16;21885*16;23572*1|0",
+		"29664|Шлем стойкого защитника|375|395|0|23535|1|23573*8;22452*22;22457*12;23572*1|0",
+		"29668|Шлем хранителя клятвы|375|395|0|23536|1|23573*8;23571*3;21886*18;23572*1|0",
+		"29669|Черные наручи из оскверненной стали|375|395|0|23537|1|23448*6;22456*15;23572*1|0",
+		"29671|Наручи зеленой крепости|375|395|0|23538|1|23573*6;21886*20;23572*1|0",
+		"29672|Благословенные наручи|375|395|0|23539|1|23573*6;23571*2;21885*15;23572*1|0",
+		"29692|Длинный меч из оскверненной стали|375|395|0|23540|1|23449*10;23448*10;23571*6;23572*2|0",
+		"29693|Кориевый защитник|375|395|0|23541|1|23449*20;23573*2;23571*6;23572*2|0",
+		"29694|Боевой топор с кромкой Скверны|375|395|0|23542|1|23449*10;23448*10;23571*8;23572*2|0",
+		"29695|Жнец из оскверненной стали|375|395|0|23543|1|23449*10;23448*10;23571*8;23572*2|0",
+		"29696|Рунический молот|375|395|0|23544|1|23449*10;23448*10;23571*8;23572*2|0",
+		"29697|Закаленная Скверной кувалда|375|395|0|23546|1|23449*10;23448*10;23571*8;23572*2|0",
+		"29698|Этерниевый рунический клинок|375|395|0|23554|1|23449*10;23573*4;23447*10;23571*8;23572*2|0",
+		"29699|Погребальный Плач|375|395|0|23555|1|23449*10;23448*10;23571*8;23572*2|0",
+		"29700|Рука Вечности|375|395|0|23556|1|23449*10;23573*4;23447*10;23571*8;23572*4|0",
+		"29729|Сильный оберег|375|375|0|23576|1|23447*1|0",
+		"42662|Наплечники из яростной стали|375|395|0|33173|1|23445*12;21884*2;23449*8;27503*2|0",
+		"43846|Молот праведной мощи|375|395|0|32854|1|23449*16;23448*12;23571*6;23572*2|0",
+		"46140|Рукавицы Солнечного благословения|375|410|0|34380|1|35128*8;21886*20;23571*6;34664*6|0",
+		"46141|Кулачные перчатки из закаленного кория|375|410|0|34378|1|35128*10;21884*12;22456*12;22451*12;34664*6|0",
+		"46142|Кираса Солнечного благословения|375|410|0|34379|1|23449*20;23573*4;21886*15;21885*15;23572*6|0",
+		"46144|Боевой доспех из закаленного кория|375|410|0|34377|1|23449*20;23573*4;21884*10;22456*10;23572*6|0",
+		"52567|Кобальтовые ножные латы|375|385|0|39086|1|36916*5|0",
+		"52571|Кобальтовый шлем|375|385|0|39084|1|36916*5|0",
+		"29645|Кираса из яростной стали|380|400|0|23522|1|23445*12;21884*10;23449*6;22824*4|0",
+		"29648|Перчатки из быстростали|380|400|0|23526|1|23448*6;22449*2;22831*4;22451*4|0",
+		"29649|Кираса Мира|380|400|0|23527|1|23573*4;21886*6;22452*4|0",
+		"52570|Кобальтовый нагрудник|380|390|0|39085|1|36916*6|0",
+		"54917|Шипастый кобальтовый шлем|380|390|0|40942|1|36916*7|0",
+		"55835|Кобальтовые рукавицы|380|390|0|41975|1|36916*5|0",
+		"34530|Плетеная рубашка Круговерти Пустоты|385|405|0|23564|1|23563*1;23572*10;22457*10|0",
+		"34534|Оплот королей|385|405|0|28484|1|28483*1;23572*10;22457*10|0",
+		"34537|Пылкий страж|385|405|0|28426|1|28425*1;23572*8;22451*10|0",
+		"34540|Защитник Львиного сердца|385|405|0|28429|1|28428*1;23572*8;23571*2|0",
+		"34542|Черная плоскостная кромка|385|405|0|28432|1|28431*1;23572*8;23448*6|0",
+		"34544|Лунный колун|385|405|0|28435|1|28434*1;23572*8;22457*10|0",
+		"34546|Драконья Пасть|385|405|0|28438|1|28437*1;23572*8;23571*2|0",
+		"34548|Глубокий гром|385|405|0|28441|1|28440*1;23572*8;22457*10|0",
+		"36256|Облачение Круговерти Пустоты|385|405|0|23565|1|23564*1;30183*2|0",
+		"36257|Оплот древних королей|385|405|0|28485|1|28484*1;30183*2|0",
+		"36258|Пылкое неистовство|385|405|0|28427|1|28426*1;30183*5|0",
+		"36259|Палач Львиного сердца|385|405|0|28430|1|28429*1;30183*5|0",
+		"36260|Гибельный край миров|385|405|0|28433|1|28432*1;30183*5|0",
+		"36261|Кровавая луна|385|405|0|28436|1|28435*1;30183*5|0",
+		"36262|Драконий удар|385|405|0|28439|1|28438*1;30183*5|0",
+		"36263|Штормовестник|385|405|0|28442|1|28441*1;30183*5|0",
+		"36389|Пояс хранителя|385|405|0|30034|1|30183*2;23573*5;21885*10;22452*5|0",
+		"36390|Красный пояс битвы|385|405|0|30032|1|30183*2;23573*5;21884*10|0",
+		"36391|Сапоги защитника|385|405|0|30033|1|23572*2;23573*4;21885*12|0",
+		"36392|Сапоги красного хаоса|385|405|0|30031|1|23572*2;23573*4;21884*12|0",
+		"38473|Кираса дикого стража|385|405|0|31364|1|23448*8;21886*12;22456*12;23572*1|0",
+		"38475|Поножи дикого стража|385|405|0|31367|1|23448*8;21886*12;22456*12;23572*1|0",
+		"38476|Шлем дикого стража|385|405|0|31368|1|23448*8;21886*12;22456*12;23572*1|0",
+		"38477|Кираса ледяного стража|385|405|0|31369|1|23449*8;21885*12;21884*12;23572*1|0",
+		"38478|Поножи ледяного стража|385|405|0|31370|1|23449*8;21885*12;21884*12;23572*1|0",
+		"38479|Шлем ледяного стража|385|405|0|31371|1|23449*8;21885*12;21884*12;23572*1|0",
+		"40033|Тенестальные сабо|385|405|0|32402|1|32428*2;22450*1;21886*2;22456*4;23446*4|0",
+		"40034|Тенестальные наручи|385|405|0|32403|1|32428*1;22450*1;21886*2;22456*2;23446*4|0",
+		"40035|Тенестальные наголенники|385|405|0|32404|1|32428*3;22450*1;21886*4;22456*6;23446*12|0",
+		"40036|Тенестальной ремень|385|405|0|32401|1|32428*2;22450*1;21886*3;22456*4;23446*8|0",
+		"41132|Наручи из быстростали|385|405|0|32568|1|23448*14;23573*2;22451*6;32428*4|0",
+		"41133|Наплечники из быстростали|385|405|0|32570|1|23448*18;23573*2;22451*8;32428*2|0",
+		"41134|Наручи рассветной стали|385|405|0|32571|1|23449*14;23573*2;21884*6;32428*4|0",
+		"41135|Наплечники рассветной стали|385|405|0|32573|1|23449*18;23573*2;21884*8;32428*2|0",
+		"54918|Шипастые кобальтовые сапоги|385|395|0|40949|1|36916*7|0",
+		"55200|Прочный кобальтовый быстрый клинок|385|395|0|41239|1|36916*8|0",
+		"55201|Кобальтодробитель|385|395|0|41240|1|36916*8|0",
+		"54941|Шипастые кобальтовые наплечники|390|400|0|40950|1|36916*7|0",
+		"54944|Шипастый кобальтовый нагрудник|390|400|0|40951|1|36916*8|0",
+		"55202|Выверенный сюрикен|390|400|0|41241|1|36916*7|0",
+		"55203|Кованый кобальтовый клеймор|390|400|0|41242|1|36916*10|0",
+		"54557|Саронитовый защитник|395|405|0|40670|1|36916*6;36913*4|0",
+		"54945|Шипастые кобальтовые рукавицы|395|405|0|40952|1|36916*12|0",
+		"54978|Усиленные кобальтовые наплечники|395|405|0|40956|1|36916*8;37705*2|0",
+		"55013|Саронитовый страж|395|405|0|41117|1|36916*6;36913*4|0",
+		"55174|Заточенный кобальтовый колун|395|405|0|41181|1|36916*12;36913*4;37702*2|0",
+		"55204|Зубчатая кобальтовая секира|395|405|0|41243|1|36916*10|0",
+		"54551|Закаленный саронитовый пояс|400|410|0|40669|1|36916*6;36913*5|0",
+		"54554|Закаленные саронитовые ножные латы|400|410|0|40674|1|36916*5;36913*5;37701*1|0",
+		"54946|Шипастый кобальтовый пояс|400|410|0|40953|1|36916*12|0",
+		"54947|Шипастые кобальтовые ножные латы|400|410|0|40943|1|36916*12|0",
+		"55055|Сверкающие саронитовые ножные латы|400|410|0|41126|1|36916*5;36913*5;37705*1|0",
+		"55177|Кобальтовый тесак свирепости|400|410|0|41182|1|36916*8;36913*6;37702*2|0",
+		"55628|Гнездо в наручах|400|400|0|0|1|36913*4;35624*1|0",
+		"55641|Гнездо в перчатках|400|400|0|0|1|36913*4;35627*1|0",
+		"59436|Сверкающий саронитовый пояс|400|410|0|43860|1|36916*6;36913*5|0",
+		"54552|Закаленные саронитовые сапоги|405|415|0|40671|1|36916*3;36913*8|0",
+		"54553|Закаленная саронитовая кираса|405|415|0|40672|1|36916*6;36913*5;37701*1|0",
+		"54948|Шипастые кобальтовые наручи|405|415|0|40954|1|36916*12|0",
+		"54949|Рогатый кобальтовый шлем|405|415|0|40955|1|36916*8|0",
+		"54979|Усиленный кобальтовый шлем|405|415|0|40957|1|36916*8;37705*2|0",
+		"55056|Сверкающие саронитовые рукавицы|405|415|0|41127|1|36916*3;36913*8|0",
+		"55179|Саронитовый разбойничий кинжал|405|415|0|41183|1|36916*12;36913*4;37703*1|0",
+		"59438|Сверкающие саронитовые наручи|405|415|0|43864|1|36916*3;36913*8|0",
+		"54555|Закаленный саронитовый шлем|410|420|0|40673|1|36913*12;37701*1|0",
+		"54556|Закаленные саронитовые наплечники|410|420|0|40675|1|36913*12|0",
+		"54980|Усиленные кобальтовые ножные латы|410|420|0|40958|1|36916*8;37705*2|0",
+		"55057|Сверкающие саронитовые сапоги|410|420|0|41128|1|36913*12|0",
+		"55181|Саронитовый нож|410|420|0|41184|1|36913*12;37703*2|0",
+		"59440|Сверкающее саронитовое наплечье|410|420|0|43865|1|36913*12|0",
+		"54981|Усиленный кобальтовый нагрудник|415|425|0|40959|1|36916*8;37705*2|0",
+		"55014|Саронитовый оплот|415|425|0|41113|1|36913*14|0",
+		"55017|Закаленные саронитовые наручи|415|425|0|41116|1|36913*13|0",
+		"55182|Саронитовая ударная палица ярости|415|425|0|41185|1|36913*15;37701*2|0",
+		"55206|Смертоносный саронитовый кортик|415|425|0|41245|1|36913*7;37700*2|0",
+		"56280|Деревянная рапира саронитовой справедливости|415|425|0|42443|1|36913*15;37705*2|0",
+		"59442|Саронитовый чародейский клинок|415|425|0|43871|1|36913*15;37702*2|0",
+		"55015|Закаленные саронитовые рукавицы|420|430|0|41114|1|36913*14|0",
+		"55058|Сверкающая саронитовая кираса|420|430|0|41129|1|36913*14;37705*1|0",
+		"55183|Проржавевшее саронитовое лезвие|420|430|0|41186|1|36913*16;37702*1|0",
+		"55184|Проржавевший саронитовый изранитель|420|430|0|41187|1|36913*14;37702*1|0",
+		"55185|Саронитовый мозголом|420|430|0|41188|1|36913*20;37702*2|0",
+		"55186|Бригантина завоевания|420|430|0|41189|1|36913*14;37701*2|0",
+		"55187|Ножные латы завоевания|420|430|0|41190|1|36913*13;37701*2|0",
+		"55656|Извечная поясная пряжка|420|430|0|41611|1|36913*4;35624*1;35622*1;35627*1|0",
+		"59441|Сверкающий саронитовый шлем|420|430|0|43870|1|36913*14;37705*1|0",
+		"55298|Наручники отмщения|425|435|0|41355|1|36913*12;36860*1|0",
+		"55305|Саронитовые наручи свирепости|425|435|0|41354|1|36913*12;35623*1|0",
+		"55732|Титановый жезл|425|435|0|41745|1|36913*2;41163*1|0",
+		"55839|Титановая цепь для оружия|425|435|0|41976|1|36913*2;41163*1|0",
+		"56357|Титановый шип для щита|425|435|0|42500|1|36913*2;41163*1|0",
+		"56549|Изысканные саронитовые наручи|425|435|0|42723|1|36913*12;35623*1|0",
+		"55300|Рукавицы праведности|430|450|0|41356|1|36913*12;35622*1|0",
+		"55301|Устрашающие боевые рукавицы|430|450|0|41357|1|36913*12;35624*1|0",
+		"55306|Саронитовое наплечье свирепости|430|450|0|41351|1|36913*12;35622*1|0",
+		"55307|Саронитовый воинский пояс свирепости|430|450|0|41352|1|36913*12;35622*1|0",
+		"55308|Саронитовые сапоги свирепости|430|450|0|41348|1|36913*12;35627*1|0",
+		"55309|Саронитовые рукавицы свирепости|430|450|0|41349|1|36913*12;36860*1|0",
+		"56550|Изысканное саронитовое наплечье|430|450|0|42727|1|36913*12;35622*1|0",
+		"56551|Изысканный саронитовый воинский пояс|430|450|0|42729|1|36913*12;35622*1|0",
+		"56552|Изысканные саронитовые сапоги|430|450|0|42730|1|36913*12;35627*1|0",
+		"56553|Изысканные саронитовые рукавицы|430|450|0|42724|1|36913*12;36860*1|0",
+		"61009|Ремень ледяной погибели|430|450|0|43587|1|36913*12;36860*2;35622*2;43102*1|0",
+		"61010|Сапоги ледяной погибели|430|450|0|43588|1|36913*12;36860*2;35622*2;43102*1|0",
+		"55302|Шлем властности|435|455|0|41344|1|36913*14;36860*1|0",
+		"55303|Устрашающие ножные латы|435|455|0|41345|1|36913*14;35624*1|0",
+		"55304|Наголенники праведности|435|455|0|41346|1|36913*14;35622*1|0",
+		"55310|Саронитовые ножные латы свирепости|435|455|0|41347|1|36913*14;35623*1|0",
+		"55311|Саронитовый хауберк свирепости|435|455|0|41353|1|36913*14;35624*1|0",
+		"55312|Саронитовый шлем свирепости|435|455|0|41350|1|36913*14;35627*1|0",
+		"56554|Изысканные саронитовые ножные латы|435|455|0|42726|1|36913*14;35623*1|0",
+		"56555|Изысканный саронитовый хауберк|435|455|0|42725|1|36913*14;35624*1|0",
+		"56556|Изысканный саронитовый шлем|435|455|0|42728|1|36913*14;35627*1|0",
+		"59406|Титановая отмычка|435|445|0|43853|20|36913*4;41163*1|0",
+		"61008|Нагрудный доспех ледяной погибели|435|455|0|43586|1|36913*16;36860*3;35622*3;43102*1|0",
+		"55369|Разрушитель из титановой стали|450|470|0|41257|1|36913*8;37663*8;43102*2|0",
+		"55370|Костекрушитель из титановой стали|450|470|0|41383|1|36913*6;37663*6;43102*2|0",
+		"55371|Булава стража из титановой стали|450|470|0|41384|1|36913*6;37663*6;43102*2|0",
+		"55372|Шипастый шлем из титановой стали|450|470|0|41386|1|36913*4;37663*4;43102*1|0",
+		"55373|Закаленный шлем из титановой стали|450|470|0|41387|1|36913*4;37663*4;43102*1|0",
+		"55374|Сверкающий шлем из титановой стали|450|470|0|41388|1|36913*4;37663*4;43102*1|0",
+		"55375|Шипастые сапоги из титановой стали|450|470|0|41391|1|36913*4;37663*3;43102*1|0",
+		"55376|Закаленные сапоги из титановой стали|450|470|0|41392|1|36913*4;37663*3;43102*1|0",
+		"55377|Сверкающие сапоги из титановой стали|450|470|0|41394|1|36913*4;37663*3;43102*1|0",
+		"56234|Пронзатель из титановой стали|450|470|0|42435|1|36913*6;37663*6;43102*2|0",
+		"56400|Осадный щит из титановой стали|450|470|0|42508|1|36913*4;37663*3;43102*1|0",
+		"63182|Чародейский клинок из титановой стали|450|470|0|45085|1|37663*6;34054*6;43102*2|0",
+		"62202|Титановая обшивка|455|465|0|44936|1|41163*4;35627*4|0",
+		"63187|Пояс титанов|455|475|0|45550|1|37663*5;45087*6|0",
+		"63188|Латные сапоги военачальника|455|475|0|45559|1|37663*5;45087*6|0",
+		"63189|Латный ремень правоты|455|475|0|45552|1|37663*5;45087*6|0",
+		"63190|Нити судьбы|455|475|0|45561|1|37663*5;45087*6|0",
+		"63191|Несокрушимый латный ремень|455|475|0|45551|1|37663*5;45087*6|0",
+		"63192|Зубчатые смертеносы|455|475|0|45560|1|37663*5;45087*6|0",
+		"302206|Колчедановый шип для щита|460|480|0|55056|1|41163*4;35627*4;23447*2;23446*4|0",
+		"302209|Колчедановая цепь для оружия|460|480|0|55057|1|36913*2;41163*1;23446*4;23447*2|0",
+		"316183|Гнутый обсидиан|460|470|0|65365|1|54849*2|0",
+		"67091|Кираса Белого Рыцаря|460|475|0|47591|1|37663*12;35625*8;36925*2;47556*8|0",
+		"67092|Саронитовые мечеломы|460|475|0|47570|1|37663*8;36913*20;47556*4|0",
+		"67093|Титановые нагрудные пластины|460|475|0|47589|1|37663*10;41245*4;47556*8|0",
+		"67094|Титановые шипованные наручи|460|475|0|47572|1|37663*8;41355*1;47556*4|0",
+		"67095|Кираса Кузни Солнца|460|475|0|47593|1|37663*10;35625*20;47556*8|0",
+		"67096|Наручи Кузни Солнца|460|475|0|47574|1|37663*8;35625*12;47556*4|0",
+		"67130|Кираса Белого Рыцаря|460|475|0|47592|1|37663*12;35625*8;36925*2;47556*8|0",
+		"67131|Саронитовые мечеломы|460|475|0|47571|1|37663*8;36913*20;47556*4|0",
+		"67132|Титановые нагрудные пластины|460|475|0|47590|1|37663*10;41245*4;47556*8|0",
+		"67133|Титановые шипованные наручи|460|475|0|47573|1|37663*8;41355*1;47556*4|0",
+		"67134|Кираса Кузни Солнца|460|475|0|47594|1|37663*10;35625*20;47556*8|0",
+		"67135|Наручи Кузни Солнца|460|475|0|47575|1|37663*8;35625*12;47556*4|0",
+		"315317|Саронитовые наручи свирепости претендента|470|490|0|154225|1|36913*24;35623*2;43102*2|0",
+		"315318|Саронитовое наплечье свирепости претендента|470|490|0|154229|1|36913*24;35622*2;43102*2|0",
+		"315319|Саронитовый воинский пояс свирепости претендента|470|490|0|154231|1|36913*24;35622*2;43102*2|0",
+		"315320|Саронитовые сапоги свирепости претендента|470|490|0|154232|1|36913*24;35627*2;43102*2|0",
+		"315321|Саронитовые рукавицы свирепости претендента|470|490|0|154226|1|36913*24;36860*2;43102*2|0",
+		"315322|Саронитовые ножные латы свирепости претендента|470|490|0|154228|1|36913*28;35623*2;43102*2|0",
+		"315323|Саронитовый хауберк свирепости претендента|470|490|0|154227|1|36913*28;35624*2;43102*2|0",
+		"315324|Саронитовый шлем свирепости претендента|470|490|0|154230|1|36913*28;35627*2;43102*2|0",
+		"315325|Изысканные саронитовые наручи претендента|470|490|0|154217|1|36913*24;35623*2;43102*2|0",
+		"315326|Изысканное саронитовое наплечье претендента|470|490|0|154221|1|36913*24;35622*2;43102*2|0",
+		"315327|Изысканный саронитовый воинский пояс претендента|470|490|0|154223|1|36913*24;35622*2;43102*2|0",
+		"315328|Изысканные саронитовые сапоги претендента|470|490|0|154224|1|36913*24;35627*2;43102*2|0",
+		"315329|Изысканные саронитовые рукавицы претендента|470|490|0|154218|1|36913*24;36860*2;43102*2|0",
+		"315330|Изысканные саронитовые ножные латы претендента|470|490|0|154220|1|36913*28;35623*2;43102*2|0",
+		"315331|Изысканный саронитовый хауберк претендента|470|490|0|154219|1|36913*28;35624*2;43102*2|0",
+		"315332|Изысканный саронитовый шлем претендента|470|490|0|154222|1|36913*28;35627*2;43102*2|0",
+		"322202|Шипастые рукавицы из закаленного обсидиана|470|480|0|177608|1|65365*6;52327*6|0",
+		"322204|Шипастые ботинки из закаленного обсидиана|470|480|0|177610|1|65365*6;52327*6|0",
+		"322210|Укрепленные рукавицы из закаленного обсидиана|470|480|0|177616|1|65365*6;52327*6|0",
+		"322212|Укрепленные ботинки из закаленного обсидиана|470|480|0|177618|1|65365*6;52327*6|0",
+		"322218|Изысканные рукавицы из закаленного обсидиана|470|480|0|177624|1|65365*6;52327*6|0",
+		"322220|Изысканные ботинки из закаленного обсидиана|470|480|0|177626|1|65365*6;52327*6|0",
+		"322228|Обсидиановый бердыш|470|480|0|55246|1|65365*28;52327*8;52328*8|0",
+		"322230|Заточка холодной закалки|470|480|0|55044|1|65365*14;52328*8|0",
+		"319586|Латные сапоги кузнеца света|475|500|0|97835|1|37663*16;36916*50;23447*20;23572*30;32428*4|0",
+		"319587|Ботфорты кузни погибели|475|500|0|97836|1|37663*16;36913*30;23449*60;23572*30;32428*4|0",
+		"319588|Утраченные сапоги ремесленника|475|500|0|97837|1|37663*16;36913*30;23573*8;23572*30;32428*4|0",
+		"322198|Обсидиановая отмычка|475|485|0|55053|2|65365*2|0",
+		"322207|Шипастый шлем из закаленного обсидиана|475|485|0|177613|1|65365*8;52327*8|0",
+		"322215|Укрепленный шлем из закаленного обсидиана|475|485|0|177621|1|65365*8;52327*8|0",
+		"322223|Изысканный шлем из закаленного обсидиана|475|485|0|177629|1|65365*8;52327*8|0",
+		"322227|Элементиевый щит рассвета|475|485|0|94945|1|52186*28;52325*8|0",
+		"322233|Прочный меч|475|485|0|82169|1|65365*14;52327*8|0",
+		"70562|Ножные латы из чистой стали|475|500|0|49902|1|37663*12;35623*20;49908*8|0",
+		"70563|Защитники жизни|475|500|0|49905|1|37663*8;35624*12;49908*5|0",
+		"70565|Ножные латы мучительной смерти|475|500|0|49903|1|37663*12;35627*20;49908*8|0",
+		"70566|Костомолы леденящего ада|475|500|0|49906|1|37663*8;35622*6;36860*6;49908*5|0",
+		"70567|Столпы мощи|475|500|0|49904|1|37663*12;35624*20;49908*8|0",
+		"70568|Сапоги королевского бунта|475|500|0|49907|1|37663*8;35624*12;49908*5|0",
+		"322208|Шипастая кираса из закаленного обсидиана|480|490|0|177614|1|65365*10;52327*10|0",
+		"322209|Шипастые наручи из закаленного обсидиана|480|490|0|177615|1|65365*6;52327*6|0",
+		"322216|Укрепленная кираса из закаленного обсидиана|480|490|0|177622|1|65365*10;52327*10|0",
+		"322217|Укрепленные наручи из закаленного обсидиана|480|490|0|177623|1|65365*6;52327*6|0",
+		"322224|Изысканная кираса из закаленного обсидиана|480|490|0|177630|1|65365*10;52327*10|0",
+		"322225|Изысканные наручи из закаленного обсидиана|480|490|0|177631|1|65365*6;52327*6|0",
+		"322234|Факел очищения|480|490|0|88589|1|65365*15;52325*3;52326*1|0",
+		"322203|Шипастый пояс из закаленного обсидиана|485|495|0|177609|1|65365*6;52327*6|0",
+		"322206|Шипастые набедренники из закаленного обсидиана|485|495|0|177612|1|65365*10;52327*10|0",
+		"322211|Укрепленный пояс из закаленного обсидиана|485|495|0|177617|1|65365*6;52327*6|0",
+		"322214|Укрепленные набедренники из закаленного обсидиана|485|495|0|177620|1|65365*10;52327*10|0",
+		"322219|Изысканный пояс из закаленного обсидиана|485|495|0|177625|1|65365*6;52327*6|0",
+		"322222|Изысканные набедренники из закаленного обсидиана|485|495|0|177628|1|65365*10;52327*10|0",
+		"322226|Элементиевый щит сумерек|485|495|0|96512|1|52186*28;52327*8|0",
+		"322229|Обсидиановый палач|485|495|0|55052|1|65365*20;52327*16;52325*32|0",
+		"322232|Призрачный осколок|485|495|0|82967|1|65365*15;52326*4|0",
+		"322205|Шипастые наплечники из закаленного обсидиана|490|500|0|177611|1|65365*8;52327*8|0",
+		"322213|Укрепленные наплечники из закаленного обсидиана|490|500|0|177619|1|65365*8;52327*8|0",
+		"322221|Изысканные наплечники из закаленного обсидиана|490|500|0|177627|1|65365*8;52327*8|0",
+		"322231|Бритва обезглавливателя|490|500|0|55043|1|65365*12;52325*16|0",
+		"322238|Шипастые рукавицы из закаленного колчедана|495|505|0|105096|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322240|Шипастые ботинки из закаленного колчедана|495|505|0|105098|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322246|Укрепленные рукавицы из закаленного колчедана|495|505|0|105104|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322248|Укрепленные ботинки из закаленного колчедана|495|505|0|105106|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322254|Изысканные рукавицы из закаленного колчедана|495|505|0|105112|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322256|Изысканные ботинки из закаленного колчедана|495|505|0|105114|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322264|Копье удлинившихся теней|495|505|0|62455|1|51950*58;52327*32;52325*32;52328*32;58480*2;102351*2|0",
+		"322266|Заточка иссушения разума|495|505|0|63720|1|51950*40;52328*14;63274*1;58480*1;102351*1|0",
+		"322243|Шипастый шлем из закаленного колчедана|500|510|0|105101|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322251|Укрепленный шлем из закаленного колчедана|500|510|0|105109|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322259|Изысканный шлем из закаленного колчедана|500|510|0|105117|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322269|Варварский меч|500|510|0|82114|1|51950*30;52327*44;63337*1;58480*1;102351*1|0",
+		"322199|Обсидиановая цепь для оружия|505|515|0|177606|1|65365*7|0",
+		"322200|Обсидиановый шип для щита|505|515|0|177607|1|65365*7|0",
+		"322201|Элементиевые пластины|505|515|0|105067|1|52186*4|0",
+		"322244|Шипастая кираса из закаленного колчедана|505|515|0|105102|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322245|Шипастые наручи из закаленного колчедана|505|515|0|105103|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322252|Укрепленная кираса из закаленного колчедана|505|515|0|105110|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322253|Укрепленные наручи из закаленного колчедана|505|515|0|105111|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322260|Изысканная кираса из закаленного колчедана|505|515|0|105118|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322261|Изысканные наручи из закаленного колчедана|505|515|0|105119|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322262|Колчедановый щит сумерек|505|515|0|96884|1|51950*40;52328*15;58480*1;102351*1|0",
+		"322270|Яунгольский факел|505|515|0|86518|1|51950*42;52325*5;52326*3;63314*1;58480*1;102351*1|0",
+		"322239|Шипастый пояс из закаленного колчедана|510|520|0|105097|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322242|Шипастые набедренники из закаленного колчедана|510|520|0|105100|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322247|Укрепленный пояс из закаленного колчедана|510|520|0|105105|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322250|Укрепленные набедренники из закаленного колчедана|510|520|0|105108|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322255|Изысканный пояс из закаленного колчедана|510|520|0|105113|1|51950*28;53039*1;52325*20;102351*1|0",
+		"322258|Изысканные набедренники из закаленного колчедана|510|520|0|105116|1|51950*10;53039*3;52325*60;102351*1|0",
+		"322263|Колчедановый щит рассвета|510|515|0|96140|1|51950*40;52326*15;58480*1;102351*1|0",
+		"322265|Большой меч кровавой расправы|510|520|0|55463|1|51950*46;53039*4;52325*35;63319*1;58480*2;102351*2|0",
+		"322268|Призрачный осколок искусной работы|510|520|0|82974|1|51950*42;52326*8;63316*1;58480*1;102351*1|0",
+		"322235|Элементиевая цепь для оружия|515|525|0|86597|1|53039*5|0",
+		"322236|Элементиевый шип для щита|515|525|0|55055|1|53039*5|0",
+		"322237|Колчедановые пластины|515|525|0|105076|1|51950*40|0",
+		"322241|Шипастые наплечники из закаленного колчедана|515|525|0|105099|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322249|Укрепленные наплечники из закаленного колчедана|515|525|0|105107|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322257|Изысканные наплечники из закаленного колчедана|515|525|0|105115|1|51950*18;53039*2;52325*40;102351*1|0",
+		"322267|Испытующий топор|515|525|0|61493|1|51950*34;52325*30;63343*3;58480*1;102351*1|0",
+		"322272|Обсидиановое точило|520|530|0|177915|1|65365*2;177929*1|0",
+		"322273|Элементиевое точило|520|530|0|177916|1|52186*4;177929*1|0",
+		"322274|Обсидиановое грузило|520|530|0|177917|1|65365*2;177929*1|0",
+		"322275|Элементиевое грузило|520|530|0|177918|1|52186*4;177929*1|0",
+		"322271|Поводья разрушителя-железнонога|535|545|0|157007|1|65365*50;51950*50;53039*10;102351*1|0",
+	},
+	[165] = {
+		"2881|Тонкая кожа|20|40|1|2318|1|2934*3|0",
+		"2152|Накладки из тонкой кожи|30|60|1|2304|1|2318*1|0",
+		"2149|Рукодельные кожаные сапоги|40|70|1|2302|1|2318*2;2320*1|0",
+		"7126|Рукодельный кожаный жилет|40|70|1|5957|1|2318*3;2320*1|0",
+		"9058|Рукодельный кожаный плащ|40|70|1|7276|1|2318*2;2320*1|0",
+		"9059|Рукодельные кожаные наручи|40|70|1|7277|1|2318*2;2320*3|0",
+		"2153|Рукодельные кожаные штаны|45|75|0|2303|1|2318*4;2320*1|0",
+		"3753|Рукодельный кожаный пояс|55|85|0|4237|1|2318*6;2320*1|0",
+		"3816|Обработанная легкая шкура|55|75|0|4231|1|783*1;4289*1|0",
+		"9060|Колчан из тонкой кожи|60|90|0|7278|1|2318*4;2320*2|0",
+		"9062|Небольшой кожаный подсумок|60|90|0|7279|1|2318*3;2320*4|0",
+		"9064|Штаны из грубой кожи|65|95|0|7280|1|2318*5;2320*5|0",
+		"2160|Тисненый кожаный жилет|70|100|0|2300|1|2318*8;2320*4|0",
+		"5244|Сумка из шкуры кодо|70|100|0|5081|1|5082*3;2318*4;2320*1|0",
+		"2161|Тисненые кожаные сапоги|85|115|0|2309|1|2318*8;2320*5|0",
+		"3756|Тисненые кожаные перчатки|85|115|0|4239|1|2318*3;2320*2|0",
+		"2162|Тисненый кожаный плащ|90|120|0|2310|1|2318*5;2320*2|0",
+		"2163|Белый кожаный жакет|90|120|0|2311|1|2318*8;2320*2;2324*1|0",
+		"20648|Жесткая кожа|100|110|0|2319|1|2318*4|0",
+		"9065|Наручи из тонкой кожи|100|130|0|7281|1|2318*6;2320*4|0",
+		"2159|Тонкий кожаный плащ|105|135|0|2308|1|2318*10;2321*2|0",
+		"2164|Тонкие кожаные перчатки|105|135|0|2312|1|4231*1;2318*4;2320*2|0",
+		"3759|Тисненые кожаные штаны|105|135|0|4242|1|4231*1;2318*6;2320*2|0",
+		"3763|Тонкий кожаный пояс|110|140|0|4246|1|2318*6;2320*2|0",
+		"2165|Накладки из жесткой кожи|115|130|0|2313|1|2319*4;2320*1|0",
+		"3761|Тонкий кожаный мундир|115|145|0|4243|1|4231*3;2318*6;2320*4|0",
+		"3817|Обработанная средняя шкура|115|130|0|4233|1|4232*1;4289*1|0",
+		"8322|Жилет лунного сияния|115|145|0|6709|1|2318*6;4231*1;2320*4;5498*1|0",
+		"2158|Тонкие кожаные сапоги|120|150|0|2307|1|2318*7;2320*2|0",
+		"6702|Пояс из чешуи мурлока|120|150|0|5780|1|5784*8;2318*6;2321*1|0",
+		"7953|Плащ из искаженной чешуи|120|150|0|6466|1|6470*4;4231*1;2321*1|0",
+		"2167|Темные кожаные сапоги|125|150|0|2315|1|2319*4;2321*2;4340*1|0",
+		"2169|Темный кожаный мундир|125|150|0|2317|1|2319*6;2321*1;4340*1|0",
+		"24940|Мундир из чешуи черного дракончика|125|150|0|20575|1|2319*8;7286*8;4231*1;2321*2|0",
+		"3762|Кожаный жилет жителя холмов|125|150|0|4244|1|4243*1;4231*2;2320*2|0",
+		"6703|Кираса из чешуи мурлока|125|155|0|5781|1|5784*12;4231*1;2318*8;2321*1|0",
+		"9068|Штаны из тонкой кожи|125|155|0|7282|1|2318*10;4231*1;2321*1|0",
+		"9070|Плащ из чешуи черного дракончика|125|150|0|7283|1|7286*12;2319*4;2321*1|0",
+		"7133|Тонкие кожаные штаны|130|155|0|5958|1|2319*8;2997*1;2321*1|0",
+		"7954|Перчатки из искаженной чешуи|130|155|0|6467|1|6470*5;2321*2|0",
+		"2168|Темный кожаный плащ|135|160|0|2316|1|2319*8;2321*1;4340*1|0",
+		"7135|Темные кожаные штаны|140|165|0|5961|1|2319*12;4340*1;2321*1|0",
+		"7955|Пояс из искаженной чешуи|140|165|0|6468|1|6471*6;6470*4;2321*2|0",
+		"2166|Укрепленный кожаный доспех|145|170|0|2314|1|2319*10;4231*6;2321*2|0",
+		"3767|Пояс жителя холмов|145|170|0|4250|1|2319*8;3383*1;2321*2|0",
+		"9072|Перчатки из чешуи красного дракончика|145|170|0|7284|1|7287*6;2319*4;2321*1|0",
+		"9074|Перчатки из гибкой кожи|145|170|0|7285|1|2457*1;2319*6;2321*1|0",
+		"20649|Толстая кожа|150|160|0|4234|1|2319*5|0",
+		"23190|Мяч из толстой кожи|150|160|0|18662|1|4234*2;2321*1|0",
+		"3766|Темный кожаный пояс|150|175|0|4249|1|4246*1;4233*1;2321*2;4340*1|0",
+		"9145|Перчатки Флетчера|150|175|0|7348|1|2319*8;4233*4;2321*2|0",
+		"3765|Темные кожаные перчатки|155|180|0|4248|1|2319*8;5373*2;2321*1;4340*1|0",
+		"3768|Наплечники жителя холмов|155|180|0|4251|1|4233*1;2319*4;2321*1|0",
+		"3770|Укрепленные кожаные перчатки|160|185|0|4253|1|2319*4;4233*2;3389*2;3182*2;2321*2|0",
+		"3818|Обработанная тяжелая шкура|160|170|0|4236|1|4235*1;4289*3|0",
+		"9146|Перчатки травника|160|185|0|7349|1|2319*8;3356*4;2321*2|0",
+		"9147|Кожаные наплечники земли|160|185|0|7352|1|2319*6;7067*1;2321*2|0",
+		"3769|Темные кожаные наплечники|165|190|0|4252|1|2319*12;3390*1;4340*1;2321*2|0",
+		"9148|Перчатки жулика|165|190|0|7358|1|2319*10;5373*2;2321*2|0",
+		"3760|Плащ жителя холмов|170|190|0|3719|1|4234*5;2321*2|0",
+		"3764|Кожаные перчатки жителя холмов|170|195|0|4247|1|2319*14;2321*4|0",
+		"3771|Варварские перчатки|170|190|0|4254|1|4234*6;5637*2;2321*1|0",
+		"3780|Накладки из толстой кожи|170|190|0|4265|1|4234*5;2321*1|0",
+		"9149|Тяжелые перчатки Земли|170|195|0|7359|1|2319*12;7067*2;2997*2;2321*2|0",
+		"9193|Тяжелый колчан|170|190|0|7371|1|4234*8;2321*2|0",
+		"9194|Подсумок из толстой кожи|170|190|0|7372|1|4234*8;2321*2|0",
+		"23399|Варварские наручи|175|195|0|18948|1|4234*8;4236*2;5498*4;4461*1;5637*4|0",
+		"3772|Зеленый кожаный доспех|175|195|0|4255|1|4234*9;2605*2;2321*4|0",
+		"3774|Зеленый кожаный пояс|180|200|0|4257|1|4236*1;4234*5;2321*1;2605*1;7071*1|0",
+		"7147|Штаны стража|180|200|0|5962|1|4234*12;4305*2;2321*2|0",
+		"4096|Портупея из шкуры ящера|185|205|0|4455|1|4461*6;4234*4;2321*2|0",
+		"4097|Пояс из шкуры ящера|185|205|0|4456|1|4461*4;4234*4;2321*2|0",
+		"9195|Мглистые кожаные поножи|185|205|0|7373|1|4234*10;2325*1;2321*2|0",
+		"3775|Пояс стража|190|210|0|4258|1|4236*2;4234*4;2321*1;7071*1|0",
+		"6704|Броня из толстой чешуи мурлока|190|210|0|5782|1|5785*12;4236*1;4234*10;2321*3|0",
+		"7149|Варварские поножи|190|210|0|5963|1|4234*10;2321*2;1206*1|0",
+		"3773|Защитная броня стража|195|215|0|4256|1|4236*2;4234*12;3824*1;2321*2|0",
+		"7151|Варварские наплечники|195|215|0|5964|1|4234*8;4236*1;2321*2|0",
+		"9196|Мглистый кожаный доспех|195|215|0|7374|1|4234*10;3824*1;2321*2|0",
+		"9197|Броня из зеленого дракончика|195|215|0|7375|1|7392*4;4234*10;2321*2|0",
+		"10482|Обработанная плотная шкура|200|200|0|8172|1|8169*1;8150*1|0",
+		"20650|Плотная кожа|200|205|0|4304|1|4234*6|0",
+		"3776|Зеленые кожаные наручи|200|220|0|4259|1|4236*2;4234*6;2605*1;2321*1|0",
+		"9198|Ледяной кожаный плащ|200|220|0|7377|1|4234*6;7067*2;7070*2;2321*2|0",
+		"3778|Украшенный самоцветами кожаный пояс|205|225|0|4262|1|4236*4;5500*1;1529*1;3864*1;2321*1|0",
+		"7153|Плащ хранителя|205|225|0|5965|1|4234*14;4305*2;4291*2|0",
+		"9201|Мглистые наручи|205|225|0|7378|1|4234*16;2325*1;4291*2|0",
+		"21943|Перчатки Великого Отца|210|230|0|17721|1|4234*8;7067*4;4291*1|0",
+		"22711|Тенекожаные перчатки|210|230|0|18238|1|4304*6;10285*8;4236*4;8343*1|0",
+		"6661|Варварская портупея|210|230|0|5739|1|4234*14;2321*2;7071*1|0",
+		"6705|Наручи из чешуи мурлока|210|230|0|5783|1|5785*16;4236*1;4234*14;4291*1|0",
+		"7156|Перчатки стража|210|230|0|5966|1|4234*4;4236*1;4291*1|0",
+		"9202|Наручи из чешуи зеленого дракончика|210|230|0|7386|1|7392*6;4234*8;4291*2|0",
+		"3777|Кожаные наручи стража|215|235|0|4260|1|4234*6;4236*2;4291*1|0",
+		"9206|Мглистый пояс|215|235|0|7387|1|4234*10;4305*2;2325*2;7071*1|0",
+		"10487|Накладки из плотной кожи|220|240|0|8173|1|4304*5;4291*1|0",
+		"10490|Удобная кожаная шляпа|220|240|0|8174|1|4234*12;4236*2;4291*2|0",
+		"3779|Варварский пояс|220|240|0|4264|1|4234*6;4236*2;4096*2;5633*1;4291*1;7071*1|0",
+		"9207|Мглистые сапоги|220|240|0|7390|1|4234*8;10285*2;4291*2|0",
+		"9208|Сапоги быстроты|220|240|0|7391|1|4234*10;2459*2;4337*2;4291*1|0",
+		"10499|Ночной мундир|225|245|0|8175|1|4304*7;4291*2|0",
+		"10507|Ночная головная повязка|225|245|0|8176|1|4304*5;4291*2|0",
+		"10509|Перчатки из черепашьего панциря|225|245|0|8187|1|4304*6;8167*8;8343*1|0",
+		"10511|Кираса из черепашьего панциря|230|250|0|8189|1|4304*6;8167*12;8343*1|0",
+		"10516|Ночные наплечники|230|250|0|8192|1|4304*8;4338*6;4291*3|0",
+		"10518|Наручи из черепашьего панциря|230|250|0|8198|1|4304*8;8167*12;8343*1|0",
+		"10520|Большое вудуистское одеяние|235|255|0|8200|1|4304*10;8151*4;8343*1|0",
+		"10525|Жесткая кираса из чешуи скорпида|240|260|0|8203|1|4304*12;8154*12;4291*4|0",
+		"10529|Дикарские кожаные наплечники|240|260|0|8210|1|4304*10;8153*1;8172*1|0",
+		"10531|Большая вудуистская маска|240|260|0|8201|1|4304*8;8151*6;8343*1|0",
+		"10533|Жесткие наручи из чешуи скорпида|240|260|0|8205|1|4304*10;8154*4;4291*2|0",
+		"10542|Жесткие перчатки из чешуи скорпида|245|265|0|8204|1|4304*6;8154*8;4291*2|0",
+		"10544|Дикарский кожаный жилет|245|265|0|8211|1|4304*12;8153*2;8172*1|0",
+		"10546|Дикарский кожаный шлем|245|265|0|8214|1|4304*10;8153*2;8172*1|0",
+		"10619|Рукавицы из чешуи дракона|245|265|0|8347|1|4304*24;8165*12;8343*4;8172*2|0",
+		"10621|Волкоголовый шлем|245|265|0|8345|1|4304*18;8153*12;8172*4;8343*1|0",
+		"14930|Колчан быстрой тетивы|245|265|0|8217|1|4304*12;8172*1;8949*1;4291*4|0",
+		"14932|Подсумок из плотной кожи|245|265|0|8218|1|4304*10;8172*1;8951*1;4291*6|0",
+		"10548|Ночные штаны|250|270|0|8193|1|4304*14;4291*4|0",
+		"10550|Ночной плащ|250|270|0|8195|1|4304*12;4291*4|0",
+		"10552|Шлем из черепашьего панциря|250|270|0|8191|1|4304*14;8167*24;8343*1|0",
+		"10630|Рукавицы Моря|250|270|0|8346|1|4304*20;7079*4;8172*1;8343*4|0",
+		"19047|Обработанная грубая шкура|250|260|0|15407|1|8171*1;15409*1|0",
+		"22331|Грубая кожа|250|250|0|8170|1|4304*6|0",
+		"10554|Жесткие сапоги из чешуи скорпида|255|275|0|8209|1|4304*12;8154*12;4291*6|0",
+		"10556|Поножи из черепашьего панциря|255|275|0|8185|1|4304*14;8167*28;8343*1|0",
+		"10558|Ночные сапоги|255|275|0|8197|1|4304*16;8343*2|0",
+		"19058|Накладки из грубой кожи|255|275|0|15564|1|8170*5|0",
+		"10560|Большие вудуистские штаны|260|280|0|8202|1|4304*10;8152*6;8343*2|0",
+		"10562|Большой вудуистский плащ|260|280|0|8216|1|4304*14;8152*4;8343*2|0",
+		"10564|Жесткие наплечники из чешуи скорпида|260|280|0|8207|1|4304*12;8154*16;8343*2|0",
+		"10566|Дикарские кожаные сапоги|265|285|0|8213|1|4304*14;8153*4;8172*2|0",
+		"10568|Жесткие поножи из чешуи скорпида|265|285|0|8206|1|4304*14;8154*8;8343*2|0",
+		"10570|Жесткий шлем из чешуи скорпида|270|290|0|8208|1|4304*10;8154*20;8343*2|0",
+		"10572|Дикарские кожаные поножи|270|290|0|8212|1|4304*16;8153*6;8172*2|0",
+		"10574|Дикарский кожаный плащ|270|290|0|8215|1|4304*16;8153*6;8172*2|0",
+		"10632|Шлем огня|270|290|0|8348|1|4304*30;7077*8;8172*2;8343*4|0",
+		"10647|Оперенная перьями кираса|270|290|0|8349|1|4304*25;17056*20;7971*2;8172*4;8343*4|0",
+		"10650|Кираса из чешуи дракона|275|295|0|8367|1|4304*40;8165*30;8343*4;8172*4|0",
+		"19048|Наручи из толстой чешуи скорпида|275|295|0|15077|1|8170*4;15408*4;14341*1|0",
+		"19049|Гибельные кожаные рукавицы|280|300|0|15083|1|8170*8;2325*1;14341*1|0",
+		"19050|Кираса из чешуи зеленого дракона|280|300|0|15045|1|8170*20;15412*25;14341*2|0",
+		"36074|Поножи Черной бури|280|300|0|29964|1|8170*10;7081*8;8172*2;14341*1|0",
+		"36075|Поножи Буйного Пера|280|300|0|29970|1|8170*10;17056*5;8153*4;8172*2;14341*1|0",
+		"36076|Поножи Драконоборца|280|300|0|29971|1|8170*10;8165*10;8172*2;14341*1|0",
+		"19051|Жилет из толстой чешуи скорпида|285|305|0|15076|1|8170*6;15408*6;14341*1|0",
+		"19052|Гибельные кожаные наручи|285|305|0|15084|1|8170*8;2325*1;14341*1|0",
+		"19053|Химерические перчатки|285|305|0|15074|1|8170*6;12803*1;14341*1|0",
+		"22815|Броня огров Гордока|285|295|0|18258|1|8170*4;14048*2;18240*1;14341*1|0",
+		"44953|Зимние сапоги|285|285|0|34086|1|2840*1;2997*1;8170*4;14341*1|0",
+		"19055|Рунические кожаные рукавицы|290|310|0|15091|1|8170*10;14047*6;14341*1|0",
+		"19059|Вулканические поножи|290|310|0|15054|1|8170*6;7078*1;7075*1;14341*1|0",
+		"19060|Поножи из чешуи зеленого дракона|290|310|0|15046|1|8170*20;15412*25;14341*1|0",
+		"19061|Наплечники жизни|290|310|0|15061|1|8170*12;12803*4;14341*1|0",
+		"19062|Железноперые наплечники|290|310|0|15067|1|8170*24;17056*40;1529*2;14341*1|0",
+		"19063|Химерические сапоги|295|315|0|15073|1|8170*4;12803*1;14341*1|0",
+		"19064|Рукавицы из толстой чешуи скорпида|295|315|0|15078|1|8170*6;15408*8;14341*1|0",
+		"19065|Рунические кожаные наручи|295|315|0|15092|1|8170*6;7971*1;14341*1|0",
+		"19066|Сапоги из кожи ледопарда|295|315|0|15071|1|8170*4;7080*1;14341*1|0",
+		"19067|Штаны Грозового Покрова|295|315|0|15057|1|8170*16;7082*2;14341*1|0",
+		"19068|Портупея боевого медведя|295|315|0|15064|1|8170*28;15419*12;14341*1|0",
+		"19070|Пояс из толстой чешуи скорпида|300|320|0|15082|1|8170*6;15408*8;14341*1|0",
+		"19071|Гибельная кожаная головная повязка|300|320|0|15086|1|8170*12;2325*1;14341*1|0",
+		"19072|Рунический кожаный пояс|300|320|0|15093|1|8170*10;14047*10;14341*1|0",
+		"19073|Химерические поножи|300|320|0|15072|1|8170*8;12803*1;14341*1|0",
+		"24655|Рукавицы из чешуи зеленого дракона|300|320|0|20296|1|8170*20;15412*30;15407*1;14341*2|0",
+		"32454|Узловатая кожа|300|310|0|21887|1|25649*5|0",
+		"32482|Удобные стельки|300|310|0|25679|1|21887*2|0",
+		"19074|Поножи из кожи ледопарда|305|325|0|15069|1|8170*6;7080*1;14341*1|0",
+		"19075|Поножи из толстой чешуи скорпида|305|325|0|15079|1|8170*8;15408*12;14341*1|0",
+		"19076|Вулканическая кираса|305|325|0|15053|1|8170*8;7078*1;7076*1;14341*1|0",
+		"19077|Кираса из чешуи синего дракона|305|325|0|15048|1|8170*28;15415*30;15407*1;14341*1|0",
+		"19078|Поножи жизни|305|325|0|15060|1|8170*16;12803*6;15407*1;14341*1|0",
+		"19079|Доспех Грозового Покрова|305|325|0|15056|1|8170*16;7082*3;15407*1;14341*1|0",
+		"19080|Короткие штаны боевого медведя|305|325|0|15065|1|8170*24;15419*14;14341*1|0",
+		"19081|Химерический жилет|310|330|0|15075|1|8170*10;12803*1;14341*1|0",
+		"19082|Руническая кожаная головная повязка|310|330|0|15094|1|8170*14;14047*10;14341*1|0",
+		"19083|Гибельные кожаные штаны|310|330|0|15087|1|8170*12;15407*1;2325*3;14341*1|0",
+		"19084|Рукавицы дьявозавра|310|330|0|15063|1|8170*30;15417*8;14341*1|0",
+		"19085|Кираса из чешуи черного дракона|310|330|0|15050|1|8170*25;15416*25;15407*1;14341*2|0",
+		"19086|Железноперая кираса|310|330|0|15066|1|8170*35;17056*40;1529*1;15407*1;14341*1|0",
+		"23703|Мощь Древобрюхов|310|330|0|19044|1|8170*30;12803*4;15407*2;14341*2|0",
+		"23705|Рассветные ботфорты|310|330|0|19052|1|8170*30;12809*2;7080*4;15407*2;14341*2|0",
+		"32456|Накладки из узловатой кожи|310|340|0|25650|1|21887*4|0",
+		"32462|Скверночешуйчатые перчатки|310|330|0|25654|1|21887*5;25700*1;14341*2|0",
+		"32466|Чешуйчатые дренейские штаны|310|330|0|25662|1|21887*6;25700*3;14341*2|0",
+		"32470|Утолщенные дренейские перчатки|310|330|0|25669|1|21887*6;14341*2|0",
+		"32478|Сапоги дренейского дикаря|310|330|0|25673|1|21887*6;14341*3|0",
+		"45100|Сумка кожевника|310|330|0|34482|1|21887*20;25700*4;25707*4;14341*3|0",
+		"19087|Перчатки из кожи ледопарда|315|335|0|15070|1|8170*6;7080*1;14341*1|0",
+		"19088|Шлем из толстой чешуи скорпида|315|335|0|15080|1|8170*8;15408*12;15407*1;14341*1|0",
+		"19089|Наплечники из чешуи синего дракона|315|335|0|15049|1|8170*28;15415*30;12810*2;15407*1;14341*1|0",
+		"19090|Наплечники Грозового Покрова|315|335|0|15058|1|8170*12;7082*3;14227*2|0",
+		"20853|Сапоги гончей Недр|315|335|0|16982|1|17012*20;17010*6;17011*2;14341*2|0",
+		"19054|Кираса из чешуи красного дракона|320|340|0|15047|1|8170*40;15414*30;14341*1|0",
+		"19091|Рунические кожаные штаны|320|340|0|15095|1|8170*18;14047*12;12810*2;14341*1|0",
+		"19092|Гибельный кожаный пояс|320|340|0|15088|1|8170*14;2325*2;14341*2|0",
+		"19093|Плащ из чешуи Ониксии|320|340|0|15138|1|15410*1;14044*1;14341*1|0",
+		"19094|Наплечники из чешуи черного дракона|320|340|0|15051|1|8170*20;15416*15;15407*1;14341*1|0",
+		"19095|Кираса Жизни|320|340|0|15059|1|8170*16;12803*8;14342*2;15407*1;14341*2|0",
+		"19097|Поножи дьявозавра|320|340|0|15062|1|8170*30;15417*14;15407*1;14341*1|0",
+		"19098|Гибельный кожаный доспех|320|340|0|15085|1|8170*20;15407*2;14256*2;2325*4;14341*2|0",
+		"19100|Наплечники из толстой чешуи скорпида|320|340|0|15081|1|8170*14;15408*14;15407*1;14341*2|0",
+		"19101|Вулканические наплечники|320|340|0|15055|1|8170*10;7078*1;7076*1;14341*2|0",
+		"19102|Рунический кожаный доспех|320|340|0|15090|1|8170*22;12810*4;14047*16;15407*1;14341*2|0",
+		"19103|Рунические кожаные наплечники|320|340|0|15096|1|8170*16;12810*4;14047*18;15407*1;14341*2|0",
+		"19104|Мундир из кожи ледопарда|320|340|0|15068|1|8170*12;7080*1;15407*1;14341*2|0",
+		"19106|Кираса из чешуи Ониксии|320|340|0|15141|1|8170*40;15410*12;15416*60;14341*2|0",
+		"19107|Поножи из чешуи черного дракона|320|340|0|15052|1|8170*25;15416*25;15407*1;14341*2|0",
+		"20854|Оплавленный шлем|320|340|0|16983|1|17012*12;17010*3;17011*3;14341*2|0",
+		"20855|Сапоги из чешуи черного дракона|320|340|0|16984|1|15416*18;17010*3;17011*3;14341*2|0",
+		"22727|Накладки из кожи Недр|320|340|0|18251|1|17012*3;14341*2|0",
+		"22921|Ремень Прозрения|320|340|0|18504|1|8170*12;12804*12;15407*2;14341*4|0",
+		"22922|Мангустовые сапоги|320|340|0|18506|1|8170*12;7082*6;11754*4;15407*2;14341*4|0",
+		"22923|Наручи стремительного полета|320|340|0|18508|1|8170*12;18512*8;15407*4;14341*4|0",
+		"22926|Разноцветный плащ|320|340|0|18509|1|8170*25;12607*4;15416*12;15414*12;14341*2|0",
+		"22927|Сень Природы|320|340|0|18510|1|8170*30;18512*5;15407*2;14341*2|0",
+		"22928|Изменчивый плащ|320|340|0|18511|1|12810*10;12753*2;14341*1|0",
+		"23704|Кулачные перчатки Древобрюхов|320|340|0|19049|1|12810*8;12804*6;12803*6;15407*2;14227*2|0",
+		"23706|Золотое оплечье рассвета|320|340|0|19058|1|12810*8;12803*4;12809*4;15407*2;14341*2|0",
+		"23707|Лавовый пояс|320|340|0|19149|1|17011*2;17012*2;14227*4|0",
+		"23708|Разноцветные рукавицы|320|340|0|19157|1|17010*3;17011*2;17012*8;14227*4|0",
+		"23709|Пояс гончей Недр|320|340|0|19162|1|17010*4;17012*12;8170*12;14227*4|0",
+		"23710|Оплавленный пояс|320|340|0|19163|1|17010*2;17011*2;17012*2;14227*4|0",
+		"24121|Жакет из кожи древней летучей мыши|320|340|0|19685|1|19767*14;15407*5;12803*4;14341*4|0",
+		"24122|Перчатки из кожи древней летучей мыши|320|340|0|19686|1|19767*10;15407*4;12803*4;14341*3|0",
+		"24123|Наручи из кожи древней летучей мыши|320|340|0|19687|1|19767*8;15407*3;12803*4;14341*3|0",
+		"24124|Кираса кровавого тигра|320|340|0|19688|1|19768*25;15407*3;14341*3|0",
+		"24125|Наплечники кровавого тигра|320|340|0|19689|1|19768*25;15407*3;14341*3|0",
+		"24654|Поножи из чешуи синего дракона|320|340|0|20295|1|8170*28;15415*36;15407*2;14341*2|0",
+		"24703|Кираса чешуи сна|320|340|0|20380|1|8170*20;20381*3;12803*3;14341*2|0",
+		"24846|Наручи духовного огня|320|340|0|20481|1|20500*1;20498*20;7078*2|0",
+		"24847|Рукавицы духовного огня|320|340|0|20480|1|20500*2;20498*30;7078*2;15407*1|0",
+		"24848|Кираса духовного огня|320|340|0|20479|1|20500*3;20498*40;7078*2;15407*2|0",
+		"24849|Наручи песчаного ловца|320|340|0|20476|1|20501*1;20498*20;18512*2|0",
+		"24850|Рукавицы песчаного ловца|320|340|0|20477|1|20501*2;20498*30;18512*2;15407*1|0",
+		"24851|Кираса песчаного ловца|320|340|0|20478|1|20501*3;20498*40;18512*2;15407*2|0",
+		"26279|Перчатки Грозового Покрова|320|340|0|21278|1|12810*6;7082*4;14227*2|0",
+		"28219|Снежный мундир|320|340|0|22661|1|22682*7;12810*16;7080*2;15407*4;14227*4|0",
+		"28220|Снежные перчатки|320|340|0|22662|1|22682*5;12810*12;7080*2;15407*3;14227*4|0",
+		"28221|Снежные наручи|320|340|0|22663|1|22682*4;12810*12;7080*2;15407*2;14227*4|0",
+		"28222|Кираса из ледяной чешуи|320|340|0|22664|1|22682*7;15408*24;7080*2;15407*4;14227*4|0",
+		"28223|Рукавицы из ледяной чешуи|320|340|0|22666|1|22682*5;15408*16;7080*2;15407*3;14227*4|0",
+		"28224|Наручи из ледяной чешуи|320|340|0|22665|1|22682*4;15408*16;7080*2;15407*2;14227*4|0",
+		"28472|Ежевичный шлем|320|340|0|22759|1|8170*12;19726*2;12803*2;15407*2|0",
+		"28473|Ежевичные сапоги|320|340|0|22760|1|12810*6;18512*2;12803*2;15407*2|0",
+		"28474|Ежевичный пояс|320|340|0|22761|1|12810*4;12803*2;15407*1|0",
+		"32463|Скверночешуйчатые сапоги|320|340|0|25655|1|21887*8;25700*1;14341*2|0",
+		"32467|Чешуйчатые дренейские перчатки|320|340|0|25661|1|21887*8;25700*1;14341*2|0",
+		"32479|Перчатки дренейского дикаря|320|340|0|25674|1|21887*9;14341*3|0",
+		"32455|Толстая узловатая кожа|325|335|0|23793|1|21887*5|0",
+		"32471|Утолщенные дренейские штаны|325|345|0|25670|1|21887*10;14341*2|0",
+		"44343|Подсумок из узловатой кожи|325|345|0|34099|1|21887*24;14341*4;22451*1|0",
+		"44344|Колчан из узловатой кожи|325|345|0|34100|1|21887*20;25719*30;14341*2|0",
+		"32464|Скверночешуйчатые штаны|330|350|0|25656|1|21887*10;25700*3;14341*3|0",
+		"32472|Утолщенные дренейские сапоги|330|350|0|25668|1|21887*10;14341*3|0",
+		"32480|Поножи дренейского дикаря|330|350|0|25675|1|21887*13;14341*3|0",
+		"32457|Накладки для брони воздаятеля|335|345|0|25651|1|23793*3;22452*1|0",
+		"32458|Накладки для брони магистра|335|345|0|25652|1|23793*3;22457*1|0",
+		"32468|Чешуйчатая дренейская безрукавка|335|355|0|25660|1|23793*2;25700*3;14341*3|0",
+		"35530|Укрепленная шахтерская сумка|335|345|0|29540|1|23793*6;22452*4|0",
+		"35549|Накладки для поножей из кожи кобры|335|355|0|29533|1|23793*4;29539*2;22451*4|0",
+		"35555|Накладки для поножей из шкуры копытня|335|355|0|29534|1|23793*4;25708*8;22452*4|0",
+		"32473|Утолщенная дренейская безрукавка|340|360|0|25671|1|23793*3;14341*3|0",
+		"32481|Жилет дренейского дикаря|340|360|0|25676|1|23793*3;14341*3|0",
+		"35540|Барабаны войны|340|355|0|29528|1|23793*3;25700*3|0",
+		"32465|Скверночешуйчатая кираса|345|365|0|25657|1|23793*2;25700*3;14341*3|0",
+		"32469|Чешуйчатые дренейские сапоги|345|365|0|25659|1|23793*2;25700*2;14341*3|0",
+		"35544|Барабаны скорости|345|360|0|29530|1|23793*6;29547*4|0",
+		"32490|Перчатки из сквернокожи|350|370|0|25685|1|23793*6;25707*6;22456*6;14341*3|0",
+		"32501|Пояс неистовства пустоты|350|370|0|25694|1|23793*4;25699*8;21885*3;22457*3;14341*2|0",
+		"32502|Поножи неистовства пустоты|350|370|0|25692|1|23793*8;25699*12;21885*5;22457*5;14341*2|0",
+		"35520|Накладки сопротивления темной магии|350|360|0|29483|1|23793*4;21886*4|0",
+		"35521|Накладки сопротивления огню|350|360|0|29485|1|23793*4;21885*4|0",
+		"35522|Накладки сопротивления магии льда|350|360|0|29486|1|23793*4;21884*4|0",
+		"35523|Накладки сопротивления силам природы|350|360|0|29487|1|23793*4;22456*4|0",
+		"35524|Накладки сопротивления тайной магии|350|360|0|29488|1|23793*4;22457*4|0",
+		"35539|Барабаны восстановления|350|365|0|29531|1|23793*6;29548*4|0",
+		"36077|Кираса извечного шторма|350|370|0|29973|1|23793*4;22451*2;22452*2;14341*2|0",
+		"36078|Кираса живых кристаллов|350|370|0|29974|1|23793*4;25699*12;21886*3;14341*2|0",
+		"36079|Золотая кираса Драконоборца|350|370|0|29975|1|23793*4;15416*8;21884*3;14341*2|0",
+		"64661|Борейская кожа|350|375|0|33568|1|33567*5|0",
+		"44770|Упрочнения для перчаток|355|365|0|34207|1|23793*4;22452*3|0",
+		"44970|Накладки из толстой узловатой кожи|355|365|0|34330|1|23793*3|0",
+		"32461|Ездовой хлыст|360|380|0|25653|1|23793*4;23571*1;22445*6;22448*1|0",
+		"32485|Вычурная лиловая шляпа|360|380|0|25680|1|23793*6;29539*2;22456*8;4342*4;14341*3|0",
+		"32487|Вычурная походная шляпа|360|380|0|25681|1|23793*6;29539*2;21886*8;2325*4;14341*3|0",
+		"32488|Вычурная багровая шляпа|360|380|0|25683|1|23793*6;29539*2;21884*8;2604*4;14341*3|0",
+		"32489|Вычурная тропическая шляпа|360|380|0|25682|1|23793*6;29539*2;22452*8;14341*3|0",
+		"32493|Сапоги из сквернокожи|360|380|0|25686|1|23793*10;25707*8;22456*8;14341*3|0",
+		"32494|Поножи из сквернокожи|360|380|0|25687|1|23793*10;25707*10;22456*10;14341*3|0",
+		"32498|Пояс ловца Скверны|360|380|0|25695|1|23793*6;25707*4;25699*8;22451*6;14341*2|0",
+		"32503|Сапоги неистовства пустоты|360|380|0|25693|1|23793*6;25699*10;21885*4;22457*4;14341*2|0",
+		"35525|Зачарованные скверночешуйчатые поножи|360|380|0|29489|1|23793*6;25700*12;22457*8|0",
+		"35526|Зачарованные скверночешуйчатые перчатки|360|380|0|29490|1|23793*4;25700*10;22457*6|0",
+		"35527|Зачарованные скверночешуйчатые сапоги|360|380|0|29491|1|23793*4;25700*10;22457*6|0",
+		"35528|Огненночешуйчатые сапоги|360|380|0|29493|1|23793*4;25699*8;21884*3;21885*3|0",
+		"35529|Огненночешуйчатые поножи|360|380|0|29492|1|23793*6;25699*12;21884*4;21885*4|0",
+		"35531|Огненночешуйчатый пояс|360|380|0|29494|1|23793*4;25699*8;21884*3;21885*3|0",
+		"35532|Зачарованные поножи из шкуры копытня|360|380|0|29495|1|23793*6;25708*24;22457*8|0",
+		"35533|Зачарованные перчатки из шкуры копытня|360|380|0|29496|1|23793*4;25708*16;22457*6|0",
+		"35534|Зачарованные сапоги из шкуры копытня|360|380|0|29497|1|23793*4;25708*16;22457*6|0",
+		"35535|Взрывостойкие штаны|360|380|0|29498|1|23793*6;25707*10;21884*4;21885*4|0",
+		"35536|Взрывостойкие сапоги|360|380|0|29499|1|23793*4;25707*8;21884*3;21885*3|0",
+		"35537|Взрывостойкий пояс|360|380|0|29500|1|23793*4;25707*6;21884*3;21885*3|0",
+		"44359|Колчан тысячи оперений|360|380|0|34105|1|23793*8;17056*99;22451*2;23572*1|0",
+		"44768|Подсумок из чешуи дракона Пустоты|360|380|0|34106|1|23793*12;29548*12;22452*4;23572*1|0",
+		"32496|Тяжелые поножи из шкуры копытня|365|385|0|25690|1|23793*6;25708*34;22452*4;14341*2|0",
+		"32497|Тяжелые сапоги из шкуры копытня|365|385|0|25691|1|23793*4;25708*20;22452*4;14341*2|0",
+		"35543|Барабаны битвы|365|380|0|29529|1|23793*6;25708*4|0",
+		"35554|Накладки для поножей из чешуи кобры|365|385|0|29535|1|23793*4;29539*4;22451*8;23572*1|0",
+		"35557|Накладки для поножей из кожи копытня|365|385|0|29536|1|23793*4;25708*16;22452*8;23572*1|0",
+		"32495|Тяжелый панцирь из шкуры копытня|370|390|0|25689|1|23793*6;25708*40;22452*4;14341*2|0",
+		"32499|Наручи ловца Скверны|370|390|0|25697|1|23793*6;25707*6;25699*6;22451*4;14341*2|0",
+		"32500|Кираса ловца Скверны|370|390|0|25696|1|23793*10;25707*4;25699*8;22451*8;14341*2|0",
+		"35538|Барабаны паники|370|385|0|29532|1|23793*6;25707*4|0",
+		"42546|Плащ Тьмы|370|390|0|33122|1|23793*8;21844*12;22456*12;23572*4|0",
+		"45117|Сумка множества шкур|370|390|0|34490|1|23793*15;29547*5;25707*5;29548*5;25708*5;14341*3|0",
+		"35558|Капюшон из чешуи кобры|375|395|0|29502|1|23793*6;29539*10;22451*15;22456*15;23572*1|0",
+		"35559|Перчатки из чешуи кобры|375|395|0|29503|1|23793*4;29539*8;22451*12;22456*12;23572*1|0",
+		"35560|Ветрочешуйчатый капюшон|375|395|0|29504|1|23793*6;29547*20;22451*18;22457*10;23572*1|0",
+		"35561|Капюшон изначальной жизни|375|395|0|29505|1|23793*6;21886*20;21885*8;23572*1|0",
+		"35562|Перчатки Живого прикосновения|375|395|0|29506|1|23793*4;21886*16;22452*12;23572*1|0",
+		"35563|Напульсники ветроубийцы|375|395|0|29507|1|23793*4;29547*12;22452*18;22451*8;23572*1|0",
+		"35564|Животворный шлем из чешуи дракона|375|395|0|29508|1|23793*6;29548*28;21886*12;22457*12;23572*1|0",
+		"35567|Земляные сапоги из чешуи дракона Пустоты|375|395|0|29512|1|23793*4;29548*24;22452*22;22457*4;23572*1|0",
+		"35568|Перчатки налетевшего ветра|375|395|0|29509|1|23793*4;29547*14;22451*14;21884*10;23572*1|0",
+		"35572|Шлем дракона Пустоты|375|395|0|29510|1|23793*6;29548*28;21884*18;22457*12;23572*1|0",
+		"35573|Перчатки дракона Пустоты|375|395|0|29511|1|23793*4;29548*24;21884*14;22457*10;23572*1|0",
+		"35574|Плотная кираса из чешуи дракона Пустоты|375|395|0|29514|1|23793*8;29548*32;22452*20;22451*8;23572*1|0",
+		"42731|Нагрудный доспех сумеречного татя|375|395|0|33204|1|23793*10;21844*16;22452*12;22456*12;23572*2|0",
+		"46132|Кожаные рукавицы Солнца|375|410|0|34372|1|23793*30;25708*16;21886*18;23571*8;34664*6|0",
+		"46133|Стрелецкие перчатки Феникса|375|410|0|34374|1|23793*30;29547*16;22451*18;23571*8;34664*6|0",
+		"46134|Перчатки вечного сумрака|375|410|0|34370|1|23793*30;25707*16;22456*18;23571*8;34664*6|0",
+		"46135|Пронизанные солнцем чешуйчатые перчатки|375|410|0|34376|1|23793*30;29548*16;21886*18;23571*8;34664*6|0",
+		"46136|Кожаный нагрудный доспех солнца|375|410|0|34371|1|23793*40;25708*24;23571*6;23572*6|0",
+		"46137|Облачение Феникса|375|410|0|34373|1|23793*40;29547*24;23571*6;23572*6|0",
+		"46138|Панцирь Солнца и Тени|375|410|0|34369|1|23793*40;25707*24;23571*6;23572*6|0",
+		"46139|Пронизанный солнцем нагрудный доспех|375|410|0|34375|1|23793*40;29548*24;23571*6;23572*6|0",
+		"50962|Накладки из борейской кожи|375|385|0|38375|1|33568*4|0",
+		"50943|Пояс жителя льдов|380|395|0|38406|1|33568*10|0",
+		"35575|Черная кираса из чешуи дракона Пустоты|385|405|0|29515|1|23793*8;29548*30;21884*16;22456*16;23572*2|0",
+		"35576|Черный пояс из чешуи дракона Пустоты|385|405|0|29516|1|23793*6;29548*24;21884*12;22456*12;23572*1|0",
+		"35577|Черные наручи из чешуи дракона Пустоты|385|405|0|29517|1|23793*4;29548*18;21884*8;22456*8|0",
+		"35580|Кираса удара Пустоты|385|405|0|29519|1|23793*8;29548*30;22457*16;22451*16;23572*2|0",
+		"35582|Пояс удара Пустоты|385|405|0|29520|1|23793*6;29548*24;22457*12;22451*12;23572*1|0",
+		"35584|Наручи удара Пустоты|385|405|0|29521|1|23793*4;29548*18;22457*8;22451*8|0",
+		"35585|Хауберк легкокрылого ястреба|385|405|0|29522|1|23793*8;29547*20;22451*16;23571*3;23572*2|0",
+		"35587|Пояс легкокрылого ястреба|385|405|0|29524|1|23793*6;29547*16;22451*12;23571*2;23572*1|0",
+		"35588|Наручи легкокрылого ястреба|385|405|0|29523|1|23793*4;29547*12;22451*8;23571*1|0",
+		"35589|Жилет упреждающего удара|385|405|0|29525|1|23793*8;23571*6;23572*2|0",
+		"35590|Пояс упреждающего удара|385|405|0|29526|1|23793*6;23571*5;23572*1|0",
+		"35591|Наручи упреждающего удара|385|405|0|29527|1|23793*4;23571*3|0",
+		"36349|Пояс природной силы|385|405|0|30042|1|30183*2;23793*4;21886*10;14341*2;22451*10|0",
+		"36351|Пояс глубокой тени|385|405|0|30040|1|30183*2;23793*4;22456*10;14341*2;22451*10|0",
+		"36352|Пояс черного орла|385|405|0|30046|1|30183*2;23793*4;22451*10;29547*10;14341*2|0",
+		"36353|Пояс сезона дождей|385|405|0|30044|1|30183*2;23793*4;21885*10;29547*6;14341*2|0",
+		"36355|Сапоги природной милости|385|405|0|30041|1|23572*2;23793*4;21886*12;14341*2|0",
+		"36357|Сапоги непроглядной тьмы|385|405|0|30039|1|23572*2;23793*4;22456*12;14341*2|0",
+		"36358|Сапоги багрового ястреба|385|405|0|30045|1|23572*2;23793*4;22451*10;29547*6;14341*2|0",
+		"36359|Сапоги урагана|385|405|0|30043|1|23572*2;23793*4;21885*10;29547*6;14341*2|0",
+		"39997|Сапоги скованных душ|385|405|0|32398|1|32428*2;22450*1;21886*2;22456*4;25700*4|0",
+		"40001|Наголенники скованных душ|385|405|0|32400|1|32428*3;22450*1;21886*4;22456*6;25700*3|0",
+		"40002|Воинский пояс скованных душ|385|405|0|32397|1|32428*2;22450*1;21886*3;22456*4;25700*2|0",
+		"40003|Мокасины искупленной души|385|405|0|32394|1|32428*2;22450*1;21886*2;22456*4;25707*4|0",
+		"40004|Накулачники искупленной души|385|405|0|32395|1|32428*1;22450*1;21886*2;22456*2;25707*2|0",
+		"40005|Набедренники искупленной души|385|405|0|32396|1|32428*3;22450*1;21886*4;22456*6;25707*3|0",
+		"40006|Кушак искупленной души|385|405|0|32393|1|32428*2;22450*1;21886*3;22456*4;25707*2|0",
+		"41156|Наручи обновленной жизни|385|405|0|32582|1|23793*4;22451*6;21886*6;32428*4|0",
+		"41157|Наплечные пластины обновленной жизни|385|405|0|32583|1|23793*6;22451*8;21886*8;32428*2|0",
+		"41158|Наручи молниеносного удара|385|405|0|32580|1|23793*4;22451*10;32428*4|0",
+		"41160|Наплечники молниеносного удара|385|405|0|32581|1|23793*6;22451*12;32428*2|0",
+		"41161|Наручники молниеносной реакции|385|405|0|32574|1|23793*4;22451*4;21885*4;29547*12;32428*4|0",
+		"41162|Наплечники молниеносной реакции|385|405|0|32575|1|23793*6;22451*6;21885*6;29547*16;32428*2|0",
+		"41163|Наручники живой земли|385|405|0|32577|1|23793*4;22451*4;22452*4;29547*12;32428*4|0",
+		"41164|Наплечники живой земли|385|405|0|32579|1|23793*6;22451*6;22452*6;29547*16;32428*2|0",
+		"50936|Толстая борейская кожа|385|405|0|38425|1|33568*6|0",
+		"50939|Поножи жителя льдов|385|405|0|38410|1|33568*12|0",
+		"50941|Перчатки жителя льдов|385|405|0|38409|1|33568*8|0",
+		"50944|Арктический нагрудник|385|405|0|38400|1|33568*12|0",
+		"50948|Арктические сапоги|385|405|0|38404|1|33568*8|0",
+		"50951|Поножи из обмерзшей чешуи|385|405|0|38416|1|33568*12|0",
+		"50955|Пояс из обмерзшей чешуи|385|405|0|38412|1|33568*8|0",
+		"50957|Нерубские поножи|385|405|0|38422|1|33568*8|0",
+		"50959|Нерубские перчатки|385|405|0|38421|1|33568*12|0",
+		"52733|Наручи скованных душ|385|405|0|32399|1|32428*1;22450*1;21886*2;22456*2;25700*2|0",
+		"50938|Нагрудный доспех жителя льдов|390|410|0|38408|1|33568*12|0",
+		"50942|Сапоги жителя льдов|390|410|0|38407|1|33568*10|0",
+		"50945|Арктические поножи|390|410|0|38401|1|33568*12|0",
+		"50947|Арктические перчатки|390|410|0|38403|1|33568*10|0",
+		"50950|Нагрудный доспех из обмерзшей чешуи|390|410|0|38414|1|33568*12|0",
+		"50952|Наплечники из обмерзшей чешуи|390|410|0|38424|1|33568*10|0",
+		"50956|Нерубский нагрудный доспех|390|410|0|38420|1|33568*12|0",
+		"50961|Нерубский пояс|390|410|0|38418|1|33568*10|0",
+		"60631|Плащ суровых ветров|390|410|0|38441|1|33568*16;37700*4|0",
+		"50940|Наплечные пластины жителя льдов|395|415|0|38411|1|33568*10|0",
+		"50946|Арктические наплечные пластины|395|415|0|38402|1|33568*10|0",
+		"50949|Арктический пояс|395|415|0|38405|1|33568*10|0",
+		"50953|Перчатки из обмерзшей чешуи|395|415|0|38415|1|33568*10|0",
+		"50954|Сапоги из обмерзшей чешуи|395|415|0|38413|1|33568*10|0",
+		"50958|Нерубские наплечники|395|415|0|38417|1|33568*10|0",
+		"50960|Нерубские сапоги|395|415|0|38419|1|33568*10|0",
+		"60584|Нерубское усиление поножей|395|405|0|0|1|38558*2|0",
+		"50963|Накладки из толстой борейской кожи|400|405|0|38376|1|38425*4|0",
+		"51571|Арктические накулачники|400|420|0|38433|1|33568*12|0",
+		"51572|Арктический шлем|400|420|0|38437|1|33568*14|0",
+		"60583|Йормунгарское усиление поножей|400|410|0|0|1|38561*2|0",
+		"60599|Наручи из обмерзшей чешуи|400|420|0|38436|1|33568*12|0",
+		"60600|Шлем из обмерзшей чешуи|400|420|0|38440|1|33568*14|0",
+		"60607|Накулачники жителя льдов|400|420|0|38434|1|33568*12|0",
+		"60608|Шлем жителя льдов|400|420|0|38438|1|33568*14|0",
+		"60622|Нерубские наручи|400|420|0|38435|1|33568*12|0",
+		"60624|Нерубский шлем|400|420|0|38439|1|33568*14|0",
+		"50966|Нерубские накладки для поножей|405|415|0|38372|1|38425*4;38558*1|0",
+		"55199|Плащ томимых небес|405|425|0|41238|1|38425*6;37700*5;37705*5|0",
+		"50964|Йормунгарские накладки для поножей|410|420|0|38371|1|38425*3;38561*12|0",
+		"51569|Черные полярные поножи|410|430|0|38591|1|38425*6;37703*4|0",
+		"51570|Черный полярный нагрудник|410|430|0|38592|1|38425*5;37703*5|0",
+		"55243|Наручи отражения|410|420|0|41264|1|38425*8;35623*6|0",
+		"60601|Темные поножи из обмерзшей чешуи|410|430|0|44436|1|38425*4;37705*5|0",
+		"60604|Темная кираса из обмерзшей чешуи|410|430|0|44437|1|38425*6;37705*4|0",
+		"60611|Темные поножи жителя льдов|410|430|0|44440|1|38425*4;37703*5|0",
+		"60613|Темный нагрудный доспех жителя льдов|410|430|0|44441|1|38425*6;37703*4|0",
+		"60627|Темные нерубские поножи|410|430|0|44443|1|38425*4;37705*5|0",
+		"60629|Темный нерубский нагрудник|410|430|0|44444|1|38425*6;37705*4|0",
+		"51568|Черные полярные сапоги|415|435|0|38590|1|38558*25;37705*6|0",
+		"60605|Высокие драконьи ботинки|415|435|0|44438|1|38557*35|0",
+		"60620|Жукохрусты|415|435|0|44442|1|38558*35|0",
+		"60630|Чешуйчатые ледоступы|415|435|0|44445|1|38557*30;37703*2|0",
+		"50970|Походная сума зверолова|420|425|0|38399|1|38425*8|0",
+		"50971|Шахтерская сумка из шкуры мамонта|420|425|0|38347|1|38425*8|0",
+		"60643|Рюкзак с бесчисленными карманами|420|425|0|44446|1|38425*8|0",
+		"60645|Подсумок из драконьей чешуи|420|425|0|44447|1|38557*20;38425*2|0",
+		"60647|Усиленный нерубский колчан|420|425|0|44448|1|38558*20;38425*2|0",
+		"57683|Меховая подкладка - сила атаки|425|435|0|0|1|44128*1|0",
+		"57690|Меховая подкладка - выносливость|425|435|0|0|1|44128*1|0",
+		"57691|Меховая подкладка - сила заклинаний|425|435|0|0|1|44128*1|0",
+		"57692|Меховая подкладка - сопротивление огню|425|435|0|0|1|44128*1|0",
+		"57694|Меховая подкладка - сопротивление магии льда|425|435|0|0|1|44128*1|0",
+		"57696|Меховая подкладка - сопротивление темной магии|425|435|0|0|1|44128*1|0",
+		"57699|Меховая подкладка - сопротивление силам природы|425|435|0|0|1|44128*1|0",
+		"57701|Меховая подкладка - сопротивление тайной магии|425|435|0|0|1|44128*1|0",
+		"60651|Наплеч ожесточения|425|435|0|43130|1|38425*12;36860*2|0",
+		"60652|Наручи орлиной погибели|425|435|0|43131|1|38557*40|0",
+		"60658|Ремень ночного штурма|425|435|0|43133|1|38425*10;35627*2|0",
+		"60665|Рукавицы морского прибоя|425|435|0|43255|1|38425*10;35622*2|0",
+		"60666|Сапоги из жормунгальской чешуи|425|435|0|43256|1|38561*40|0",
+		"60671|Наплеч безукоризненных рогов|425|435|0|43258|1|38558*30|0",
+		"60697|Маска потрошителя|425|435|0|43260|1|38425*12;35623*1|0",
+		"60702|Наплечные пластины потрошителя|425|435|0|43433|1|38425*10;35623*1|0",
+		"60703|Нагрудный доспех потрошителя|425|435|0|43434|1|38425*12;35623*1|0",
+		"60704|Наручники потрошителя|425|435|0|43435|1|38425*8;35623*1|0",
+		"60715|Наголовник угрюмости|425|435|0|43261|1|38425*12;35622*1|0",
+		"60716|Наплеч угрюмости|425|435|0|43262|1|38425*10;35622*1|0",
+		"60718|Нагрудный доспех угрюмости|425|435|0|43263|1|38425*12;35622*1|0",
+		"60720|Наручи угрюмости|425|435|0|43264|1|38425*8;35622*1|0",
+		"60728|Шлем быстрой стрелы|425|435|0|43447|1|38425*12;35623*1|0",
+		"60729|Наплечные щитки быстрой стрелы|425|435|0|43449|1|38425*10;35623*1|0",
+		"60730|Хауберк быстрой стрелы|425|435|0|43445|1|38425*12;35623*1|0",
+		"60731|Наручи быстрой стрелы|425|435|0|43444|1|38425*8;35623*1|0",
+		"60743|Корона штормового укрытия|425|435|0|43455|1|38425*12;35622*1|0",
+		"60746|Наплечники штормового укрытия|425|435|0|43457|1|38425*10;35622*1|0",
+		"60747|Хауберк штормового укрытия|425|435|0|43453|1|38425*12;35622*1|0",
+		"60748|Накулачники штормового укрытия|425|435|0|43452|1|38425*8;35622*1|0",
+		"60649|Кираса рассекающего удара|430|440|0|43129|1|38425*15;35623*1|0",
+		"60655|Капюшон ночного штурма|430|440|0|43132|1|38425*14;35627*2|0",
+		"60660|Поножи интуитивного боя|430|440|0|42731|1|38425*12;35623*2|0",
+		"60669|Кираса из борейской кожи|430|440|0|43257|1|38425*25|0",
+		"60705|Рукавицы потрошителя|430|440|0|43436|1|38425*10;35623*1|0",
+		"60706|Воинский пояс потрошителя|430|440|0|43437|1|38425*10;35623*1|0",
+		"60711|Набедренники потрошителя|430|440|0|43438|1|38425*12;35623*1|0",
+		"60712|Ботфорты потрошителя|430|440|0|43439|1|38425*10;35623*1|0",
+		"60721|Повязки угрюмости|430|440|0|43265|1|38425*10;35622*1|0",
+		"60723|Пояс угрюмости|430|440|0|43266|1|38425*10;35622*1|0",
+		"60725|Поножи угрюмости|430|440|0|43271|1|38425*12;35622*1|0",
+		"60727|Сапоги угрюмости|430|440|0|43273|1|38425*10;35622*1|0",
+		"60732|Рукавицы быстрой стрелы|430|440|0|43446|1|38425*10;35623*1|0",
+		"60734|Пояс быстрой стрелы|430|440|0|43442|1|38425*10;35623*1|0",
+		"60735|Поножи быстрой стрелы|430|440|0|43448|1|38425*12;35623*1|0",
+		"60737|Сапоги быстрой стрелы|430|440|0|43443|1|38425*10;35623*1|0",
+		"60749|Захваты штормового укрытия|430|440|0|43454|1|38425*10;35622*1|0",
+		"60750|Пояс штормового укрытия|430|440|0|43450|1|38425*10;35622*1|0",
+		"60751|Набедренники штормового укрытия|430|440|0|43456|1|38425*12;35622*1|0",
+		"60752|Высокие ботинки штормового укрытия|430|440|0|43451|1|38425*10;35622*1|0",
+		"60997|Снежный шнурованный ремень|430|450|0|43591|1|38425*8;36860*2;35622*2;38558*4;43102*1|0",
+		"60998|Снежные сапоги|430|450|0|43592|1|38425*8;36860*2;35622*2;38558*4;43102*1|0",
+		"61000|Пояс из ледяной чешуи|430|450|0|43594|1|38425*8;36860*2;35622*2;38557*4;43102*1|0",
+		"61002|Сапоги из ледяной чешуи|430|450|0|43595|1|38425*8;36860*2;35622*2;38557*4;43102*1|0",
+		"50965|Накладки для поножей из снежной шкуры|435|445|0|38373|1|44128*2;38558*2;43102*1|0",
+		"50967|Накладки для поножей из ледяной чешуи|435|445|0|38374|1|44128*2;38557*2;43102*1|0",
+		"60996|Снежный жилет|435|455|0|43590|1|38425*10;36860*3;35622*3;38558*8;43102*1|0",
+		"60999|Нагрудный доспех из ледяной чешуи|435|455|0|43593|1|38425*10;36860*3;35622*3;38557*8;43102*1|0",
+		"62448|Земляные накладки для поножей|435|445|0|44963|1|44128*2;35624*4;43102*1|0",
+		"69386|Барабаны забытых королей|440|470|0|49633|1|38425*8;38557*8|0",
+		"69388|Барабаны дикой природы|440|470|0|49634|1|38425*8;38561*8|0",
+		"60637|Плащ ледяного убийцы|450|460|0|43566|1|44128*2;36860*6;35627*4;43102*1|0",
+		"60640|Надежная накидка из нерубской шкуры|450|460|0|43565|1|44128*2;38558*40;43102*1|0",
+		"60754|Набедренники тяжелых увечий|450|460|0|43458|1|38425*12;35622*6;35623*6;43102*1|0",
+		"60755|Наручи тяжелых увечий|450|460|0|43459|1|38425*10;35622*5;35623*5;43102*1|0",
+		"60756|Кираса загробника|450|460|0|43461|1|38425*12;35622*12;43102*1|0",
+		"60757|Ботфорты загробника|450|460|0|43469|1|38425*10;35622*10;43102*1|0",
+		"60758|Тролльский тканый наплеч|450|460|0|43481|1|38425*10;36860*6;35627*6;43102*1|0",
+		"60759|Тролльский тканый ремень|450|460|0|43484|1|38425*10;36860*5;35627*5;43102*1|0",
+		"60760|Набедренники земледарения|450|460|0|43495|1|38425*12;35625*6;35622*6;43102*1|0",
+		"60761|Сапоги земледарения|450|460|0|43502|1|38425*10;35625*5;35622*5;43102*1|0",
+		"62176|Сапоги ветроруба|450|460|0|44930|1|38425*10;35623*5;35622*5;43102*1|0",
+		"62177|Поножи ветроруба|450|460|0|44931|1|38425*12;35623*6;35622*6;43102*1|0",
+		"63194|Пояс драконов|455|475|0|45553|1|44128*3;38557*20;45087*6|0",
+		"63195|Сапоги из живой чешуи|455|475|0|45562|1|44128*3;38561*20;45087*6|0",
+		"63196|Синий пояс Хаоса|455|475|0|45554|1|44128*3;38558*20;45087*6|0",
+		"63197|Сапоги ударившей молнии|455|475|0|45563|1|44128*3;38557*20;45087*6|0",
+		"63198|Опаленный смертью пояс|455|475|0|45555|1|44128*3;35627*4;45087*6|0",
+		"63199|Сапоги тишины|455|475|0|45564|1|44128*3;35627*2;45087*6|0",
+		"63200|Пояс полярной жизни|455|475|0|45556|1|38425*4;44128*3;45087*6|0",
+		"63201|Сапоги зимней закалки|455|475|0|45565|1|44128*3;38557*20;45087*6|0",
+		"321818|Сильно огрубелая кожа|460|470|0|56516|1|52976*5;102361*1|0",
+		"67080|Заколдованная нерубская кираса|460|475|0|47597|1|38558*40;35623*8;34055*8;44128*8;47556*8|0",
+		"67081|Черные хитиновые наручи|460|475|0|47579|1|38558*40;34057*4;44128*6;47556*4|0",
+		"67082|Кираса рыцаря из чешуи дракона|460|475|0|47595|1|38557*40;35622*8;35625*8;44128*8;47556*8|0",
+		"67083|Наручи рыцаря из чешуи дракона|460|475|0|47576|1|38557*40;35622*8;44128*6;47556*4|0",
+		"67084|Одеяния лунного затмения|460|475|0|47602|1|38425*24;35625*20;44128*8;47556*8|0",
+		"67085|Боевые наручи лунной тени|460|475|0|47583|1|38425*20;35625*12;44128*6;47556*4|0",
+		"67086|Панцирь рыцарского проклятья|460|475|0|47599|1|38425*24;35627*20;44128*8;47556*8|0",
+		"67087|Наручи быстрой смерти|460|475|0|47581|1|38425*20;35627*12;44128*6;47556*4|0",
+		"67136|Заколдованная нерубская кираса|460|475|0|47598|1|38558*40;35623*8;34055*8;44128*8;47556*8|0",
+		"67137|Черные хитиновые наручи|460|475|0|47580|1|38558*40;34057*4;44128*6;47556*4|0",
+		"67138|Кираса рыцаря из чешуи дракона|460|475|0|47596|1|38557*40;35622*8;35625*8;44128*8;47556*8|0",
+		"67139|Наручи быстрой смерти|460|475|0|47582|1|38425*20;35627*12;44128*6;47556*4|0",
+		"67140|Одеяния лунного затмения|460|475|0|47601|1|38425*24;35625*20;44128*8;47556*8|0",
+		"67141|Боевые наручи лунной тени|460|475|0|47584|1|38425*20;35625*12;44128*6;47556*4|0",
+		"67142|Панцирь рыцарского проклятья|460|475|0|47600|1|38425*24;35627*20;44128*8;47556*8|0",
+		"67143|Наручи рыцаря из чешуи дракона|460|475|0|47577|1|38557*40;35622*8;44128*6;47556*4|0",
+		"315333|Корона штормового укрытия претендента|470|490|0|154202|1|38425*24;35622*2;43102*2|0",
+		"315334|Наплечники штормового укрытия претендента|470|490|0|154206|1|38425*20;35622*2;43102*2|0",
+		"315335|Хауберк штормового укрытия претендента|470|490|0|154204|1|38425*24;35622*2;43102*2|0",
+		"315336|Накулачники штормового укрытия претендента|470|490|0|154208|1|38425*16;35622*2;43102*2|0",
+		"315337|Захваты штормового укрытия претендента|470|490|0|154203|1|38425*20;35622*2;43102*2|0",
+		"315338|Пояс штормового укрытия претендента|470|490|0|154201|1|38425*20;35622*2;43102*2|0",
+		"315339|Набедренники штормового укрытия претендента|470|490|0|154205|1|38425*24;35622*2;43102*2|0",
+		"315340|Высокие ботинки штормового укрытия претендента|470|490|0|154207|1|38425*20;35622*2;43102*2|0",
+		"315341|Шлем быстрой стрелы претендента|470|490|0|154214|1|38425*24;35623*2;43102*2|0",
+		"315342|Наплечные щитки быстрой стрелы претендента|470|490|0|154216|1|38425*20;35623*2;43102*2|0",
+		"315343|Хауберк быстрой стрелы претендента|470|490|0|154213|1|38425*24;35623*2;43102*2|0",
+		"315344|Наручи быстрой стрелы претендента|470|490|0|154211|1|38425*16;35623*2;43102*2|0",
+		"315345|Рукавицы быстрой стрелы претендента|470|490|0|154212|1|38425*20;35623*2;43102*2|0",
+		"315346|Пояс быстрой стрелы претендента|470|490|0|154209|1|38425*20;35623*2;43102*2|0",
+		"315347|Поножи быстрой стрелы претендента|470|490|0|154215|1|38425*24;35623*2;43102*2|0",
+		"315348|Сапоги быстрой стрелы претендента|470|490|0|154210|1|38425*20;35623*2;43102*2|0",
+		"315349|Наголовник угрюмости претендента|470|490|0|154198|1|38425*24;35622*2;43102*2|0",
+		"315350|Наплеч угрюмости претендента|470|490|0|154200|1|38425*20;35622*2;43102*2|0",
+		"315351|Нагрудный доспех угрюмости претендента|470|490|0|154196|1|38425*24;35622*2;43102*2|0",
+		"315352|Наручи угрюмости претендента|470|490|0|154195|1|38425*16;35622*2;43102*2|0",
+		"315353|Повязки угрюмости претендента|470|490|0|154197|1|38425*20;35622*2;43102*2|0",
+		"315354|Пояс угрюмости претендента|470|490|0|154193|1|38425*20;35622*2;43102*2|0",
+		"315355|Поножи угрюмости претендента|470|490|0|154199|1|38425*24;35622*2;43102*2|0",
+		"315356|Сапоги угрюмости претендента|470|490|0|154194|1|38425*20;35622*2;43102*2|0",
+		"315357|Маска потрошителя претендента|470|490|0|154187|1|38425*24;35623*2;43102*2|0",
+		"315358|Наплечные пластины претендента|470|490|0|154190|1|38425*20;35623*2;43102*2|0",
+		"315359|Нагрудный доспех претендента|470|490|0|154186|1|38425*24;35623*2;43102*2|0",
+		"315360|Наручники претендента|470|490|0|154185|1|38425*16;35623*2;43102*2|0",
+		"315361|Рукавицы претендента|470|490|0|154188|1|38425*20;35623*2;43102*2|0",
+		"315362|Воинский пояс претендента|470|490|0|154192|1|38425*20;35623*2;43102*2|0",
+		"315363|Набедренники претендента|470|490|0|154189|1|38425*24;35623*2;43102*2|0",
+		"315364|Ботфорты претендента|470|490|0|154191|1|38425*20;35623*2;43102*2|0",
+		"321826|Накидка борца со смертью|470|480|0|177557|1|52976*1;79101*30|0",
+		"321827|Плащ защитника пределов|470|480|0|177560|1|52976*1;52982*30|0",
+		"321830|Яростные наручи цунами|470|480|0|177635|1|56516*1;52976*25|0",
+		"321832|Яростные перчатки цунами|470|480|0|177637|1|56516*1;52976*25|0",
+		"321838|Таинственные наручи цунами|470|480|0|177643|1|56516*1;52976*25|0",
+		"321840|Таинственные перчатки цунами|470|480|0|177645|1|56516*1;52976*25|0",
+		"321846|Изысканные наручи цунами|470|480|0|177651|1|56516*1;52976*25|0",
+		"321848|Изысканные перчатки цунами|470|480|0|177653|1|56516*1;52976*25|0",
+		"321878|Яростные наплечники с клеймом тьмы|470|480|0|177659|1|56516*1;52976*25|0",
+		"321880|Яростный пояс с клеймом тьмы|470|480|0|177661|1|56516*1;52976*25|0",
+		"321886|Таинственные наплечники с клеймом тьмы|470|480|0|177667|1|56516*1;52976*25|0",
+		"321888|Таинственный пояс с клеймом тьмы|470|480|0|177669|1|56516*1;52976*25|0",
+		"321894|Изысканные наплечники с клеймом тьмы|470|480|0|177675|1|56516*1;52976*25|0",
+		"321896|Изысканный пояс с клеймом тьмы|470|480|0|177677|1|56516*1;52976*25|0",
+		"319597|Поясное хранилище тяжелых игл|475|500|0|97846|1|38425*30;44128*16;38558*60;38557*30;23793*30;23572*30;32428*4|0",
+		"319598|Опоясок с ножами для снятия шкур|475|500|0|97847|1|38425*30;44128*16;38558*60;38561*30;25699*20;23572*30;32428*4|0",
+		"319599|Уплотненный пояс из электрохимеры|475|500|0|97848|1|38425*30;44128*16;38558*60;38561*30;25699*20;23572*30;32428*4|0",
+		"319600|Гнилостный пояс из шкур вурдалаков|475|500|0|97849|1|38425*30;44128*16;38558*60;38557*30;23793*30;23572*30;32428*4|0",
+		"321835|Яростные поножи цунами|475|485|0|177640|1|56516*1;52976*45|0",
+		"321843|Таинственные поножи цунами|475|485|0|177648|1|56516*1;52976*45|0",
+		"321851|Изысканные поножи цунами|475|485|0|177656|1|56516*1;52976*45|0",
+		"321883|Яростные наручи с клеймом тьмы|475|485|0|177664|1|56516*1;52976*45|0",
+		"321891|Таинственные наручи с клеймом тьмы|475|485|0|177672|1|56516*1;52976*45|0",
+		"321899|Изысканные наручи с клеймом тьмы|475|485|0|177680|1|56516*1;52976*45|0",
+		"70554|Бриджи одичавшей природы|475|500|0|49898|1|38561*20;44128*8;35625*16;49908*8|0",
+		"70555|Благословенные кенарийские сапоги|475|500|0|49894|1|38561*12;44128*5;35625*10;49908*5|0",
+		"70556|Поножи клинка|475|500|0|49899|1|38558*20;44128*8;35627*16;49908*8|0",
+		"70557|Сапоги надвигающейся смерти|475|500|0|49895|1|38558*12;44128*8;35627*10;49908*5|0",
+		"70558|Заряженные молнией поножи|475|500|0|49900|1|38557*20;44128*8;35623*16;49908*8|0",
+		"70559|Сапоги духа земли|475|500|0|49896|1|38557*12;44128*5;35623*10;49908*5|0",
+		"70560|Набедренники из осколков драконьих костей|475|500|0|49901|1|38557*20;44128*8;35624*16;49908*8|0",
+		"70561|Несносимые ботфорты|475|500|0|49897|1|38557*12;44128*8;35624*10;49908*5|0",
+		"321836|Яростный шлем цунами|480|490|0|177641|1|56516*1;52976*35|0",
+		"321837|Яростный нагрудный доспех цунами|480|490|0|177642|1|56516*1;52976*45|0",
+		"321844|Таинственный шлем цунами|480|490|0|177649|1|56516*1;52976*35|0",
+		"321845|Таинственный нагрудный доспех цунами|480|490|0|177650|1|56516*1;52976*45|0",
+		"321852|Изысканный шлем цунами|480|490|0|177657|1|56516*1;52976*35|0",
+		"321853|Изысканный нагрудный доспех цунами|480|490|0|177658|1|56516*1;52976*45|0",
+		"321884|Яростные перчатки с клеймом тьмы|480|490|0|177665|1|56516*1;52976*35|0",
+		"321885|Яростные поножи с клеймом тьмы|480|490|0|177666|1|56516*1;52976*45|0",
+		"321892|Таинственные перчатки с клеймом тьмы|480|490|0|177673|1|56516*1;52976*35|0",
+		"321893|Таинственные поножи с клеймом тьмы|480|490|0|177674|1|56516*1;52976*45|0",
+		"321900|Изысканные перчатки с клеймом тьмы|480|490|0|177681|1|56516*1;52976*35|0",
+		"321901|Изысканные поножи с клеймом тьмы|480|490|0|177682|1|56516*1;52976*45|0",
+		"321820|Жестокие накладки для поножей|485|495|0|83765|1|56516*5|0",
+		"321831|Яростный пояс цунами|485|495|0|177636|1|56516*1;52976*25|0",
+		"321834|Яростные наплечники цунами|485|495|0|177639|1|56516*1;52976*35|0",
+		"321839|Таинственный пояс цунами|485|495|0|177644|1|56516*1;52976*25|0",
+		"321842|Таинственные наплечники цунами|485|495|0|177647|1|56516*1;52976*35|0",
+		"321847|Изысканный пояс цунами|485|495|0|177652|1|56516*1;52976*25|0",
+		"321850|Изысканные наплечники цунами|485|495|0|177655|1|56516*1;52976*35|0",
+		"321879|Яростные сапоги с клеймом тьмы|485|495|0|177660|1|56516*1;52976*25|0",
+		"321882|Яростный нагрудный доспех с клеймом тьмы|485|495|0|177663|1|56516*1;52976*35|0",
+		"321887|Таинственные сапоги с клеймом тьмы|485|495|0|177668|1|56516*1;52976*25|0",
+		"321890|Таинственный нагрудный доспех с клеймом тьмы|485|495|0|177671|1|56516*1;52976*35|0",
+		"321895|Изысканные сапоги с клеймом тьмы|485|495|0|177676|1|56516*1;52976*25|0",
+		"321898|Изысканный нагрудный доспех с клеймом тьмы|485|495|0|177679|1|56516*1;52976*35|0",
+		"321821|Глубоководные накладки для поножей|490|500|0|83764|1|52982*28|0",
+		"321833|Яростные сапоги цунами|490|500|0|177638|1|56516*1;52976*25|0",
+		"321841|Таинственные сапоги цунами|490|500|0|177646|1|56516*1;52976*25|0",
+		"321849|Изысканные сапоги цунами|490|500|0|177654|1|56516*1;52976*25|0",
+		"321881|Яростный шлем с клеймом тьмы|490|500|0|177662|1|56516*1;52976*25|0",
+		"321889|Таинственный шлем с клеймом тьмы|490|500|0|177670|1|56516*1;52976*25|0",
+		"321897|Изысканный шлем с клеймом тьмы|490|500|0|177678|1|56516*1;52976*25|0",
+		"321822|Укрепленные накладки для поножей|495|505|0|83763|1|79101*28|0",
+		"321854|Яростные наручи приручителя протодраконов|495|505|0|105039|1|52980*1;79101*60;52325*10;102351*1|0",
+		"321856|Яростные перчатки приручителя протодраконов|495|505|0|105041|1|52980*1;79101*60;52325*10;102351*1|0",
+		"321862|Таинственные наручи приручителя протодраконов|495|505|0|105048|1|52980*1;79101*60;52326*10;102351*1|0",
+		"321864|Таинственные перчатки приручителя протодраконов|495|505|0|105050|1|52980*1;79101*60;52326*10;102351*1|0",
+		"321870|Изысканные наручи приручителя протодраконов|495|505|0|105058|1|52980*1;79101*60;52329*10;102351*1|0",
+		"321872|Изысканные перчатки приручителя протодраконов|495|505|0|105060|1|52980*1;79101*60;52329*10;102351*1|0",
+		"321902|Яростные наплечники мрачных глубин|495|505|0|105068|1|52980*1;52982*60;52325*10;102351*1|0",
+		"321904|Яростный пояс мрачных глубин|495|505|0|105070|1|52980*1;52982*60;52325*10;102351*1|0",
+		"321910|Таинственные наплечники мрачных глубин|495|505|0|105078|1|52980*1;52982*60;52326*10;102351*1|0",
+		"321912|Таинственный пояс мрачных глубин|495|505|0|105080|1|52980*1;52982*60;52326*10;102351*1|0",
+		"321918|Изысканные наплечники мрачных глубин|495|505|0|105088|1|52980*1;52982*60;52329*10;102351*1|0",
+		"321920|Изысканный пояс мрачных глубин|495|505|0|105090|1|52980*1;52982*60;52329*10;102351*1|0",
+		"280000|Прочные накладки для поножей из снежной шкуры|500|510|0|280000|1|44128*8;38558*8;43102*4|0",
+		"280001|Прочные накладки для поножей из ледяной чешуи|500|510|0|280001|1|44128*8;38557*8;43102*4|0",
+		"280002|Прочные земляные накладки для поножей|500|510|0|280002|1|44128*8;35624*16;43102*4|0",
+		"321819|Нетронутая шкура|500|510|0|52980|1|56516*10|0",
+		"321823|Нетронутые жестокие накладки для поножей|500|510|0|177632|1|52980*1;52976*50;52328*10|0",
+		"321859|Яростные поножи приручителя протодраконов|500|510|0|105044|1|52980*1;79101*80;52325*20;102351*1|0",
+		"321867|Таинственные поножи приручителя протодраконов|500|510|0|105053|1|52980*1;79101*80;52326*20;102351*1|0",
+		"321875|Изысканные поножи приручителя протодраконов|500|510|0|105063|1|52980*1;79101*80;52329*20;102351*1|0",
+		"321907|Яростные наручи мрачных глубин|500|510|0|105073|1|52980*1;52982*80;52325*20;102351*1|0",
+		"321915|Таинственные наручи мрачных глубин|500|510|0|105083|1|52980*1;52982*80;52326*20;102351*1|0",
+		"321923|Изысканные наручи мрачных глубин|500|510|0|105093|1|52980*1;52982*80;52329*20;102351*1|0",
+		"321824|Нетронутые глубоководные накладки для поножей|505|515|0|177633|1|52980*1;52982*50;52326*10|0",
+		"321860|Яростный шлем приручителя протодраконов|505|515|0|105045|1|52980*1;79101*70;52325*15;102351*1|0",
+		"321861|Яростный нагрудный доспех приручителя протодраконов|505|515|0|105046|1|52980*1;79101*80;52325*20;102351*1|0",
+		"321868|Таинственный шлем приручителя протодраконов|505|515|0|105054|1|52980*1;79101*70;52326*15;102351*1|0",
+		"321869|Таинственный нагрудный доспех приручителя протодраконов|505|515|0|105055|1|52980*1;79101*80;52326*20;102351*1|0",
+		"321876|Изысканный шлем приручителя протодраконов|505|515|0|105064|1|52980*1;79101*70;52329*15;102351*1|0",
+		"321877|Изысканный нагрудный доспех приручителя протодраконов|505|515|0|105065|1|52980*1;79101*80;52329*20;102351*1|0",
+		"321908|Яростные перчатки мрачных глубин|505|515|0|105074|1|52980*1;52982*70;52325*15;102351*1|0",
+		"321909|Яростные поножи мрачных глубин|505|515|0|105075|1|52980*1;52982*80;52325*20;102351*1|0",
+		"321916|Таинственные перчатки мрачных глубин|505|515|0|105084|1|52980*1;52982*70;52326*15;102351*1|0",
+		"321917|Таинственные поножи мрачных глубин|505|515|0|105085|1|52980*1;52982*80;52326*20;102351*1|0",
+		"321924|Изысканные перчатки мрачных глубин|505|515|0|105094|1|52980*1;52982*70;52329*15;102351*1|0",
+		"321925|Изысканные поножи мрачных глубин|505|515|0|105095|1|52980*1;52982*80;52329*20;102351*1|0",
+		"321825|Нетронутые укрепленные накладки для поножей|510|520|0|177634|1|52980*1;79101*50;52327*10|0",
+		"321828|Искусно изготовленная накидка борца со смертью|510|520|0|177561|1|79101*90;56516*9;52328*1;102351*1|0",
+		"321829|Искусно изготовленный плащ защитника пределов|510|520|0|177564|1|52982*90;56516*9;52326*1;102351*1|0",
+		"321855|Яростный пояс приручителя протодраконов|510|520|0|105040|1|52980*1;79101*60;52325*10;102351*1|0",
+		"321858|Яростные наплечники приручителя протодраконов|510|520|0|105043|1|52980*1;79101*70;52325*15;102351*1|0",
+		"321863|Таинственный пояс приручителя протодраконов|510|520|0|105049|1|52980*1;79101*60;52326*10;102351*1|0",
+		"321866|Таинственные наплечники приручителя протодраконов|510|520|0|105052|1|52980*1;79101*70;52326*15;102351*1|0",
+		"321871|Изысканный пояс приручителя протодраконов|510|520|0|105059|1|52980*1;79101*60;52329*10;102351*1|0",
+		"321874|Изысканные наплечники приручителя протодраконов|510|520|0|105062|1|52980*1;79101*70;52329*15;102351*1|0",
+		"321903|Яростные сапоги мрачных глубин|510|520|0|105069|1|52980*1;52982*60;52325*10;102351*1|0",
+		"321906|Яростный нагрудный доспех мрачных глубин|510|520|0|105072|1|52980*1;52982*70;52325*15;102351*1|0",
+		"321911|Таинственные сапоги мрачных глубин|510|520|0|105079|1|52980*1;52982*60;52326*10;102351*1|0",
+		"321914|Таинственный нагрудный доспех мрачных глубин|510|520|0|105082|1|52980*1;52982*70;52326*15;102351*1|0",
+		"321919|Изысканные сапоги мрачных глубин|510|520|0|105089|1|52980*1;52982*60;52329*10;102351*1|0",
+		"321922|Изысканный нагрудный доспех мрачных глубин|510|520|0|105092|1|52980*1;52982*70;52329*15;102351*1|0",
+		"305918|Барабаны неистовства|515|525|0|105027|1|56516*8;79101*8;52982*8|0",
+		"321857|Яростные сапоги приручителя протодраконов|515|525|0|105042|1|52980*1;79101*60;52325*10;102351*1|0",
+		"321865|Таинственные сапоги приручителя протодраконов|515|525|0|105051|1|52980*1;79101*60;52326*10;102351*1|0",
+		"321873|Изысканные сапоги приручителя протодраконов|515|525|0|105061|1|52980*1;79101*60;52329*10;102351*1|0",
+		"321905|Яростный шлем мрачных глубин|515|525|0|105071|1|52980*1;52982*60;52325*10;102351*1|0",
+		"321913|Таинственный шлем мрачных глубин|515|525|0|105081|1|52980*1;52982*60;52326*10;102351*1|0",
+		"321921|Изысканный шлем мрачных глубин|515|525|0|105091|1|52980*1;52982*60;52329*10;102351*1|0",
+		"305922|Трансцендентная сумка|520|530|0|54445|1|56516*12;52718*18;52720*8|0",
+		"305923|Укомплектованный ящик с инструментами|520|530|0|60217|1|56516*12;65365*8;67749*2;39684*2|0",
+		"305924|Сумка из великолепной шкуры|520|530|0|95536|1|56516*12;52982*14;79101*14|0",
+		"305925|Сумка королевского начертателя|520|530|0|70136|1|56516*12;177848*15;61978*5|0",
+		"305927|Сумка мастера травника|520|530|0|54446|1|56516*12;52329*22;52985*2;52983*2;52987*2|0",
+		"305928|Троекратно укрепленная шахтерская сумка|520|530|0|70137|1|56516*12;53038*9;52185*9;52183*9|0",
+		"305929|Роскошная шелковая сумка для самоцветов|520|530|0|70138|1|56516*12;52190*5;52191*5;52192*5;52193*5;52194*5;52195*5|0",
+		"321926|Поводья выносливой винторогой гарны|535|545|0|153384|1|52980*5;52982*80;79101*80;52326*15;52328*15;52329*15;102351*1|0",
+	},
+	[171] = {
+		"2329|Эликсир львиной силы|55|95|1|2454|1|2449*1;765*1;3371*1|0",
+		"2330|Крохотный флакон с лечебным зельем|55|95|1|118|1|2447*1;765*1;3371*1|0",
+		"7183|Слабый эликсир защиты|55|95|1|5997|1|765*2;3371*1|0",
+		"3170|Слабое зелье тролльей крови|60|100|0|3382|1|2447*1;2449*2;3371*1|0",
+		"2331|Крохотный флакон с зельем маны|65|105|0|2455|1|785*1;765*1;3371*1|0",
+		"2332|Слабое зелье омоложения|70|110|0|2456|1|785*2;2447*1;3371*1|0",
+		"2334|Слабый эликсир стойкости|80|120|0|2458|1|2449*2;2447*1;3371*1|0",
+		"3230|Слабый эликсир ловкости|80|120|0|2457|1|2452*1;765*1;3371*1|0",
+		"4508|Флакон с бесцветным лечебным зельем|80|120|0|4596|1|3164*1;2447*1;3371*1|0",
+		"7836|Масло черноротика|80|100|0|6370|1|6358*2|0",
+		"2337|Маленький флакон с лечебным зельем|85|125|0|858|1|118*1;2450*1|0",
+		"2335|Зелье скорости|90|130|0|2459|1|2452*1;2450*1;3371*1|0",
+		"6617|Зелье ярости|90|130|0|5631|1|5635*2;3371*1|0",
+		"2336|Эликсир наречий|100|140|0|2460|1|2449*2;785*2;3371*1|0",
+		"3171|Эликсир мудрости|120|160|0|3383|1|785*1;2450*2;3371*1|0",
+		"7179|Эликсир подводного дыхания|120|160|0|5996|1|3820*1;6370*2;3371*1|0",
+		"8240|Эликсир увеличения|120|160|0|6662|1|6522*1;2449*1;3371*1|0",
+		"7255|Зелье защиты от светлой магии|130|170|0|6051|1|2453*1;2452*1;3371*1|0",
+		"7841|Зелье быстрого плавания|130|170|0|6372|1|2452*1;6370*1;3371*1|0",
+		"3172|Слабое зелье защиты от магии|135|175|0|3384|1|785*3;3355*1;3371*1|0",
+		"3447|Лечебное зелье|135|175|0|929|1|2453*1;2450*1;3372*1|0",
+		"3173|Маленький флакон с зельем маны|145|185|0|3385|1|785*1;3820*1;3371*1|0",
+		"3174|Эликсир излечения|145|185|0|3386|1|1288*1;2453*1;3372*1|0",
+		"3176|Крепкое зелье тролльей крови|150|190|0|3388|1|2453*2;2450*2;3372*1|0",
+		"7837|Зажигательное масло|150|170|0|6371|1|6359*2|0",
+		"3177|Эликсир Защиты|155|195|0|3389|1|3355*1;3820*1;3372*1|0",
+		"63732|Слабый эликсир меткости|160|200|0|45621|1|6371*1;2453*1;3371*1|0",
+		"7256|Зелье защиты от темной магии|160|200|0|6048|1|3369*1;3356*1;3372*1|0",
+		"2333|Малый эликсир ловкости|165|205|0|3390|1|3355*1;2452*1;3372*1|0",
+		"7845|Эликсир огневой мощи|165|205|0|6373|1|6371*2;3356*1;3372*1|0",
+		"3188|Эликсир силы огра|175|215|0|3391|1|2449*1;3356*1;3372*1|0",
+		"6624|Зелье свободы действий|175|215|0|5634|1|6370*2;3820*1;3372*1|0",
+		"7181|Средний флакон с лечебным зельем|175|215|0|1710|1|3357*1;3356*1;3372*1|0",
+		"3452|Зелье маны|180|220|0|3827|1|3820*1;3356*1;3372*1|0",
+		"3448|Зелье простой невидимости|185|225|0|3823|1|3818*1;3355*1;3372*1|0",
+		"3449|Масло Тьмы|190|230|0|3824|1|3818*4;3369*4;3372*1|0",
+		"3450|Эликсир стойкости|195|235|0|3825|1|3355*1;3821*1;3372*1|0",
+		"6618|Сильнодействующее зелье ярости|195|235|0|5633|1|5637*1;3356*1;3372*1|0",
+		"3451|Большой эликсир тролльей крови|200|240|0|3826|1|3357*1;2453*1;3372*1|0",
+		"11449|Эликсир ловкости|205|245|0|8949|1|3820*1;3821*1;3372*1|0",
+		"7258|Зелье защиты от магии льда|205|245|0|6050|1|3819*1;3821*1;3372*1|0",
+		"21923|Эликсир силы льда|210|250|0|17708|1|3819*2;3358*1;3372*1|0",
+		"7257|Зелье защиты от огня|210|250|0|6049|1|4402*1;6371*1;3372*1|0",
+		"7259|Зелье защиты от сил природы|210|250|0|6052|1|3357*1;3820*1;3372*1|0",
+		"11450|Сильный эликсир защиты|215|255|0|8951|1|3355*1;3821*1;3372*1|0",
+		"3453|Эликсир обнаружения простой невидимости|215|255|0|3828|1|3358*1;3818*1;3372*1|0",
+		"11448|Средний флакон с зельем маны|220|260|0|6149|1|3358*1;3821*1;3372*1|0",
+		"11451|Воспламеняющая смесь|220|260|0|8956|1|4625*1;3821*1;8925*1|0",
+		"12609|Эликсир 'Кошачий глаз'|220|260|0|10592|1|3821*1;3818*1;3372*1|0",
+		"3454|Масло льда|220|260|0|3829|1|3358*4;3819*2;3372*1|0",
+		"11452|Приводящее в сознание зелье|225|265|0|9030|1|7067*1;3821*1;8925*1|0",
+		"11453|Зелье защиты от магии|225|265|0|9036|1|3358*1;8831*1;8925*1|0",
+		"11456|Гоблинское ракетное топливо|225|265|0|9061|1|4625*1;9260*1;3372*1|0",
+		"11457|Большой флакон с лечебным зельем|230|270|0|3928|1|8838*1;3358*1;8925*1|0",
+		"22808|Сильный эликсир подводного дыхания|230|270|0|18294|1|7972*1;8831*2;8925*1|0",
+		"4942|Простое зелье каменного щита|230|270|0|4623|1|3858*1;3821*1;3372*1|0",
+		"11458|Зелье из дикой лозы|240|280|0|9144|1|8153*1;8831*1;8925*1|0",
+		"11459|Философский камень|240|280|0|9149|1|3575*4;9262*1;8831*4;4625*4|0",
+		"11479|Трансмутация железа в золото|240|280|0|3577|1|3575*1|1",
+		"11480|Трансмутация мифрила в истинное серебро|240|280|0|6037|1|3860*1|1",
+		"11460|Эликсир обнаружения нежити|245|285|0|9154|1|8836*1;8925*1|0",
+		"15833|Зелье спокойного сна|245|285|0|12190|1|8831*3;8925*1|0",
+		"11461|Чародейский эликсир|250|290|0|9155|1|8839*1;3821*1;8925*1|0",
+		"11464|Зелье невидимости|250|290|0|9172|1|8845*1;8838*1;8925*1|0",
+		"11465|Сильный эликсир интеллекта|250|290|0|9179|1|8839*1;3358*1;8925*1|0",
+		"17551|Масло каменного угря|250|260|0|13423|1|13422*1|0",
+		"11466|'Дар Артаса'|255|295|0|9088|1|8836*1;8839*1;8925*1|0",
+		"11467|Сильный эликсир ловкости|255|295|0|9187|1|8838*1;3821*1;8925*1|0",
+		"11468|Эликсир снозрения|255|295|0|9197|1|8831*3;8925*1|0",
+		"11472|Эликсир великанов|260|300|0|9206|1|8838*1;8846*1;8925*1|0",
+		"11473|Призрачная краска|260|300|0|9210|1|8845*2;4342*1;8925*1|0",
+		"11476|Эликсир энергии Тьмы|265|305|0|9264|1|8845*3;8925*1|0",
+		"11477|Эликсир истребления демонов|265|305|0|9224|1|8846*1;8845*1;8925*1|0",
+		"11478|Эликсир обнаружения демонов|265|305|0|9233|1|8846*2;8925*1|0",
+		"26277|Сильный эликсир огневой мощи|265|305|0|21546|1|6371*3;4625*3;8925*1|0",
+		"17552|Мощное зелье ярости|270|310|0|13442|1|8846*3;8925*1|0",
+		"17187|Трансмутация: арканит|275|290|0|12360|1|12359*1;12363*1|0",
+		"17553|Большой флакон с зельем маны|275|315|0|13443|1|8838*2;8839*2;8925*1|0",
+		"17559|Трансмутация: воздух в огонь|275|290|0|7078|1|7082*1|1",
+		"17560|Трансмутация: огонь в землю|275|290|0|7076|1|7078*1|1",
+		"17561|Трансмутация: земля в воду|275|290|0|7080|1|7076*1|1",
+		"17562|Трансмутация: вода в воздух|275|290|0|7082|1|7080*1|1",
+		"17563|Трансмутация: нежити в воду|275|290|0|7080|1|12808*1|1",
+		"17564|Трансмутация: вода в нежить|275|290|0|12808|1|7080*1|1",
+		"17565|Трансмутация: жизнь в землю|275|290|0|7076|1|12803*1|1",
+		"17566|Трансмутация: земля в жизнь|275|290|0|12803|1|7076*1|1",
+		"3175|Слабое зелье неуязвимости|275|315|0|3387|1|8839*2;8845*1;8925*1|0",
+		"17554|Наилучший эликсир защиты|280|320|0|13445|1|13423*2;8838*1;8925*1|0",
+		"17555|Эликсир мудрецов|285|325|0|13447|1|13463*1;13466*2;8925*1|0",
+		"17556|Огромный флакон с лечебным зельем|290|330|0|13446|1|13464*2;13465*1;8925*1|0",
+		"17557|Эликсир грубой силы|290|330|0|13453|1|8846*2;13466*2;8925*1|0",
+		"24365|Эликсир крови волшебника|290|330|0|20007|1|13463*1;13466*2;8925*1|0",
+		"24366|Сильное зелье спокойного сна|290|330|0|20002|1|13463*2;13464*1;8925*1|0",
+		"17570|Сильное зелье каменного щита|295|335|0|13455|1|13423*2;10620*1;8925*1|0",
+		"17571|Эликсир мангуста|295|335|0|13452|1|13465*2;13466*2;8925*1|0",
+		"17572|Зелье очищения|300|340|0|13462|1|13467*2;13466*2;8925*1|0",
+		"17573|Сильный чародейский эликсир|300|340|0|13454|1|13463*3;13465*1;8925*1|0",
+		"24367|Зелье неудержимости|300|340|0|20008|1|13467*2;13465*2;10286*2;8925*1|0",
+		"25146|Трансмутация: первородный огонь|301|310|0|7068|3|7077*1|0",
+		"17574|Сильное зелье защиты от огня|305|345|0|13457|1|7068*1;13463*1;8925*1|0",
+		"17575|Сильное зелье защиты от магии льда|305|345|0|13456|1|7070*1;13463*1;8925*1|0",
+		"17576|Сильное зелье защиты от сил природы|305|345|0|13458|1|7067*1;13463*1;8925*1|0",
+		"17577|Сильное зелье защиты от тайной магии|305|345|0|13461|1|11176*1;13463*1;8925*1|0",
+		"17578|Сильное зелье защиты от темной магии|305|345|0|13459|1|3824*1;13463*1;8925*1|0",
+		"17579|Сильное зелье защиты от светлой магии|305|345|0|13460|1|7069*1;13463*1;8925*1|0",
+		"24368|Мощный эликсир тролльей крови|305|345|0|20004|1|8846*1;13466*2;8925*1|0",
+		"17580|Огромный флакон с зельем маны|310|350|0|13444|1|13463*3;13467*2;8925*1|0",
+		"22732|Большое зелье омоложения|310|330|0|18253|1|10286*1;13464*4;13463*4;18256*1|0",
+		"17634|Зелье оцепенения|315|330|0|13506|2|13423*7;8925*1|0",
+		"17635|Настой титанов|315|330|0|13510|2|8846*7;13423*3;13468*1;8925*1|0",
+		"17636|Настой чистой мудрости|315|330|0|13511|2|13463*7;13467*3;13468*1;8925*1|0",
+		"17637|Настой великой силы|315|330|0|13512|2|13463*7;13465*3;13468*1;8925*1|0",
+		"17638|Настой всецветного сопротивления|315|330|0|13513|2|13467*7;13465*3;13468*1;8925*1|0",
+		"24266|Амулет безумия Гурубаши|315|330|0|19931|3|12938*1;19943*1;12804*6;13468*1|0",
+		"33732|Флакон с летучим лечебным зельем|315|330|0|28100|1|13464*1;22785*1;18256*1|0",
+		"33738|Эликсир натиска|315|330|0|28102|1|13465*1;22785*1;18256*1|0",
+		"33740|Эликсир адепта|315|330|0|28103|1|13463*1;22785*1;18256*1|0",
+		"28543|Эликсир маскировки|320|335|0|22823|1|22787*1;22785*1;18256*1|0",
+		"28544|Большой эликсир силы|320|335|0|22824|1|13465*1;22785*1;18256*1|0",
+		"28545|Эликсир целительной силы|325|340|0|22825|1|13464*1;22786*1;18256*1|0",
+		"33733|Флакон с нестойким зельем маны|325|340|0|28101|1|22787*2;22785*1;18256*1|0",
+		"39636|Большой эликсир стойкости|325|340|0|32062|1|22787*2;22785*1;18256*1|0",
+		"28546|Зелье лазутчика|330|345|0|22826|1|22787*2;22785*1;18256*1|0",
+		"33741|Эликсир власти|330|345|0|28104|1|22789*1;22785*1;18256*1|0",
+		"28549|Большой эликсир силы льда|335|350|0|22827|1|22578*2;22790*1;18256*1|0",
+		"28550|Зелье безумной силы|335|350|0|22828|1|22789*3;18256*1|0",
+		"39637|Эликсир земли|335|350|0|32063|1|22786*1;22787*2;18256*1|0",
+		"39638|Эликсир дренейской мудрости|335|350|0|32067|1|22785*1;22789*1;18256*1|0",
+		"45061|Зелье безумного алхимика|335|350|0|34440|1|8925*1;22787*2|0",
+		"28551|Гигантский флакон с лечебным зельем|340|355|0|22829|1|22791*2;22785*1;18256*1|0",
+		"28552|Эликсир 'Зоркий глаз'|340|355|0|22830|1|22787*2;22789*1;18256*1|0",
+		"38070|Переменчивый камень|340|355|0|31080|1|22452*1;21886*1;22457*1|0",
+		"28553|Большой эликсир ловкости|345|360|0|22831|1|22789*1;22785*2;18256*1|0",
+		"39639|Эликсир железной шкуры|345|360|0|32068|1|22790*1;22787*1;18256*1|0",
+		"28554|Зелье покровов|350|365|0|22871|1|22787*3;22791*1;18256*1|0",
+		"38960|Оскверненный эликсир силы|350|365|0|31679|1|22789*1;22792*2;18256*1|0",
+		"28555|Гигантский флакон с зельем маны|355|370|0|22832|1|22786*2;22785*1;18256*1|0",
+		"28556|Большой эликсир огневой мощи|360|375|0|22833|1|22574*2;22790*1;18256*1|0",
+		"28557|Большой эликсир защиты|360|375|0|22834|1|22790*3;22789*1;18256*1|0",
+		"38962|Оскверненное зелье регенерации|360|375|0|31676|1|22785*2;22792*3;18256*1|0",
+		"41458|Котел великой защиты от тайной магии|360|380|0|32839|1|22457*2;22793*7;23782*1|0",
+		"41500|Котел великой защиты от огня|360|380|0|32849|1|21884*2;22793*7;23782*1|0",
+		"41501|Котел великой защиты от магии льда|360|380|0|32850|1|21885*2;22793*7;23782*1|0",
+		"41502|Котел великой защиты от сил природы|360|380|0|32851|1|21886*2;22793*7;23782*1|0",
+		"41503|Котел великой защиты от темной магии|360|380|0|32852|1|22456*2;22793*7;23782*1|0",
+		"53838|Флакон с бодрящим лечебным зельем|360|380|0|39671|1|36901*2;18256*1|0",
+		"17632|Алхимический камень|365|380|0|13503|1|9149*1;25867*1;25868*1;22794*2;23571*5|0",
+		"28558|Большой эликсир энергии Тьмы|365|380|0|22835|1|22790*1;22792*1;18256*1|0",
+		"28562|Большое зелье спокойного сна|365|380|0|22836|1|22786*1;22792*1;18256*1|0",
+		"28563|Зелье героизма|365|380|0|22837|1|22789*2;22790*1;18256*1|0",
+		"28564|Зелье ускорения|365|380|0|22838|1|22789*2;22791*1;18256*1|0",
+		"28565|Зелье разрушения|365|380|0|22839|1|22792*2;22791*1;18256*1|0",
+		"28566|Трансмутация: первичный воздух в огонь|365|380|0|21884|1|22451*1|1",
+		"28567|Трансмутация: первичная земля в воду|365|380|0|21885|1|22452*1|1",
+		"28568|Трансмутация: изначальный огонь в землю|365|380|0|22452|1|21884*1|1",
+		"28569|Трансмутация: первичная вода в воздух|365|380|0|22451|1|21885*1|1",
+		"29688|Трансмутация: изначальная мощь|365|380|0|23571|1|22452*1;21885*1;22451*1;21884*1;22457*1|0",
+		"32765|Трансмутация: алмаз земной бури|365|380|0|25867|1|23079*3;23107*3;23112*3;22452*2;21885*2|0",
+		"32766|Трансмутация: алмаз небесного огня|365|380|0|25868|1|23077*3;21929*3;23117*3;21884*2;22451*2|0",
+		"53839|Флакон с ледяным зельем маны|365|385|0|40067|1|36907*2;18256*1|0",
+		"53841|Эликсир гнева|365|385|0|40068|1|36901*1;37921*2;18256*1|0",
+		"28570|Большой эликсир крови волшебника|370|380|0|22840|1|22790*1;22791*1;18256*1|0",
+		"28571|Большое зелье защиты от огня|375|380|0|22841|5|21884*1;22793*3;18256*5|0",
+		"28572|Большое зелье защиты от магии льда|375|380|0|22842|5|21885*1;22793*3;18256*5|0",
+		"28573|Большое зелье защиты от сил природы|375|380|0|22844|5|21886*1;22793*3;18256*5|0",
+		"28575|Большое зелье защиты от тайной магии|375|380|0|22845|5|22457*1;22793*3;18256*5|0",
+		"28576|Большое зелье защиты от темной магии|375|380|0|22846|5|22456*1;22793*3;18256*5|0",
+		"28577|Большое зелье защиты от светлой магии|375|380|0|22847|5|21886*1;22793*3;18256*5|0",
+		"28578|Эликсир подавления|375|380|0|22848|1|22791*1;22793*1;18256*1|0",
+		"28579|Зелье железного щита|375|380|0|22849|1|22790*2;22573*3;18256*1|0",
+		"28580|Трансмутация: изначальная Тень в воду|375|380|0|21885|1|22456*1|1",
+		"28581|Трансмутация: первичная вода в тьму|375|380|0|22456|1|21885*1|1",
+		"28582|Трансмутация: первичная мана в огонь|375|380|0|21884|1|22457*1|1",
+		"28583|Трансмутация: изначальный огонь в ману|375|380|0|22457|1|21884*1|1",
+		"28584|Трансмутация: первичная жизнь в землю|375|380|0|22452|1|21886*1|1",
+		"28585|Трансмутация: первичная земля в жизнь|375|380|0|21886|1|22452*1|1",
+		"28586|Гигантский флакон с зельем омоложения|375|380|0|22850|1|22793*2;22786*1;22791*1;18256*1|0",
+		"28587|Настой укрепления|375|380|0|22851|2|22794*1;22793*3;22790*7;18256*1|0",
+		"28588|Настой могучего восстановления|375|380|0|22853|2|22794*1;22793*3;22786*7;18256*1|0",
+		"28589|Настой безжалостного убийцы|375|380|0|22854|2|22794*1;22793*3;22789*7;18256*1|0",
+		"28590|Настой Слепящего света|375|380|0|22861|2|22794*1;22793*3;22791*7;18256*1|0",
+		"28591|Настой чистой смерти|375|380|0|22866|2|22794*1;22793*3;22792*7;18256*1|0",
+		"38961|Оскверненное зелье маны|375|380|0|31677|1|22793*1;22792*2;18256*1|0",
+		"53842|Эликсир силы заклинаний|375|390|0|40070|1|36901*1;36904*1;18256*1|0",
+		"47046|Алхимический камень стража|380|390|0|35748|1|13503*1;22451*6;30183*2|0",
+		"47048|Алхимический камень чародея|380|390|0|35749|1|13503*1;21884*6;30183*2|0",
+		"47049|Алхимический камень искупителя|380|390|0|35750|1|13503*1;21886*6;30183*2|0",
+		"47050|Алхимический камень убийцы|380|390|0|35751|1|13503*1;22456*6;30183*2|0",
+		"53812|Карломасло|380|390|0|40195|1|40199*1|0",
+		"53848|Эликсир гуру|380|390|0|40076|1|40195*3;18256*1|0",
+		"53899|Слабый настой крепости|380|390|0|40079|1|37921*4;36901*1;18256*1|0",
+		"62409|Эфириальное масло|380|390|0|44958|1|41814*2|0",
+		"53900|Зелье ночных кошмаров|385|395|0|40081|1|36901*1;36907*2;18256*1|0",
+		"42736|Настой всецветного чуда|390|405|0|33208|2|22786*7;22791*3;22794*1;18256*1|0",
+		"53847|Эликсир духа|390|400|0|40072|1|36907*3;18256*1|0",
+		"54218|Мощный эликсир силы|390|400|0|40073|1|36904*2;18256*1|0",
+		"62213|Малый настой сопротивления|390|400|0|44939|1|39970*4;18256*1|0",
+		"53898|Мощный эликсир стойкости|395|405|0|40078|1|36901*4;18256*1|0",
+		"53840|Мощный эликсир ловкости|400|415|0|39666|1|36901*2;36903*2;18256*1|0",
+		"60367|Мощный эликсир разума|400|415|0|44332|1|37921*2;36907*1;18256*1|0",
+		"53771|Трансмутация: извечная жизнь в тьму|405|425|0|35627|1|35625*1|1",
+		"53773|Трансмутация: извечная жизнь в огонь|405|425|0|36860|1|35625*1|1",
+		"53774|Трансмутация: извечный огонь в воду|405|425|0|35622|1|36860*1|1",
+		"53775|Трансмутация: извечный огонь в жизнь|405|425|0|35625|1|36860*1|1",
+		"53776|Трансмутация: извечный воздух в воду|405|425|0|35622|1|35623*1|1",
+		"53777|Трансмутация: извечный воздух в землю|405|425|0|35624|1|35623*1|1",
+		"53779|Трансмутация: извечная тьма в землю|405|425|0|35624|1|35627*1|1",
+		"53780|Трансмутация: извечная тьма в жизнь|405|425|0|35625|1|35627*1|1",
+		"53781|Трансмутация: извечная земля в воздух|405|425|0|35623|1|35624*1|1",
+		"53782|Трансмутация: извечная земля в тьму|405|425|0|35627|1|35624*1|1",
+		"53783|Трансмутация: извечная вода в воздух|405|425|0|35623|1|35622*1|1",
+		"53784|Трансмутация: извечная вода в огонь|405|425|0|36860|1|35622*1|1",
+		"53836|Рунический флакон с лечебным зельем|410|425|0|33447|1|36901*1;36906*2;18256*1|0",
+		"53936|Мощное зелье защиты от тайной магии|410|420|0|40213|1|37701*2;18256*1|0",
+		"53937|Мощное зелье защиты от магии льда|410|420|0|40215|1|37702*2;18256*1|0",
+		"53938|Мощное зелье защиты от темной магии|410|420|0|40217|1|37704*2;18256*1|0",
+		"53939|Мощное зелье защиты от огня|410|420|0|40214|1|37705*2;18256*1|0",
+		"53942|Мощное зелье защиты от сил природы|410|420|0|40216|1|37703*2;18256*1|0",
+		"58871|Бездонный флакон с лечебным зельем|410|415|0|43569|1|33447*10;40411*1|0",
+		"371520|Зелье адреналина|415|430|0|40308|1|36906*2;40195*2;18256*1|0",
+		"53837|Рунический флакон с зельем маны|415|430|0|33448|1|36905*2;36901*1;18256*1|0",
+		"53895|Зелье сумасшедшего алхимика|415|430|0|40077|1|36901*2;18256*1|0",
+		"53904|Мощное зелье омоложения|415|430|0|40087|1|36907*2;36905*2;18256*1|0",
+		"53905|Зелье несокрушимости|415|430|0|40093|1|36906*2;18256*1|0",
+		"54220|Охранный эликсир|415|430|0|40097|1|36906*2;37701*1;18256*1|0",
+		"54221|Зелье быстроты|415|430|0|40211|1|36903*2;40195*1;18256*1|0",
+		"54222|Зелье дикой магии|415|430|0|40212|1|36905*2;40195*1;18256*1|0",
+		"56519|Мощный эликсир крови волшебника|415|430|0|40109|1|36901*1;36905*2;18256*1|0",
+		"58868|Бездонный флакон с зельем маны|415|420|0|43570|1|33448*10;40411*1|0",
+		"60354|Эликсир меткости|415|430|0|44325|1|36904*2;36907*1;18256*1|0",
+		"60355|Эликсир смертельных ударов|415|430|0|44327|1|36901*1;36903*2;18256*1|0",
+		"60356|Мощный эликсир защиты|415|430|0|44328|1|36906*2;37704*1;18256*1|0",
+		"60357|Эликсир мастерства|415|430|0|44329|1|36901*1;36903*2;18256*1|0",
+		"60365|Эликсир пробивания брони|415|430|0|44330|1|36904*2;18256*1|0",
+		"60366|Эликсир молниеносности|415|430|0|44331|1|37921*1;37704*1;18256*1|0",
+		"60893|Исследование трав Нордскола|415|430|0|0|1|36901*10;36903*10;36907*4;40411*4|1",
+		"62410|Эликсир хождения по воде|415|430|0|8827|1|44958*3;18256*1|0",
+		"60350|Трансмутация: титан|420|440|0|41163|1|36913*8|0",
+		"60396|Переменчивый алхимический камень|420|430|0|44322|1|36901*20;35625*2;36908*1|0",
+		"60403|Несокрушимый алхимический камень|420|430|0|44323|1|37921*20;40195*12;36908*1|0",
+		"60405|Могущественный алхимический камень|420|430|0|44324|1|36903*15;36904*15;36908*1|0",
+		"57427|Трансмутация: алмаз землеправителя|435|445|0|41334|1|36932*1;36929*1;36860*1|0",
+		"57425|Трансмутация алмаза небесного сияния|440|450|0|41266|1|36917*1;36923*1;35623*1|0",
+		"66658|Трансмутация: аметрин|440|465|0|36931|1|36930*1;35627*1|1",
+		"66659|Трансмутация: багровый рубин|440|465|0|36919|1|36860*1;36918*1|1",
+		"66660|Трансмутация: царский янтарь|440|465|0|36922|1|36921*1;35625*1|1",
+		"66662|Трансмутация: страхолит|440|465|0|36928|1|35627*1;36927*1|1",
+		"66663|Трансмутация: величественный циркон|440|465|0|36925|1|35623*1;36924*1|1",
+		"66664|Трансмутация: Око Зула|440|465|0|36934|1|36933*3|1",
+		"67025|Настой севера|440|450|0|47499|1|36908*4;40411*1|0",
+		"54020|Трансмутация: извечная сила|445|460|0|40248|1|35623*1;35624*1;36860*1;35622*1|1",
+		"53901|Настой ледяного змея|450|465|0|46376|2|36906*5;36905*5;36908*1;40411*1|0",
+		"53902|Настой каменной крови|450|465|0|46379|2|36905*7;37704*3;36908*1;40411*1|0",
+		"53903|Настой бесконечной ярости|450|465|0|46377|2|36905*7;36901*3;36908*1;40411*1|0",
+		"54213|Настой чистого колдунства|450|465|0|46378|2|36906*7;40195*3;36908*1;40411*1|0",
+		"321624|Малый эликсир отражений|460|470|0|177468|1|177847*1;52986*10;52985*10|0",
+		"321634|Малый эликсир спокойствия|460|470|0|177866|1|177847*1;52986*10;52988*10|0",
+		"321646|Малый настой земли|460|470|0|177471|1|177847*1;52329*8;52986*8;52988*8|0",
+		"321625|Малый эликсир безупречности|465|475|0|177467|1|177847*1;52987*10;52985*10|0",
+		"321635|Малый эликсир подземелий|465|475|0|177867|1|177847*1;52985*10;52987*10|0",
+		"321647|Малый настой весенних цветов|465|475|0|177469|1|177847*1;52329*8;52987*8;52988*8|0",
+		"321661|Трансмутация: врайкульский гранат|465|475|0|76136|1|76133*1;76134*1|0",
+		"321662|Трансмутация: лазурит|465|475|0|76133|1|76136*1;76134*1|0",
+		"321663|Трансмутация: солнечный камень|465|475|0|76134|1|76136*1;76133*1|0",
+		"321664|Трансмутация: плутовской камень|465|475|0|76135|1|76137*1;76130*1|0",
+		"321665|Трансмутация: александрит|465|475|0|76137|1|76135*1;76130*1|0",
+		"321666|Трансмутация: тигровый опал|465|475|0|76130|1|76135*1;76137*1|0",
+		"315386|Могущественный алхимический камень претендента|470|490|0|154235|1|36903*30;36904*30;36908*2;43102*2|0",
+		"315387|Переменчивый алхимический камень претендента|470|490|0|154234|1|36901*40;35625*4;36908*2;43102*2|0",
+		"315388|Несокрушимый алхимический камень претендента|470|490|0|154233|1|37921*40;40195*24;36908*2;43102*2|0",
+		"321626|Малый эликсир стремительности|470|480|0|177466|1|177847*1;52984*10;52988*10|0",
+		"321636|Малый эликсир упорства|470|480|0|177868|1|177847*1;52985*10;52988*10|0",
+		"321648|Малый настой ласкового солнца|470|480|0|177470|1|177847*1;52329*8;52983*8;52986*8|0",
+		"321613|Трансмутация: инфернальный рубин|475|485|0|52190|1|76136*3;52986*3|1",
+		"321614|Трансмутация: морской сапфир|475|485|0|52191|1|76133*3;52985*3|1",
+		"321615|Трансмутация: изумруд грез|475|485|0|52192|1|76137*3;52984*3|1",
+		"321616|Трансмутация: угасающий топаз|475|485|0|52193|1|76130*3;52983*3|1",
+		"321617|Трансмутация: око демона|475|485|0|52194|1|76135*3;52987*3|1",
+		"321618|Трансмутация: янтарный самоцвет|475|485|0|52195|1|76134*3;52988*3|1",
+		"321619|Трансмутация: живые стихии|475|485|0|54464|15|52329*15|1",
+		"321627|Малый эликсир вооружения|475|485|0|177465|1|177847*1;52986*10;52983*10|0",
+		"321637|Малый эликсир наставника|475|485|0|177869|1|177847*1;52986*10;52988*10|0",
+		"321649|Малый настой кусачих морозов|475|485|0|177472|1|177847*1;52329*8;52984*8;52985*8|0",
+		"321628|Малый эликсир монаха|480|490|0|177683|1|177847*1;52987*10;52984*10|0",
+		"321638|Малый эликсир азарта|480|490|0|177870|1|177847*1;52983*10;52984*10|0",
+		"321650|Малый настой опадающих листьев|480|490|0|177684|1|177847*1;52329*8;52983*8;52985*8|0",
+		"321610|Трансмутация: слиток колчедана|485|495|0|51950|3|52186*1;52327*1|1",
+		"321612|Трансмутация: изначальный алмаз|485|495|0|76132|1|52190*1;52191*1;52192*1;52193*1;52194*1;52195*1|1",
+		"321639|Малый эликсир ведьмы|485|495|0|177871|1|177847*1;52983*10;52987*10|0",
+		"321621|Лечебное зелье мастера|490|500|0|76097|1|177847*1;52987*2|0",
+		"305832|Зелье непреклонности|495|505|0|105086|1|177847*1;52986*6|0",
+		"321622|Зелье маны мастера|495|505|0|76098|1|177847*1;52988*1;52983*1|0",
+		"321656|Оскверненное масло|495|505|0|87872|1|177847*1;74864*2;63311*1;63328*1|0",
+		"270000|Настой сопротивления|500|510|0|270000|1|39970*4;22792*4;18256*2|0",
+		"270001|Настой драконьего разума|500|510|0|270001|2|36906*5;36905*5;36908*1;22791*5;22787*5;22794*1;40411*2|0",
+		"270002|Настой силы титана|500|510|0|270002|2|36905*7;36901*3;36908*1;22793*3;22789*7;22794*1;40411*2|0",
+		"270003|Настой текущей воды|500|510|0|270003|2|36906*7;40195*3;36908*1;22793*3;22786*7;22794*1;40411*2|0",
+		"270004|Настой стальной кожи|500|510|0|270004|2|36905*7;37704*3;36908*1;22793*3;22790*7;22794*1;40411*2|0",
+		"270005|Настой крепости|500|510|0|270005|1|37921*4;36901*1;22786*4;22789*1;18256*2|0",
+		"300098|Трансмутация мглистого алмаза|500|510|0|52303|1|52179*1;52181*1;52178*1;52177*1;52182*1;52180*1;30183*1|0",
+		"305833|Зелье чистой ярости|500|510|0|105087|1|177847*1;52983*6|0",
+		"321623|Алхимическое зелье омоложения|500|510|0|76094|1|177847*1;52987*2;52988*1|0",
+		"321633|Эликсир монаха|500|510|0|76083|1|177847*1;52987*15;52984*15|0",
+		"321644|Эликсир азарта|500|510|0|177875|1|177847*1;52983*15;52984*15|0",
+		"321655|Настой опадающих листьев|500|510|0|76086|1|177847*1;52329*12;52983*12;52985*12|0",
+		"321657|Котел войны|500|510|0|62288|1|177469*2;177470*2;177471*2;177472*2;177684*2;52329*25|0",
+		"321659|Алхимический дзен-камень|500|510|0|75274|1|52983*12;52984*12;52985*12;52986*12;52987*12;52988*12;52329*15|0",
+		"305834|Зелье чистой магии|505|515|0|105120|1|177847*1;52984*6|0",
+		"321630|Эликсир безупречности|505|515|0|76080|1|177847*1;52987*15;52985*15|0",
+		"321641|Эликсир подземелий|505|515|0|177872|1|177847*1;52985*15;52987*15|0",
+		"321645|Эликсир ведьмы|505|515|0|177876|1|177847*1;52983*15;52987*15|0",
+		"321652|Настой весенних цветов|505|515|0|76084|1|177847*1;52329*12;52987*12;52988*12|0",
+		"321667|Трансмутация: первозданный рубин|505|515|0|76131|1|76138*1;76142*1|0",
+		"321668|Трансмутация: сердце реки|505|515|0|76138|1|76131*1;76142*1|0",
+		"321669|Трансмутация: солнцесвет|505|515|0|76142|1|76131*1;76138*1|0",
+		"321670|Трансмутация: императорский аметист|505|515|0|76141|1|76139*1;76140*1|0",
+		"321671|Трансмутация: самородный нефрит|505|515|0|76139|1|76141*1;76140*1|0",
+		"321672|Трансмутация: закатный оникс|505|515|0|76140|1|76141*1;76139*1|0",
+		"321631|Эликсир стремительности|510|520|0|76078|1|177847*1;52984*15;52988*15|0",
+		"321642|Эликсир упорства|510|520|0|177873|1|177847*1;52985*15;52988*15|0",
+		"321653|Настой ласкового солнца|510|520|0|76085|1|177847*1;52329*12;52983*12;52986*12|0",
+		"321632|Эликсир вооружения|515|525|0|76077|1|177847*1;52986*15;52983*15|0",
+		"321643|Эликсир наставника|515|525|0|177874|1|177847*1;52986*15;52988*15|0",
+		"321654|Настой кусачих морозов|515|525|0|76088|1|177847*1;52329*12;52984*12;52985*12|0",
+		"321629|Эликсир отражений|520|530|0|76081|1|177847*1;52986*15;52985*15|0",
+		"321640|Эликсир спокойствия|520|530|0|76079|1|177847*1;52986*15;52988*15|0",
+		"321651|Настой земли|520|530|0|76087|1|177847*1;52329*12;52986*12;52988*12|0",
+		"305823|Переменчивый алхимический камень|525|535|0|68776|1|52983*56;52984*20;52985*20;52986*20;52987*20;52988*20;102351*1|0",
+		"305824|Резонирующий алхимический камень|525|535|0|68777|1|52983*20;52984*56;52985*20;52986*20;52987*20;52988*20;102351*1|0",
+		"305825|Неустойчивый алхимический камень|525|535|0|68775|1|52983*20;52984*20;52985*20;52986*56;52987*20;52988*20;102351*1|0",
+		"321611|Трансмутация: истинное золото|525|535|0|58480|1|51950*3;52325*10;52328*10;52326*10|1",
+		"321620|Зелье поиска сокровищ Фельярда|525|535|0|58488|1|177847*1;52983*4;52986*4;52988*4;52987*4;52984*4;52985*4|1",
+		"321658|Великий котел войны|525|535|0|65460|1|76087*2;76084*2;76085*2;76088*2;76083*2;52329*50|0",
+		"321660|Алхимический камень жизни|525|535|0|58483|1|52983*26;52984*26;52985*26;52986*26;52987*26;52988*26;102351*1|0",
+		"322521|Трансмутация: первозданный рубин|525|535|0|76131|1|52190*3;177929*3|1",
+		"322522|Трансмутация: сердце реки|525|535|0|76138|1|52191*3;177929*3|1",
+		"322523|Трансмутация: солнцесвет|525|535|0|76142|1|52192*3;177929*3|1",
+		"322524|Трансмутация: императорский аметист|525|535|0|76141|1|52193*3;177929*3|1",
+		"322525|Трансмутация: самородный нефрит|525|535|0|76139|1|52194*3;177929*3|1",
+		"322526|Трансмутация: закатный оникс|525|535|0|76140|1|52195*3;177929*3|1",
+		"321609|Поводья мутагенного исчадия|535|545|0|153382|1|76078*4;76080*4;76087*1;76084*1;76085*1;76088*1;102351*1|0",
+	},
+	[185] = {
+		"37836|Хлеб с пряностями|30|40|0|30816|1|30817*1;2678*1|0",
+		"65454|Поминальный хлеб|30|40|0|46691|1|30817*1;1179*1|0",
+		"15935|Хрустящее крылышко летучей мыши|45|85|0|12224|1|12223*1|0",
+		"21143|Имбирное печенье|45|85|0|17197|1|6889*1;17194*1|0",
+		"2538|Волчатина на углях|45|85|1|2679|1|2672*1|0",
+		"2540|Жареная кабанина|45|85|1|2681|1|769*1|0",
+		"33276|Стейк из рысятины|45|85|0|27635|1|27668*1|0",
+		"33277|Жареная вырезка лунного оленя|45|85|0|24105|1|23676*1|0",
+		"7751|Блестящая рыбка|45|85|0|6290|1|6291*1|0",
+		"7752|Скользкокожая скумбрия|45|85|0|787|1|6303*1|0",
+		"8604|Яйцо с травами|45|85|1|6888|1|6889*1|0",
+		"2539|Волчатина с пряностями|50|90|0|2680|1|2672*1|0",
+		"43779|Вкусный шоколадный торт|50|75|0|33924|1|30817*8;1179*4;2678*4;6889*8;2593*1;785*3|0",
+		"6412|Калдорайский шашлык из паука|50|90|0|5472|1|5465*1|0",
+		"2795|Кабаньи ребрышки в пиве|60|100|0|2888|1|2886*1|0",
+		"6413|Десерт из скорпида|60|100|0|5473|1|5466*1|0",
+		"21144|Гоголь-моголь|75|115|0|17198|1|6889*1;1179*1;17196*1;17194*1|0",
+		"6414|Жареное мясо кодо|75|115|0|5474|2|5467*1|0",
+		"8607|Копченая медвежатина|80|120|0|6890|1|3173*1|0",
+		"2541|Стейк из койота|90|130|0|2684|1|2673*1|0",
+		"2542|Пирожок из печени кровоклыка|90|130|0|724|1|723*1|0",
+		"33278|Закуска из летучей мыши|90|130|0|27636|1|27669*1|0",
+		"62050|Пряная хлебная запеканка|90|115|0|44837|1|30816*1;44835*1|0",
+		"6415|Филе бешенки|90|130|0|5476|2|5468*1|0",
+		"6416|Похлебка из долгонога|90|130|0|5477|2|5469*1|0",
+		"6499|Отварные мидии|90|130|0|5525|1|5503*1;159*1|0",
+		"66038|Пряная хлебная запеканка|90|115|0|44837|1|30816*1;44835*1|0",
+		"7753|Острозубый илистый луциан|90|130|0|4592|1|6289*1|0",
+		"7754|Деликатес из бешенки|90|130|0|6316|1|6317*1|0",
+		"7827|Радужный тунец|90|130|0|5095|1|6361*1|0",
+		"28267|Хрустящий паучий десерт|100|140|0|22645|1|22644*1|0",
+		"3371|Кровяная колбаса|100|140|0|3220|2|3173*1;3172*1;3174*1|0",
+		"45695|Светлое пиво капитана Ромси|100|110|0|34832|5|2596*1;2594*1|0",
+		"9513|Артишоковый чай|100|140|0|7676|1|2452*1;159*1|0",
+		"2543|Похлебка Западного Края|115|155|0|733|5|729*1;730*1;731*1|0",
+		"2544|Пирожок с мясом краба|115|155|0|2683|1|2674*1|0",
+		"2546|Сушеные свиные ребрышки|120|160|0|2687|1|2677*1|0",
+		"25704|Копченый шалфокунь|120|160|0|21072|1|21071*1|0",
+		"3370|Стейк из кроколиска|120|160|0|3662|1|2924*1|0",
+		"2545|Вареная клешня краба|125|165|0|2682|1|2675*1|0",
+		"8238|Загадочное острое лакомство|125|165|0|6657|1|6522*1|0",
+		"2548|Сочные свиные ребрышки|130|170|0|2685|1|2677*2|0",
+		"3372|Суп из плавников мурлока|130|170|0|3663|1|1468*2|0",
+		"6417|Похлебка из пещерной крысы|130|170|0|5478|2|5051*1|0",
+		"6501|Похлебка из моллюсков|130|170|0|5526|1|5503*1;1179*1|0",
+		"2547|Гуляш по-красногорски|135|175|0|1082|1|1081*1;1080*1|0",
+		"2549|Приправленная котлета из волчатины|140|180|0|1017|3|1015*2|0",
+		"6418|Хрустящий хвост ящерицы|140|180|0|5479|2|5470*1|0",
+		"7755|Ощетиненная зубатка|140|180|0|4593|1|6308*1|0",
+		"3377|Пирожок из паучатины|150|190|0|3666|1|2251*2|0",
+		"3397|Большой медвежий стейк|150|190|0|3726|1|3730*1|0",
+		"62044|Тыквенный пирог|150|175|0|44836|1|46784*1;44853*1|0",
+		"6419|Постная оленина|150|190|0|5480|2|5471*1|0",
+		"66036|Тыквенный пирог|150|175|0|44836|1|46796*1;44853*1|0",
+		"24418|Сытная похлебка из кроколиска|160|200|0|20074|1|3667*2|0",
+		"3373|Суп из кроколиска|160|200|0|3664|1|3667*1|0",
+		"15853|Постный стейк из волчатины|165|205|0|12209|1|1015*1|0",
+		"6500|Мидии по-гоблински|165|205|0|5527|1|5504*1|0",
+		"3376|Невероятно вкусный омлет|170|210|0|3665|1|3685*1|0",
+		"13028|Чай из златошипа|175|205|0|10841|4|3821*1;159*1|0",
+		"3398|Острая отбивная из мяса льва|175|215|0|3727|1|3731*1|0",
+		"3399|Сочный стейк из мяса льва|190|230|0|3728|1|3731*2|0",
+		"7828|Каменношкурая треска|190|230|0|4594|1|6362*1|0",
+		"62049|Клюквенный соус|210|235|0|44840|1|44854*1;44853*1|0",
+		"66035|Клюквенный соус|210|235|0|44840|1|46793*1;44853*1|0",
+		"15855|Жареный ящер|215|255|0|12210|1|12184*1|0",
+		"15856|Острая волчья грудинка|215|255|0|13851|1|12203*1|0",
+		"15861|Похлебка 'Джунгли'|215|255|0|12212|2|12202*1;159*1|0",
+		"15863|Десерт из мертвечины|215|255|0|12213|1|12037*1|0",
+		"15865|Загадочная похлебка|215|255|0|12214|1|12037*1;2596*1|0",
+		"20916|Мифрилоголовая форель|215|255|0|8364|1|8365*1|0",
+		"25954|Деликатес из шалфокуня|215|255|0|21217|1|21153*1|0",
+		"3400|Нежный черепаховый суп|215|255|0|3729|1|3712*1|0",
+		"4094|Жареное крыло канюка|215|255|0|4457|1|3404*1|0",
+		"7213|Гигантский жареный моллюск|215|255|0|6038|1|4655*1|0",
+		"15906|Мясо в соусе 'Дыхание дракона'|225|250|0|12217|1|12037*1;4402*1|0",
+		"15910|Сытная похлебка из кодо|225|250|0|12215|2|12204*2|0",
+		"21175|Паучья колбаска|225|250|0|17222|1|12205*2|0",
+		"15915|Острое крабовое чили|250|275|0|12216|1|12206*1|0",
+		"15933|Чудовищный омлет|250|275|0|12218|1|12207*1|0",
+		"18238|Пятнистый желтохвост|250|275|0|6887|1|4603*1|0",
+		"18239|Мощь-рыба в кляре|250|275|0|13927|1|13754*1|0",
+		"18241|Филе краснобородки|250|275|0|13930|1|13758*1|0",
+		"20626|Шахтерская похлебка из моллюсков|250|275|0|16766|2|7974*2|0",
+		"22480|Нежный стейк из волчатины|250|275|0|18045|1|12208*1|0",
+		"64054|Невероятные мидии|250|300|0|33004|1|7974*1|0",
+		"18240|Кальмар-гриль|265|290|0|13928|1|13755*1|0",
+		"18242|Окунь горячего копчения|265|290|0|13929|1|13756*1|0",
+		"62051|Засахаренный батат|270|295|0|44839|1|44855*1;44853*1;44835*1|0",
+		"66034|Засахаренный батат|270|295|0|44839|1|46797*1;44853*1;44835*1|0",
+		"18243|Суп из ночного луциана|275|295|0|13931|1|13759*1;159*1|0",
+		"18244|Вареный солнечный лосось|275|295|0|13932|1|13760*1|0",
+		"46684|Кебаб из медвежатины на углях|275|295|0|35563|1|35562*1|0",
+		"46688|Сочная котлета из медвежатины|275|295|0|35565|1|35562*1|0",
+		"18245|Похлебка из омаров|300|325|0|13933|1|13888*1;159*1|0",
+		"18246|Стейк из мощь-рыбы|300|325|0|13934|1|13893*1|0",
+		"18247|Печеный лосось|300|325|0|13935|1|13889*1|0",
+		"22761|Десерт из корня Рун-Тум|300|325|0|18254|1|18255*1|0",
+		"24801|Копченые пустынные клецки|310|335|0|20452|1|20424*1|0",
+		"33279|Закуска из канюка|320|340|0|27651|1|27671*1|0",
+		"33284|Сосиска из мяса опустошителя|320|340|0|27655|1|27674*1|0",
+		"33290|Копченая форель|320|340|0|27661|1|27422*1|0",
+		"33291|Лакомство из сквернохвоста|320|340|0|27662|1|27425*1|0",
+		"36210|Батончик из мяса моллюска|320|340|0|30155|1|24477*2|0",
+		"43758|Буреветчина|320|340|0|33866|1|27678*1;13757*1|0",
+		"43761|Зажаренный на открытом огне афиохаракс|320|340|0|33867|1|33823*1|0",
+		"25659|Зажигательные химеровые отбивные Могиля|325|350|0|21023|5|9061*1;8150*1;21024*1|0",
+		"45022|Горячий яблочный сидр|325|325|0|34411|2|34412*1;17196*1;17194*1|0",
+		"33285|Закуска спорлингов|330|350|0|27656|1|27676*1|0",
+		"33292|Копченый спороус|330|350|0|27663|1|27429*1|0",
+		"62045|Запеченная индейка|330|355|0|44838|1|44834*1;44853*2;44835*1|0",
+		"66037|Запеченная индейка|330|355|0|44838|1|44834*1;44853*2;44835*1|0",
+		"33286|Копченый василиск|335|355|0|27657|1|27677*1|0",
+		"42296|Тушеная форель|335|355|0|33048|1|27422*1|0",
+		"43707|Суп из рыбы-черепа|335|355|0|33825|1|33824*1|0",
+		"43765|Острый стейк из талбука|335|355|0|33872|1|27682*1|0",
+		"33293|Жареная ильница|340|360|0|27664|1|27435*1|0",
+		"33294|Вареный луфарь|340|360|0|27665|1|27437*1|0",
+		"33287|Жареное мясо копытня|345|365|0|27658|1|27678*1|0",
+		"33288|Котлета из прыгуаны|345|365|0|27659|1|27681*1|0",
+		"33289|Стейк из талбука|345|365|0|27660|1|27682*1|0",
+		"33295|Палочки из золотой рыбки|345|365|0|27666|1|27438*1|0",
+		"43772|'Кит и кот'|345|365|0|33874|1|27671*1|0",
+		"45549|Кушанье из мамонта|350|415|0|34748|1|34736*1|0",
+		"45550|Стейк из черпорога|350|415|0|34749|1|43009*1|0",
+		"45551|Деликатес из змея|350|415|0|34750|1|43010*1|0",
+		"45552|Жареный ворг|350|415|0|34751|1|43011*1|0",
+		"45553|Сосиски из люторога|350|415|0|34752|1|43012*1|0",
+		"45560|Копченый камнеперый окунь|350|380|0|34759|1|41803*1|0",
+		"45561|Костечешуйный луциан - гриль|350|380|0|34760|1|41808*1|0",
+		"45562|Соте из бычков|350|380|0|34761|1|41812*1|0",
+		"45563|Подкаменщик-гриль|350|415|0|34762|1|41806*1|0",
+		"45564|Копченый лосось|350|415|0|34763|1|41809*1|0",
+		"45565|Вареная медуза|350|415|0|34764|1|41813*1|0",
+		"45566|Маринованная клыкозубая сельдь|350|415|0|34765|1|41810*1|0",
+		"45569|Печеный морской дьявол|350|415|0|42942|1|41802*1|0",
+		"57421|Северная похлебка|350|380|0|34747|1|43013*1|0",
+		"58065|Даларанская похлебка из моллюсков|350|415|0|43268|1|36782*2|0",
+		"58512|Аппетитный кекс|350|365|0|43490|5|30817*2;43501*1|0",
+		"58521|Мамонтятина не первой свежести|350|365|0|43488|5|34736*1|0",
+		"58523|Испорченные моллюски|350|365|0|43491|5|36782*1;22577*1|0",
+		"58525|Эфемерная селедка|350|365|0|43492|5|41810*1;12808*1|0",
+		"62350|Карпаччо из ворга|350|460|0|44953|1|43011*2;43007*1|0",
+		"38867|Ребрышки Мок'Натала|355|375|0|31672|1|31670*1|0",
+		"38868|Поджаристый змей|355|375|0|31673|1|31671*1|0",
+		"33296|Рак с пряностями|370|380|0|27667|1|27439*1|0",
+		"42302|Рыбацкая услада|375|385|0|33052|6|27515*1|0",
+		"42305|Жареная форель|375|385|0|33053|2|27516*1|0",
+		"45554|'Пир на весь мир'|375|425|0|34753|1|34736*1;43009*1;43010*1;43013*2|0",
+		"53056|Кунгалуш|375|400|0|39520|5|35949*2;35948*1|0",
+		"64358|Черный студень|400|425|0|45932|1|41805*3|0",
+		"45555|Сытное кушанье из мамонта|425|475|0|34754|1|34736*2;43007*1|0",
+		"45556|Нежный стейк из черпорога|425|475|0|34755|1|43009*2;43007*1|0",
+		"45557|Котлета из змея с пряностями|425|475|0|34756|1|43010*2;43007*1|0",
+		"45558|Пережаренное мясо ворга|425|475|0|34757|1|43011*1;43007*1|0",
+		"45559|Сочные сосиски из люторога|425|475|0|34758|1|43012*2;43007*1|0",
+		"45567|Вареный северный подкаменщик|425|475|0|34766|1|41806*1;43007*1|0",
+		"45568|Лосось с дымком|425|475|0|34767|1|41809*1;43007*1|0",
+		"45570|Стейк из королевского ската|425|475|0|34769|1|41802*1;43007*1|0",
+		"45571|Синяя медуза с пряностями|425|475|0|34768|1|41813*1;43007*1|0",
+		"57433|Острая жареная сельдь|425|475|0|42993|1|41810*1;43007*1|0",
+		"57434|Люторожий змеестейк|425|475|0|42994|1|43010*1;43012*1;43007*1|0",
+		"57435|Корм для зверька|425|475|0|43004|4|43013*2;43007*1|0",
+		"57436|Сочное мясо люторога|425|475|0|42995|1|43012*1;43007*1|0",
+		"57437|Луциан особого приготовления|425|475|0|42996|1|41808*3;43007*1|0",
+		"57438|Подкопченный стейк из ворга|425|475|0|42997|1|43011*1;43007*1|0",
+		"57439|Стейк из каракатицы|425|475|0|42998|1|41801*1;43007*1|0",
+		"57440|Пряное лакомство из мамонта|425|475|0|43005|1|34736*1;43007*1|0",
+		"57441|Подкопченная дракоперая рыба-ангел|425|475|0|42999|1|41807*1;43007*1|0",
+		"57442|Филе дракоперой рыбы-ангела|425|475|0|43000|1|41807*1;43007*1|0",
+		"57443|Завтрак следопыта|425|475|0|43001|1|43009*1;43007*1|0",
+		"58527|Пир для великанов|435|475|0|43478|1|41800*2;34736*2;41803*2;43007*1|0",
+		"58528|Пир для карликов|435|475|0|43480|1|41813*2;43012*2;41809*2;43007*1|0",
+		"57423|Рыбный пир|455|465|0|43015|1|41806*2;41809*2;41813*2;43007*1|0",
+		"371935|Рыбный пирог|460|470|0|74641|1|74861*4|0",
+		"371936|Разрезанные персики|460|470|0|86057|1|74660*1|0",
+		"371937|Блюдо из двух рыб|465|475|0|74655|1|74865*2|0",
+		"371948|Жареная дичь|465|475|0|74654|1|74839*8;74661*1|0",
+		"371938|Консоме из золотистого карпа|470|480|0|74636|1|74866*4|0",
+		"371943|Завтрак безумца|470|480|0|75038|1|74849*2;74844*1|0",
+		"371947|Курица с арахисом на вертеле|475|485|0|81413|1|74659*4;74853*1|0",
+		"371949|Жаренный на углях стейк из оленины|475|485|0|74642|1|74833*8;74661*1|0",
+		"371939|Идеальная лапша быстрого приготовления|480|490|0|86026|1|74854*2|0",
+		"148052|Пирожок с красной фасолью|485|475|0|81408|1|85585*8;74662*1|0",
+		"371944|Хаустлундские фриттеры|485|495|0|85504|1|74865*4;74662*1|0",
+		"371950|Женьшеневый чай|485|495|0|75026|1|74845*1;74662*1|0",
+		"371945|Сушеные опята|490|500|0|81404|1|85583*4;74661*1|0",
+		"371940|Подрумяненная соленая рыба|495|505|0|81402|1|74860*4|0",
+		"371951|Пассерованная морковь|495|505|0|74643|1|74841*8;74853*1|0",
+		"300080|Филе дракоперой рыбы-ангела с приправами|500|510|0|290010|1|41807*2;43007*2;290024*2|0",
+		"300081|Сытное кушанье из мамонта с приправами|500|510|0|290011|1|34736*2;43007*2;290024*2|0",
+		"300082|Сочные сосиски из люторога с приправами|500|510|0|290012|1|43012*2;43007*2;290024*2|0",
+		"300083|Подкопченная дракоперая рыба-ангел с приправами|500|510|0|290013|1|41807*2;43007*2;290024*2|0",
+		"300084|Подкопченный лосось со специями|500|510|0|290014|1|41809*2;43007*2;290024*2|0",
+		"300085|Люторожий змеестейк с приправами|500|510|0|290015|1|43010*2;43012*2;43007*2;290024*2|0",
+		"300086|Луциан особого приготовления с приправами|500|510|0|290016|1|41808*2;43007*2;290024*2|0",
+		"300087|Сочное мясо люторога со специями|500|510|0|290018|1|43012*2;43007*2;290024*2|0",
+		"300088|Черный студень с приправами|500|510|0|290017|1|41805*2;43007*2;290024*2|0",
+		"300089|Рыбный пир со специями|500|510|0|290019|1|41806*2;41809*2;41813*2;43007*2;290024*2|0",
+		"300092|Стейк из королевского ската со специями|500|510|0|290022|1|41802*2;43007*2;290024*2|0",
+		"300095|Даларанская похлебка из моллюсков со специями|500|510|0|290023|1|36782*4;290024*2;43007*2|0",
+		"316195|Стейк из каракатицы с приправами|500|510|0|50482|1|41801*2;43007*2;290024*2|0",
+		"316196|Медуза с приправами|500|510|0|50483|1|41813*2;43007*2;290024*2|0",
+		"316197|Пряное лакомство из мамонта c приправами|500|510|0|50484|1|34736*2;43007*2;290024*2|0",
+		"371941|Торт из молотого риса|500|510|0|81400|1|74851*8|0",
+		"371953|Клецки с раками-богомолами|500|510|0|74651|1|74857*8;74662*1|0",
+		"371942|Дамайча|505|515|0|81406|1|74832*1|0",
+		"371946|Суп из шустрого краба|505|515|0|85501|1|74838*4;74853*1|0",
+		"371952|Суп из клубящегося тумана|505|515|0|74644|1|74856*8;74661*1|0",
+		"148053|Отварная куколка шелкопряда|520|510|0|81405|1|85584*4|0",
+		"148054|Домашний сыр из молока черпорога|520|510|0|81401|1|74852*4|0",
+		"148055|Суп из дичи с женьшенем|520|510|0|86070|1|74839*4;74845*4|0",
+		"148056|Сушеные персики|520|510|0|81403|1|74660*2|0",
+		"148057|Зеленый карри с рыбой|520|510|0|81410|1|74860*5;74851*3;74662*1;177423*1|0",
+		"148058|Отвар нефритовой ведьмы|520|510|0|75037|1|74846*1;74847*1|0",
+		"148059|Рисовая лапша морских туманов|520|510|0|74648|1|75014*2;74861*7;74843*7|0",
+		"148060|Рисовый пудинг|520|510|0|86069|1|74851*2;74852*2|0",
+		"148061|Стир-фрай долины|520|510|0|74647|1|74864*4;74839*4;74853*1;177422*1|0",
+		"148062|Крабовый сюрприз на пару|520|510|0|74653|1|74863*1;74838*3;74850*4;74661*1;177424*1|0",
+		"148063|Острые овощные чипсы|520|510|0|86074|1|74849*8;74847*8|0",
+		"148064|Чай с перламутровым молоком|520|510|0|81414|1|74852*2|0",
+		"148065|Тушеное волчье мясо|520|510|0|74649|1|74837*1;74841*3|0",
+		"148070|Пикантный йогурт|520|510|0|81409|1|74852*3;74660*1|0",
+		"148071|Угощение на гриле|520|510|0|87226|1|74837*8;74865*8;74857*8;74661*1|0",
+		"148072|Угощение вок|520|510|0|87230|1|74851*9;74847*5;74841*5;74843*5;74662*1|0",
+		"148073|Угощение в горшочке|520|510|0|87234|1|74856*8;74860*8;74842*8;74661*1|0",
+		"148074|Угощение на пару|520|510|0|87238|1|74864*12;74866*12;74662*1|0",
+		"148075|Угощение из печи|520|510|0|87242|1|74860*8;74839*8;85584*8;74662*1|0",
+		"148076|Освежающее угощение|520|510|0|87246|1|74848*8;74845*4;74832*4;74852*4;74841*4;74662*1|0",
+		"148067|Рыба по-дольски|525|515|0|74645|1|74863*4;74848*4|0",
+		"148066|Лосось духов огня|530|520|0|74652|1|74859*6;74844*2;74661*1;177423*1|0",
+		"148068|Пиво индивидуальных ощущений|530|520|0|87264|1|74660*1;74846*1;74842*2;74853*1;177422*1|0",
+		"148069|Ребрышки с черным перцем и раками|530|520|0|74646|1|74834*3;74857*3;74840*2;74661*1;177423*1|0",
+		"148077|Большое угощение на гриле|535|525|0|87228|2|87703*2;87728*2;87702*1;74661*1;177423*1|0",
+		"148078|Большое угощение вок|535|525|0|87232|2|87713*2;87707*1;87709*1;74851*20;74662*1;177422*1|0",
+		"148079|Большое угощение в горшочке|535|525|0|87236|2|87725*2;87726*2;87708*1;74661*1;177424*1|0",
+		"148080|Большое угощение на пару|535|525|0|87240|2|87723*3;87729*2;74662*1;177422*1|0",
+		"148081|Большое угощение из печи|535|525|0|87244|2|87724*2;87705*2;85584*20;74662*1;177424*1|0",
+		"148082|Большое освежающее угощение|535|525|0|87248|2|87714*2;87707*2;74845*10;74832*5;74852*5;74662*1;177424*1|0",
+	},
+	[186] = {
+		"2657|Выплавка меди|25|70|1|2840|1|2770*1|0",
+		"2659|Выплавка бронзы|65|115|0|2841|2|2840*1;3576*1|0",
+		"3304|Выплавка олова|65|75|0|3576|1|2771*1|0",
+		"2658|Выплавка серебра|115|130|0|2842|1|2775*1|0",
+		"3307|Выплавка железа|130|160|0|3575|1|2772*1|0",
+		"3569|Выплавка стали|165|165|0|3859|1|3575*1;3857*1|0",
+		"3308|Выплавка золота|170|185|0|3577|1|2776*1|0",
+		"10097|Выплавка мифрила|175|230|0|3860|1|3858*1|0",
+		"10098|Выплавка истинного серебра|250|290|0|6037|1|7911*1|0",
+		"16153|Выплавка тория|250|290|0|12359|1|10620*1|0",
+		"70524|Зачарованный торий|250|260|0|12655|1|12359*1;11176*3|0",
+		"29356|Выплавка оскверненного железа|275|325|0|23445|1|23424*2|0",
+		"14891|Выплавка черного железа|300|310|0|11371|1|11370*8|0",
+		"35750|Расщепление земли|300|300|0|22573|10|22452*1|0",
+		"35751|Разложение огня|300|300|0|22574|10|21884*1|0",
+		"29358|Выплавка адамантита|325|340|0|23446|1|23425*2|0",
+		"29360|Выплавка оскверненной стали|340|375|0|23448|1|23445*3;23447*2|0",
+		"22967|Выплавка элементия|350|375|0|17771|1|18562*1;12360*10;17010*1;18567*3|0",
+		"29359|Выплавка этерния|350|365|0|23447|1|23427*2|0",
+		"49252|Выплавка кобальта|350|375|0|36916|1|36909*1|0",
+		"29361|Выплавка кория|375|375|0|23449|1|23426*2|0",
+		"29686|Выплавка закаленного адамантита|375|375|0|23573|1|23446*10|0",
+		"46353|Выплавка закаленного кория|375|375|0|35128|1|23449*3;23573*1|0",
+		"49258|Выплавка саронита|400|400|0|36913|1|36912*2|0",
+		"55208|Выплавка титановой стали|450|450|0|37663|1|41163*3;36860*1;35624*1;35627*1|0",
+		"55211|Выплавка титана|450|450|0|41163|1|36910*2|0",
+		"316180|Выплавка обсидиана|470|495|0|54849|1|53038*2|0",
+		"316181|Выплавка элементия|495|515|0|52186|1|52185*2|0",
+		"316182|Выплавка закаленного элементия|515|540|0|53039|1|52186*10;52327*4|0",
+		"321746|Выплавка колчедана|515|540|0|51950|1|52183*2;177853*1|0",
+	},
+	[197] = {
+		"2963|Рулон льняной ткани|25|50|1|2996|1|2589*2|0",
+		"12044|Простые льняные штаны|35|60|1|10045|1|2996*1;2320*1|0",
+		"2387|Льняной плащ|35|60|1|2570|1|2996*1;2320*1|0",
+		"2393|Белая льняная рубашка|35|60|0|2576|1|2996*1;2320*1;2324*1|0",
+		"3915|Коричневая льняная рубашка|35|60|1|4344|1|2996*1;2320*1|0",
+		"2385|Коричневый льняной жилет|45|70|0|2568|1|2996*1;2320*1|0",
+		"12045|Простые льняные сапоги|50|85|0|10046|1|2996*2;2318*1;2320*1|0",
+		"8776|Льняной пояс|50|85|0|7026|1|2996*1;2320*1|0",
+		"3914|Коричневые льняные штаны|55|90|0|4343|1|2996*2;2320*1|0",
+		"7623|Коричневое льняное одеяние|55|90|0|6238|1|2996*3;2320*1|0",
+		"7624|Белое льняное одеяние|55|90|0|6241|1|2996*3;2320*1;2324*1|0",
+		"3840|Тяжелые льняные перчатки|60|95|0|4307|1|2996*2;2320*1|0",
+		"2389|Красное льняное одеяние|65|100|0|2572|1|2996*3;2320*2;2604*2|0",
+		"2392|Красная льняная рубашка|65|100|0|2575|1|2996*2;2320*1;2604*1|0",
+		"2394|Синяя льняная рубашка|65|100|0|2577|1|2996*2;2320*1;6260*1|0",
+		"8465|Простое платье|65|100|0|6786|1|2996*2;2320*1;6260*1;2324*1|0",
+		"3755|Льняная сумка|70|105|0|4238|1|2996*3;2320*3|0",
+		"7629|Красный льняной жилет|80|115|0|6239|1|2996*3;2320*1;2604*1|0",
+		"7630|Синий льняной жилет|80|115|0|6240|1|2996*3;2320*1;6260*1|0",
+		"2397|Усиленная льняная накидка|85|120|0|2580|1|2996*2;2320*3|0",
+		"3841|Зеленые льняные наручи|85|120|0|4308|1|2996*3;2320*2;2605*1|0",
+		"2386|Льняные сапоги|90|125|0|2569|1|2996*3;2320*1;2318*1|0",
+		"2964|Рулон шерсти|90|105|0|2997|1|2592*3|0",
+		"2395|Варварский льняной жилет|95|130|0|2578|1|2996*4;2318*1;2321*1|0",
+		"2396|Зеленая льняная рубашка|95|130|0|2579|1|2996*3;2321*1;2605*1|0",
+		"3842|Рукодельные льняные брюки|95|130|0|4309|1|2996*4;2321*2|0",
+		"6686|Красная льняная сумка|95|130|0|5762|1|2996*4;2321*1;2604*1|0",
+		"7633|Синее льняное одеяние|95|130|0|6242|1|2996*4;2320*2;6260*2|0",
+		"12046|Простой килт|100|135|0|10047|1|2996*4;2321*1|0",
+		"2402|Шерстяная накидка|100|135|0|2584|1|2997*1;2321*1|0",
+		"3757|Шерстяная сумка|105|140|0|4240|1|2997*3;2321*1|0",
+		"3845|Льняные сапоги с мягкой подошвой|105|140|0|4312|1|2996*5;2318*2;2321*1|0",
+		"2399|Зеленый шерстяной жилет|110|145|0|2582|1|2997*2;2321*2;2605*1|0",
+		"2406|Серая шерстяная рубашка|110|130|0|2587|1|2997*2;2321*1;4340*1|0",
+		"3843|Тяжелые шерстяные перчатки|110|145|0|4310|1|2997*3;2321*1|0",
+		"6521|Плащ с перламутровыми застежками|115|150|0|5542|1|2997*3;2321*2;5498*1|0",
+		"7636|Зеленое шерстяное одеяние|115|150|0|6243|1|2997*3;2321*2;2605*1|0",
+		"2401|Шерстяные сапоги|120|155|0|2583|1|2997*4;2321*2;2318*2|0",
+		"3758|Зеленая шерстяная сумка|120|155|0|4241|1|2997*4;2605*1;2321*1|0",
+		"3847|Красные шерстяные сапоги|120|155|0|4313|1|2997*4;2318*2;2321*1;2604*2|0",
+		"3844|Тяжелый шерстяной плащ|125|160|0|4311|1|2997*3;2321*2;5498*2|0",
+		"7639|Синий комбинезон|125|160|0|6263|1|2997*4;2321*2;6260*2|0",
+		"2403|Серое шерстяное одеяние|130|165|0|2585|1|2997*4;2321*3;4340*1|0",
+		"3839|Рулон шелка|135|145|0|4305|1|4306*4|0",
+		"3848|Шерстяные наплечники с двойным швом|135|170|0|4314|1|2997*3;2321*2|0",
+		"3850|Тяжелые шерстяные штаны|135|170|0|4316|1|2997*5;2321*4|0",
+		"3866|Стильная красная рубашка|135|170|0|4330|1|2997*3;2604*2;2321*1|0",
+		"8467|Белое шерстяное платье|135|170|0|6787|1|2997*3;2324*4;2321*1|0",
+		"6688|Красная шерстяная сумка|140|175|0|5763|1|2997*4;2604*1;2321*1|0",
+		"7643|Большее одеяние адепта|140|175|0|6264|1|2997*5;2321*3;2604*3|0",
+		"12047|Многоцветный килт|145|180|0|10048|1|2997*5;2604*3;2321*1|0",
+		"3849|Усиленные шерстяные наплечники|145|180|0|4315|1|2997*6;2319*2;2321*2|0",
+		"3869|Ярко-желтая рубашка|145|155|0|4332|1|4305*1;4341*1;2321*1|0",
+		"7892|Стильная синяя рубашка|145|180|0|6384|1|2997*4;6260*2;4340*1;2321*1|0",
+		"7893|Стильная зеленая рубашка|145|180|0|6385|1|2997*4;2605*2;4340*1;2321*1|0",
+		"3851|Штаны Феникса|150|185|0|4317|1|2997*6;5500*1;2321*3|0",
+		"3852|Перчатки Медитации|150|180|0|4318|1|2997*4;2321*3;3383*1|0",
+		"3855|Сапоги из паучьего шелка|150|185|0|4320|1|4305*2;2319*4;3182*4;5500*2|0",
+		"3868|Перчатки Феникса|150|185|0|4331|1|2997*4;5500*1;2321*4;2324*2|0",
+		"63742|Пелерина из паучьего шелка|150|185|0|45626|1|4305*3;3182*6;2321*2|0",
+		"6690|Простое одеяние волшебника|155|185|0|5766|1|4305*2;2321*2;3182*2|0",
+		"8760|Лазурный шелковый капюшон|155|165|0|7048|1|4305*2;6260*2;2321*1|0",
+		"3856|Туфли из паутины|160|190|0|4321|1|4305*3;3182*1;2321*2|0",
+		"8758|Лазурные шелковые штаны|160|190|0|7046|1|4305*4;6260*2;2321*3|0",
+		"8778|Сапоги Тьмы|160|190|0|7027|1|4305*3;2319*2;6048*1;2321*2|0",
+		"3854|Лазурные шелковые перчатки|165|195|0|4319|1|4305*3;4234*2;6260*2;2321*2|0",
+		"3870|Темная шелковая рубашка|165|175|0|4333|1|4305*2;4340*2;2321*1|0",
+		"8780|Краги Тьмы|165|195|0|7047|1|4305*3;4234*2;6048*2;2321*2|0",
+		"3813|Маленькая шелковая сумка|170|200|0|4245|1|4305*3;4234*2;2321*3|0",
+		"3859|Лазурный шелковый жилет|170|200|0|4324|1|4305*5;6260*4|0",
+		"6692|Одеяния Тайны|170|200|0|5770|1|4305*4;2321*2;3182*2|0",
+		"8483|Белая рубашка сорвиголовы|170|180|0|6795|1|4305*3;2324*2;4291*1|0",
+		"8762|Шелковая головная повязка|170|180|0|7050|1|4305*3;2321*2|0",
+		"8782|Перчатки истинной веры|170|200|0|7049|1|4305*3;4234*2;929*4;2321*1|0",
+		"3865|Рулон магической ткани|180|185|0|4339|1|4338*4|0",
+		"3871|Церемониальная белая рубашка|180|190|0|4334|1|4305*3;2324*2;2321*1|0",
+		"3857|Клобук волшебника|185|215|0|4322|1|4305*3;2321*2;4337*2|0",
+		"8489|Красная рубашка сорвиголовы|185|195|0|6796|1|4305*3;2604*2;4291*1|0",
+		"8784|Зеленая шелковая броня|185|215|0|7065|1|4305*5;2605*2;4291*1|0",
+		"3858|Теневой капюшон|190|220|0|4323|1|4305*4;4291*1;3824*1|0",
+		"8764|Жилет Земли|190|220|0|7051|1|4305*3;7067*1;2321*2|0",
+		"3860|Сапоги заклинателя|195|225|0|4325|1|4305*4;4291*1;4337*2|0",
+		"3872|Роскошная лиловая шелковая рубашка|195|205|0|4335|1|4305*4;4342*1;4291*1|0",
+		"6693|Зеленая шелковая сума|195|225|0|5764|1|4305*4;4234*3;2321*3;2605*1|0",
+		"8766|Лазурный шелковый пояс|195|225|0|7052|1|4305*4;7070*1;6260*2;2321*2;7071*1|0",
+		"8772|Багровый шелковый пояс|195|225|0|7055|1|4305*4;7071*1;2604*2;4291*1|0",
+		"8786|Лазурный шелковый плащ|195|225|0|7053|1|4305*3;6260*2;2321*2|0",
+		"21945|Зеленая выходная рубашка|200|210|0|17723|1|4305*5;2605*4;4291*1|0",
+		"3863|Паучий пояс|200|230|0|4328|1|4305*4;4337*2;7071*1|0",
+		"8774|Зеленые шелковые наплечники|200|230|0|7057|1|4305*5;4291*2|0",
+		"8789|Багровый шелковый плащ|200|230|0|7056|1|4305*5;2604*2;6371*2;4291*1|0",
+		"3861|Длинный шелковый плащ|205|235|0|4326|1|4305*4;3827*1;4291*1|0",
+		"6695|Черная шелковая сума|205|235|0|5765|1|4305*5;2325*1;2321*4|0",
+		"8791|Багровый шелковый жилет|205|225|0|7058|1|4305*4;2604*2;2321*2|0",
+		"3873|Черная рубашка сорвиголовы|210|220|0|4336|1|4305*5;2325*1;4291*1|0",
+		"8770|Одеяние могущества|210|240|0|7054|1|4339*2;7067*2;7070*2;7068*2;7069*2;4291*2|0",
+		"8793|Багровые шелковые наплечники|210|240|0|7059|1|4305*5;6371*2;2604*2;4291*2|0",
+		"8795|Лазурные наплечники|210|240|0|7060|1|4305*6;7072*2;6260*2;4291*2|0",
+		"8797|Шелковый пояс земли|215|245|0|7061|1|4305*5;7067*4;4234*4;7071*1;4291*2|0",
+		"8799|Багровые шелковые кюлоты|215|235|0|7062|1|4305*4;2604*2;4291*2|0",
+		"12048|Черный жилет из магической ткани|220|250|0|9998|1|4339*2;4291*3|0",
+		"12049|Черные поножи из магической ткани|220|250|0|9999|1|4339*2;4291*3|0",
+		"12059|Белая бандитская маска|220|230|0|10008|1|4339*1;2324*1;8343*1|0",
+		"12061|Оранжевая рубашка из магической ткани|220|230|0|10056|1|4339*1;6261*1;8343*1|0",
+		"3862|Ледяной плащ|220|250|0|4327|1|4339*3;4291*2;3829*1;4337*2|0",
+		"3864|Звездный пояс|220|250|0|4329|1|4339*4;4234*4;3864*1;7071*1;4291*1|0",
+		"8802|Багровое шелковое одеяние|220|250|0|7063|1|4305*8;7068*4;3827*2;2604*4;4291*1|0",
+		"12050|Черное одеяние из магической ткани|225|255|0|10001|1|4339*3;8343*1|0",
+		"12052|Тенетканые штаны|225|255|0|10002|1|4339*3;10285*2;8343*1|0",
+		"12064|Оранжевая воинская рубашка|225|235|0|10052|1|4339*2;6261*2;8343*1|0",
+		"8804|Багровые шелковые перчатки|225|255|0|7064|1|4305*6;7068*2;6371*2;4304*2;2604*4;4291*2|0",
+		"12053|Черные перчатки из магической ткани|230|260|0|10003|1|4339*2;8343*2|0",
+		"12055|Тенетканое одеяние|230|260|0|10004|1|4339*3;10285*2;8343*1|0",
+		"12056|Красный жилет из магической ткани|230|260|0|10007|1|4339*3;2604*2;8343*1|0",
+		"12060|Красные штаны из магической ткани|230|260|0|10009|1|4339*3;2604*2;8343*1|0",
+		"12062|Штаны из штормовой ткани|235|265|0|10010|1|4339*4;7079*2;8343*2|0",
+		"12063|Перчатки из штормовой ткани|235|265|0|10011|1|4339*3;7079*2;8343*2|0",
+		"12075|Лиловая рубашка из магической ткани|235|245|0|10054|1|4339*2;4342*2;8343*2|0",
+		"12065|Сумка из магической ткани|240|270|0|10050|1|4339*4;4291*2|0",
+		"12066|Красные перчатки из магической ткани|240|270|0|10018|1|4339*3;2604*2;8343*2|0",
+		"12067|Перчатки из ткани Грез|240|270|0|10019|1|4339*4;8153*4;10286*2;8343*2|0",
+		"12068|Жилет из штормовой ткани|240|270|0|10020|1|4339*5;7079*3;8343*2|0",
+		"12069|Одеяние из пепельной ткани|240|270|0|10042|1|4339*5;7077*2;8343*2|0",
+		"12070|Жилет из ткани Грез|240|270|0|10021|1|4339*6;8153*6;10286*2;8343*2|0",
+		"12071|Тенетканые перчатки|240|270|0|10023|1|4339*5;10285*5;8343*2|0",
+		"12077|Простое черное платье|240|250|0|10053|1|4339*3;2325*1;8343*1;2324*1|0",
+		"12080|Розовая рубашка из магической ткани|240|250|0|10055|1|4339*3;10290*1;8343*1|0",
+		"27658|Зачарованный мешочек из магической ткани|240|270|0|22246|1|4339*4;11137*4;8343*2|0",
+		"12072|Черная повязка из магической ткани|245|275|0|10024|1|4339*3;8343*2|0",
+		"12073|Черные сапоги из магической ткани|245|275|0|10026|1|4339*3;8343*2;4304*2|0",
+		"12074|Черные наплечники из магической ткани|245|275|0|10027|1|4339*3;8343*2|0",
+		"12085|Рубашка под смокинг|245|255|0|10034|1|4339*4;8343*2|0",
+		"12076|Тенетканые наплечники|250|280|0|10028|1|4339*5;10285*4;8343*2|0",
+		"12078|Красные наплечники из магической ткани|250|280|0|10029|1|4339*4;2604*2;8343*3|0",
+		"12079|Красная сумка из магической ткани|250|280|0|10051|1|4339*4;2604*2;8343*2|0",
+		"12089|Брюки под смокинг|250|260|0|10035|1|4339*4;8343*3|0",
+		"44950|Зеленые зимние одежды|250|250|0|34087|1|14048*4;2997*1;2605*2;14341*1|0",
+		"44958|Красные зимние одежды|250|250|0|34085|1|14048*4;2997*1;2604*2;14341*1|0",
+		"50647|Кюлоты Халискана|250|260|0|38278|1|4339*4;8343*3;2325*3|0",
+		"12081|Адмиральская шляпа|255|285|0|10030|1|4339*3;4589*6;8343*2|0",
+		"12082|Тенетканые сапоги|255|285|0|10031|1|4339*6;10285*6;8343*3;4304*2|0",
+		"12083|Головная повязка из штормовой ткани|255|285|0|10032|1|4339*4;7079*4;8343*2|0",
+		"12084|Красная головная повязка из магической ткани|255|285|0|10033|1|4339*4;2604*2;8343*2|0",
+		"12091|Белое свадебное платье|255|265|0|10040|1|4339*5;8343*3;2324*1|0",
+		"18401|Рулон рунической ткани|255|260|0|14048|1|14047*4|0",
+		"49677|Парадные ботинки|255|285|0|6836|1|4339*4;4304*2|0",
+		"12086|Тенетканая маска|260|290|0|10025|1|4339*2;10285*8;8343*2|0",
+		"12087|Наплечники из штормовой ткани|260|290|0|10038|1|4339*5;7079*6;8343*3|0",
+		"12088|Сапоги из пепельной ткани|260|290|0|10044|1|4339*5;8343*3|0",
+		"12090|Сапоги из штормовой ткани|265|295|0|10039|1|4339*6;7079*6;8343*3;4304*2|0",
+		"12092|Венец из ткани Грез|265|295|0|10041|1|4339*8;8153*4;10286*2;8343*3;6037*1;1529*1|0",
+		"12093|Куртка-смокинг|265|295|0|10036|1|4339*5;8343*3|0",
+		"26403|Праздничное платье|265|295|0|21154|1|14048*4;4625*2;2604*2;14341*1|0",
+		"26407|Праздничный красный костюм|265|295|0|21542|1|14048*4;4625*2;2604*2;14341*1|0",
+		"50644|Куртка Халискана|265|295|0|38277|1|4339*5;2325*2;2604*1;8343*3|0",
+		"18402|Пояс из рунической ткани|270|300|0|13856|1|14048*3;14341*1|0",
+		"18403|Мундир из ледяной ткани|270|300|0|13869|1|14048*5;6260*2;14341*1|0",
+		"18404|Одеяние из ледяной ткани|270|300|0|13868|1|14048*5;7079*2;14341*1|0",
+		"18405|Сумка из рунической ткани|275|305|0|14046|1|14048*5;8170*2;14341*1|0",
+		"18406|Одеяние из рунической ткани|275|305|0|13858|1|14048*5;14227*1;14341*1|0",
+		"18407|Мундир из рунической ткани|275|305|0|13857|1|14048*5;14227*1;14341*1|0",
+		"18408|Жилет из пепельной ткани|275|305|0|14042|1|14048*5;7077*2;14341*1|0",
+		"26085|Сума душ|275|305|0|21340|1|14048*6;8170*4;7972*2;14341*1|0",
+		"18409|Плащ из рунической ткани|280|310|0|13860|1|14048*4;14227*1|0",
+		"18410|Пояс из призрачной ткани|280|310|0|14143|1|14048*2;9210*2|0",
+		"18411|Перчатки из ледяной ткани|280|310|0|13870|1|14048*5;6260*2;14341*1|0",
+		"18412|Перчатки из пепельной ткани|285|315|0|14043|1|14048*4;7077*2;14341*1|0",
+		"18413|Перчатки из призрачной ткани|285|315|0|14142|1|14048*2;9210*2|0",
+		"18414|Одеяние из яркой ткани|285|315|0|14100|1|14048*4;3577*2|0",
+		"18415|Перчатки из яркой ткани|285|315|0|14101|1|14048*4;3577*2|0",
+		"22813|Броня огров Гордока|285|295|0|18258|1|14048*2;8170*4;18240*1;14341*1|0",
+		"18416|Жилет из призрачной ткани|290|320|0|14141|1|14048*2;9210*3|0",
+		"18417|Перчатки из рунической ткани|290|320|0|13863|1|14048*5;14341*2|0",
+		"18418|Плащ из пепельной ткани|290|320|0|14044|1|14048*5;7078*1;14341*1|0",
+		"18419|Штаны из ткани Скверны|290|320|0|14107|1|14048*5;14256*2;14341*1|0",
+		"18420|Плащ из яркой ткани|290|320|0|14103|1|14048*4;3577*2|0",
+		"18421|Поножи из чародейской ткани|290|320|0|14132|1|14048*4;11176*1;14341*1|0",
+		"18422|Плащ огня|290|320|0|14134|1|14048*6;7078*4;7077*4;7068*4;14341*1|0",
+		"18560|Луноткань|290|320|0|14342|1|14256*2|0",
+		"27659|Зачарованная сумка из рунической ткани|290|320|0|22248|1|14048*5;16203*2;14341*2|0",
+		"27724|Кенарийская сумка для трав|290|320|0|22251|1|14048*5;8831*10;11040*8;14341*2|0",
+		"18423|Сапоги из рунической ткани|295|325|0|13864|1|14048*4;8170*2;14341*1|0",
+		"18424|Штаны из ледяной ткани|295|325|0|13871|1|14048*6;6260*2;14341*1|0",
+		"18434|Штаны из пепельной ткани|295|325|0|14045|1|14048*6;7078*1;14341*1|0",
+		"19435|Сапоги из луноткани|295|325|0|15802|1|14048*6;14342*4;7971*2;14341*1|0",
+		"18436|Одеяние зимней ночи|300|330|0|14136|1|14048*10;14256*12;12808*4;7080*4;14341*1|0",
+		"18437|Сапоги из ткани Скверны|300|330|0|14108|1|14048*2;14256*2;8170*2;14341*1|0",
+		"18438|Штаны из рунической ткани|300|330|0|13865|1|14048*5;14227*2;14341*1|0",
+		"26086|Сумка из ткани Скверны|300|330|0|21341|1|14256*12;12810*6;20520*2;14227*4|0",
+		"31460|Сеть из ткани Пустоты|300|320|0|24268|2|21877*3|0",
+		"18439|Штаны из яркой ткани|305|335|0|14104|1|14048*6;3577*4|0",
+		"18440|Поножи из луноткани|305|335|0|14137|1|14048*6;14342*4;14341*1|0",
+		"18441|Штаны из призрачной ткани|305|335|0|14144|1|14048*3;9210*4|0",
+		"18442|Капюшон из ткани Скверны|305|335|0|14111|1|14048*2;14256*2;14341*1|0",
+		"23662|Мудрость Древобрюхов|305|335|0|19047|1|14048*8;7076*3;12803*3;14227*2|0",
+		"23664|Серебристые сапоги|305|335|0|19056|1|14048*6;12810*4;13926*2;12809*2;14227*2|0",
+		"26745|Рулон ткани Пустоты|305|325|0|21840|1|21877*5|0",
+		"18444|Головная повязка из рунической ткани|310|340|0|13866|1|14048*6;14341*2|0",
+		"18445|Сумка из луноткани|315|345|0|14155|1|14048*4;14342*1;14341*1|0",
+		"18446|Одеяние из чародейской ткани|315|345|0|14128|1|14048*8;11176*2;14341*1|0",
+		"18447|Жилет из луноткани|315|345|0|14138|1|14048*6;14342*4;14341*1|0",
+		"18448|Наплечники из луноткани|315|345|0|14139|1|14048*5;14342*5;14341*1|0",
+		"18449|Наплечники из рунической ткани|315|345|0|13867|1|14048*7;14227*2;8170*4;14341*1|0",
+		"18450|Тюрбан из чародейской ткани|315|345|0|14130|1|14048*6;11176*4;7910*1;14341*1|0",
+		"18451|Одеяние из ткани Скверны|315|345|0|14106|1|14048*8;14256*3;12662*2;14341*2|0",
+		"18452|Венец из луноткани|315|345|0|14140|1|14048*4;14342*6;12800*1;12810*2;14341*2|0",
+		"18453|Наплечники из ткани Скверны|315|345|0|14112|1|14048*7;14256*3;12662*2;8170*4;14341*2|0",
+		"18454|Перчатки волшебства|315|345|0|14146|1|14048*10;14342*10;9210*10;13926*6;12364*6;12810*8;14341*2|0",
+		"18455|Бездонная сумка|315|345|0|14156|1|14048*8;14342*12;14344*2;17012*2;14341*2|0",
+		"18456|Одежды истинной веры|315|345|0|14154|1|14048*12;14342*10;12811*4;13926*4;9210*10;14341*2|0",
+		"18457|Одеяние верховного мага|315|345|0|14152|1|14048*12;7078*10;7082*10;7076*10;7080*10;14341*2|0",
+		"18458|Одеяние Бездны|315|345|0|14153|1|14048*12;12662*20;14256*40;7078*12;12808*12;14341*2|0",
+		"20848|Оплечье пламенных недр|315|345|0|16980|1|14048*12;17010*4;17011*4;12810*6;14341*2|0",
+		"20849|Перчатки пламенных недр|315|345|0|16979|1|14048*8;17010*6;7078*4;12810*2;14341*2|0",
+		"22866|Пояс верховного мага|315|345|0|18405|1|14048*16;9210*10;14342*10;7080*12;7078*12;14344*6;14341*6|0",
+		"22867|Перчатки из ткани Скверны|315|345|0|18407|1|14048*12;14256*20;12662*6;12808*8;14341*2|0",
+		"22868|Инфернальные перчатки|315|345|0|18408|1|14048*12;7078*10;7910*2;14341*2|0",
+		"22869|Перчатки из луноткани|315|345|0|18409|1|14048*12;14342*6;13926*2;14341*2|0",
+		"22870|Плащ стражи|315|345|0|18413|1|14048*12;12809*4;12360*1;14341*2|0",
+		"22902|Одеяние из луноткани|315|345|0|18486|1|14048*6;14342*4;13926*2;14341*2|0",
+		"23663|Оплечье Древобрюхов|315|345|0|19050|1|14342*5;7076*5;12803*5;14227*2|0",
+		"23665|Серебристые наплечники|315|345|0|19059|1|14342*5;12809*2;14227*2|0",
+		"23666|Одеяние пламенных недр|315|345|0|19156|1|14342*10;17010*2;17011*3;7078*6;14227*4|0",
+		"23667|Поножи пламенных недр|315|345|0|19165|1|14342*8;17010*5;17011*3;7078*10;14227*4|0",
+		"24091|Жилет кровавой лозы|315|345|0|19682|1|14342*3;19726*3;12804*3;14227*2|0",
+		"24092|Поножи кровавой лозы|315|345|0|19683|1|14342*4;19726*4;12804*4;14227*2|0",
+		"24093|Сапоги кровавой лозы|315|345|0|19684|1|14342*4;19726*4;14227*2|0",
+		"24901|Рунические стигийские поножи|315|345|0|20538|1|14048*6;20520*8;14256*6;14227*2|0",
+		"24902|Рунический стигийский пояс|315|345|0|20539|1|14048*2;20520*6;14256*2;12810*2;14227*2|0",
+		"24903|Рунические стигийские сапоги|315|345|0|20537|1|14048*4;20520*6;14256*4;12810*2;14227*2|0",
+		"26087|Сумка из сердцевинной ткани Скверны|315|345|0|21342|1|14256*20;17012*16;7078*4;14227*4|0",
+		"27660|Большая зачарованная сумка|315|345|0|22249|1|14048*6;14344*4;12810*4;14227*4|0",
+		"27725|Сумка Кенария|315|345|0|22252|1|14048*6;14342*2;13468*1;14227*4|0",
+		"28205|Ледовые перчатки|315|345|0|22654|1|22682*5;14048*4;7080*4;14227*4|0",
+		"28207|Ледовый жилет|315|345|0|22652|1|22682*7;14048*8;7080*6;14227*8|0",
+		"28208|Ледовый плащ|315|345|0|22658|1|22682*5;14048*4;7080*2;14227*4|0",
+		"28209|Ледовые накулачники|315|345|0|22655|1|22682*4;14048*2;7080*2;14227*4|0",
+		"28210|Облачение Геи|315|345|0|22660|1|19726*1;14048*2;12803*4;14227*4|0",
+		"28480|Лесной жилет|315|345|0|22756|1|14048*4;19726*2;12803*2;14227*2|0",
+		"28481|Лесная корона|315|345|0|22757|1|14048*4;14342*2;12803*2;14227*2|0",
+		"28482|Лесные наплечники|315|345|0|22758|1|14048*2;12803*4;14227*2|0",
+		"22759|Напульсники пламенных недр|320|350|0|18263|1|14342*6;17010*8;7078*2;12810*6;14341*4|0",
+		"26746|Сумка из ткани Пустоты|320|340|0|21841|1|21840*4;14341*1|0",
+		"26764|Наручи из ткани Пустоты|320|330|0|21849|1|21840*3;14341*1|0",
+		"26765|Пояс из ткани Пустоты|320|330|0|21850|1|21840*3;14341*1|0",
+		"31461|Тяжелая сеть из ткани Пустоты|325|335|0|24269|2|21877*6|0",
+		"26747|Рулон прочной ткани Пустоты|330|340|0|21842|1|21840*3;22445*2|0",
+		"26770|Перчатки из ткани Пустоты|330|340|0|21851|1|21840*4;21887*2;14341*1|0",
+		"26771|Штаны из ткани Пустоты|335|345|0|21852|1|21840*6;14341*1|0",
+		"26749|Сумка из прочной ткани Пустоты|340|350|0|21843|1|21842*4;21881*2;22446*1|0",
+		"60969|Ковер-самолет|340|350|0|44554|1|21840*6;23112*4;22445*4;8343*5|0",
+		"26750|Рулон ткани Душ|345|355|0|21844|1|21840*1;21882*8|0",
+		"26772|Сапоги из ткани Пустоты|345|355|0|21853|1|21840*6;21887*2;14341*1|0",
+		"31430|Таинственная чародейская нить|345|355|0|24273|1|14341*1;22457*5|0",
+		"31431|Серебряная чародейская нить|345|355|0|24275|1|14341*1;21886*5|0",
+		"26751|Изначальная луноткань|350|360|0|21845|1|21842*1;21886*1;21885*1|0",
+		"26773|Одеяние из ткани Пустоты|350|360|0|21854|1|21840*8;14341*2|0",
+		"26775|Штаны из прочной ткани Пустоты|350|360|0|21859|1|21842*5;21881*2;14341*1|0",
+		"31373|Чароткань|350|360|0|24271|1|21842*1;22457*1;21884*1|0",
+		"31459|Мешочек для драгоценностей|350|360|0|24270|1|21842*6;21887*4|0",
+		"36686|Ткань Теней|350|360|0|24272|1|21842*1;22456*1;21884*1|0",
+		"26774|Мундир из ткани Пустоты|355|365|0|21855|1|21840*8;14341*2|0",
+		"26776|Сапоги из прочной ткани Пустоты|360|370|0|21860|1|21842*4;21887*6;21881*2;14341*1|0",
+		"26782|Наручи из тайной ткани|360|370|0|21866|1|21840*6;22445*12;14341*2|0",
+		"31434|Наручи непреклонности|360|370|0|24249|1|21842*4;22452*8|0",
+		"31435|Наручи Разора|360|370|0|24250|1|21842*4;22452*4;22456*4|0",
+		"31437|Наручи Черного удара|360|370|0|24251|1|21842*4;21884*8|0",
+		"31438|Плащ черной бездны|360|370|0|24252|1|21842*6;22457*3;22456*3|0",
+		"31440|Плащ вечности|360|370|0|24253|1|21842*6;22452*6|0",
+		"31441|Белая лечебная накидка|360|370|0|24254|1|21842*6;21886*6|0",
+		"37873|Плащ защиты от чар|360|370|0|30831|1|21842*4;22457*3;21886*3;21881*2|0",
+		"37882|Наручи пламенного сердца|360|370|0|30837|1|21840*5;21884*5;14341*2|0",
+		"55902|Ледотканые наплечники|360|380|0|41513|1|41510*3;38426*1|0",
+		"56031|Ледотканые напульсники|360|380|0|41512|1|41510*3;38426*1|0",
+		"26752|Пояс из огненной чароткани|365|375|0|21846|1|24271*4;21884*10;21881*2|0",
+		"26756|Застывшие тенетканые наплечники|365|375|0|21869|1|24272*4;21885*10;21881*2|0",
+		"26760|Пояс из изначальной луноткани|365|375|0|21873|1|21845*4;21881*2;21886*8|0",
+		"26779|Перчатки из ткани Душ|365|375|0|21863|1|21844*5;21887*6;14341*4|0",
+		"36665|Одеяние пламени Пустоты|365|375|0|30459|1|21840*10;21884*5;22456*6;21881*2|0",
+		"36667|Пояс пламени Пустоты|365|375|0|30460|1|21840*6;21887*4;21884*3;22456*4;21881*2|0",
+		"36668|Сапоги пламени Пустоты|365|375|0|30461|1|21840*6;21887*4;21884*2;22456*6;21881*2|0",
+		"36669|Поножи жизненной силы|365|375|0|30465|1|21840*10;21885*5;21886*5;21881*2|0",
+		"36670|Пояс жизненной силы|365|375|0|30463|1|21840*6;21887*4;21885*3;21886*3;21881*2|0",
+		"36672|Наручи жизненной силы|365|375|0|30464|1|21840*4;21887*4;21885*2;21886*2;21881*2|0",
+		"26777|Одеяние из прочной ткани Пустоты|370|380|0|21861|1|21842*6;21881*2;14341*1|0",
+		"26778|Мундир из прочной ткани Пустоты|370|380|0|21862|1|21842*6;21881*2;14341*1|0",
+		"26783|Сапоги из тайной ткани|370|380|0|21867|1|21840*8;22445*16;14341*2|0",
+		"37883|Перчатки пламенного сердца|370|380|0|30838|1|21840*7;21884*7;14341*2|0",
+		"55898|Сеть из ледяной ткани|370|380|0|41509|5|33470*6|0",
+		"55899|Рулон ледяной ткани|370|375|0|41510|1|33470*5|0",
+		"55903|Ледотканое одеяние|370|390|0|41515|1|41510*4;38426*1|0",
+		"55904|Ледотканые перчатки|370|390|0|44211|1|41510*3;38426*1|0",
+		"26753|Перчатки из огненной чароткани|375|385|0|21847|1|24271*8;21884*12;21881*4|0",
+		"26757|Застывшие тенетканые сапоги|375|385|0|21870|1|24272*8;21885*12;21881*2|0",
+		"26761|Наплечники из изначальной луноткани|375|385|0|21874|1|21845*8;21881*2;21886*8|0",
+		"26780|Наплечники из ткани Душ|375|385|0|21864|1|21844*6;14341*4|0",
+		"31442|Ремень Непреклонности|375|385|0|24255|1|21845*8;22452*16;23572*1|0",
+		"31443|Ремень опустошения|375|385|0|24256|1|24272*10;21884*16;23572*1|0",
+		"31444|Черный пояс знания|375|385|0|24257|1|21842*6;22457*14;23572*1|0",
+		"31448|Накидка твердости|375|385|0|24258|1|21845*10;22452*12;23572*1|0",
+		"31449|Плащ отмщения|375|385|0|24259|1|24272*10;22451*14;23572*1|0",
+		"31450|Плащ из ткани маны|375|385|0|24260|1|24271*10;22457*12;23572*1|0",
+		"46128|Повязки солнечного огня|375|410|0|34366|1|24271*10;24272*10;34664*6|0",
+		"46129|Перчатки вечного света|375|410|0|34367|1|21845*18;21886*12;21885*12;34664*6|0",
+		"46130|Одеяние Солнечного огня|375|410|0|34364|1|24271*12;24272*12;23572*2|0",
+		"46131|Одеяние вечного света|375|410|0|34365|1|21845*20;23572*2|0",
+		"26781|Жилет из ткани Душ|380|385|0|21865|1|21844*8;14341*4|0",
+		"26784|Одеяние из тайной ткани|380|390|0|21868|1|21840*12;22445*20;14341*2|0",
+		"37884|Жилет пламенного сердца|380|390|0|30839|1|21840*9;21884*9;14341*2|0",
+		"55908|Ледотканый пояс|380|400|0|41522|1|41510*3;38426*1|0",
+		"26754|Одеяние из огненной чароткани|385|395|0|21848|1|24271*14;21884*16;21881*4|0",
+		"26755|Сумка из огненной чароткани|385|395|0|21858|1|24271*6;22446*4;21881*4|0",
+		"26758|Застывшее тенетканое одеяние|385|395|0|21871|1|24272*14;21885*16;21881*4|0",
+		"26759|Черная сумка теней|385|395|0|21872|1|24272*6;21881*4|0",
+		"26762|Одеяние из изначальной луноткани|385|395|0|21875|1|21845*14;22457*12;21881*4|0",
+		"26763|Сумка из изначальной луноткани|385|395|0|21876|1|21845*8;21881*4|0",
+		"31432|Руническая чародейская нить|385|395|0|24274|1|14341*1;22457*10;23572*1|0",
+		"31433|Золотая чародейская нить|385|395|0|24276|1|14341*1;21886*10;23572*1|0",
+		"31451|Штаны Белого целителя|385|395|0|24261|1|21845*10;23571*5;23572*1|0",
+		"31452|Штаны сокрушительной магии|385|395|0|24262|1|24271*10;23571*5;23572*1|0",
+		"31453|Штаны боевого заклятья|385|395|0|24263|1|21842*12;23571*8;23572*1|0",
+		"31454|Капюшон белого целителя|385|395|0|24264|1|21845*10;23571*5;23572*1|0",
+		"31455|Капюшон сокрушительной магии|385|395|0|24266|1|24271*10;23571*5;23572*1|0",
+		"31456|Капюшон боевого заклятья|385|395|0|24267|1|21842*12;23571*8;23572*1|0",
+		"36315|Пояс взрыва|385|395|0|30038|1|30183*2;21842*4;21884*15;14341*2|0",
+		"36316|Пояс дальней дороги|385|395|0|30036|1|30183*2;21842*4;21886*10;14341*2;21885*10|0",
+		"36317|Сапоги взрыва|385|395|0|30037|1|23572*2;24272*4;24271*4;14341*2|0",
+		"36318|Сапоги дальней дороги|385|395|0|30035|1|23572*2;21845*4;24271*4;14341*2|0",
+		"40020|Туфли стража духа|385|395|0|32391|1|32428*2;22450*1;21886*2;22456*4;21842*1|0",
+		"40021|Наручи стража духа|385|395|0|32392|1|32428*1;22450*1;21886*2;22456*2;21842*1|0",
+		"40023|Поножи стража духа|385|395|0|32389|1|32428*3;22450*1;21886*4;22456*6;21842*2|0",
+		"40024|Ремень стража духа|385|395|0|32390|1|32428*2;22450*1;21886*3;22456*4;21842*1|0",
+		"40060|Предел ночи|385|395|0|32420|1|32428*1;22450*1;21886*2;22456*2;21842*1|0",
+		"41205|Наручи сообразительности|385|395|0|32586|1|21842*3;24271*4;22457*8;32428*4|0",
+		"41206|Мантия сообразительности|385|395|0|32587|1|21842*4;24271*2;22457*6;32428*2|0",
+		"41207|Повязки быстрого исцеления|385|395|0|32584|1|21842*3;21845*4;21886*8;32428*4|0",
+		"41208|Мантия быстрого исцеления|385|395|0|32585|1|21842*4;21845*2;21886*6;32428*2|0",
+		"50194|Ботаническая сумка Микаа|385|395|0|38225|1|21845*4;22794*2|0",
+		"55906|Ледотканые сапоги|385|405|0|41520|1|41510*4;38426*1|0",
+		"55907|Ледотканый шлем|390|410|0|41521|1|41510*5;38426*1|0",
+		"56030|Ледотканые поножи|390|410|0|41519|1|41510*5;38426*1|0",
+		"55910|Мистические ледотканые наплечники|395|415|0|41523|1|41510*7;38426*4;36783*1|0",
+		"55913|Мистические ледотканые напульсники|395|415|0|41528|1|41510*5;38426*4;36783*2|0",
+		"56014|Плащ луны|395|405|0|41607|1|41510*7;36783*1|0",
+		"55642|Светлотканая вышивка|400|405|0|0|1|41594*1;38426*1|0",
+		"55769|Вышивка темного сияния|400|405|0|0|1|41593*1;38426*1|0",
+		"55777|Вышивка в виде рукояти меча|400|405|0|0|1|41595*1;38426*1|0",
+		"55900|Рулон прочной ледяной ткани|400|405|0|41511|1|41510*2;34054*2|0",
+		"55911|Мистическое ледотканое одеяние|400|420|0|41525|1|41510*8;38426*4;36783*1|0",
+		"55914|Пояс из сумеречной ткани|400|410|0|41543|1|41510*7;38426*1|0",
+		"55993|Красная рубашка дровосека|400|410|0|41248|1|41510*4;2604*1|0",
+		"55994|Синяя рубашка дровосека|400|410|0|41249|1|41510*4;6260*1|0",
+		"55995|Желтая рубашка дровосека|400|410|0|41251|1|41510*4;4341*1|0",
+		"55996|Зеленая рубашка дровосека|400|410|0|41250|1|41510*4;2605*1|0",
+		"55997|Красная рубашка рабочего|400|410|0|41252|1|41510*4;2604*1|0",
+		"55998|Синяя рубашка рабочего|400|410|0|41253|1|41510*4;6260*1|0",
+		"55999|Грубая рубашка рабочего|400|410|0|41254|1|41510*4;4341*1|0",
+		"56000|Зеленая рубашка рабочего|400|410|0|41255|1|41510*4;2605*1|0",
+		"56008|Сияющая чародейская нить|400|410|0|41601|1|37704*2;42253*2|0",
+		"56010|Лазурная чародейская нить|400|410|0|41603|1|37702*2;42253*2|0",
+		"56015|Плащ заледеневших душ|400|410|0|41608|1|41510*8;36783*1|0",
+		"56048|Сапоги из сумеречной ткани|400|420|0|41544|1|41520*1;37703*2|0",
+		"55901|Поножи из сумеречной ткани|405|415|0|41548|1|41510*8;38426*1|0",
+		"55919|Клобук из сумеречной ткани|405|415|0|41546|1|41510*8;38426*1|0",
+		"56034|Чародейская нить наставника|405|405|0|0|1|38426*1|0",
+		"56039|Освященная чародейская нить|405|405|0|0|1|38426*1|0",
+		"64729|Пелерина ледяного стража|405|415|0|45811|1|41511*4;42253*4;35624*4|0",
+		"55920|Напульсники из сумеречной ткани|410|420|0|41551|1|41510*8;38426*1|0",
+		"64730|Плащ багрового снега|410|420|0|45810|1|41511*4;42253*4;35627*4|0",
+		"55921|Одеяние из сумеречной ткани|415|425|0|41549|1|41510*10;38426*1|0",
+		"55922|Перчатки из сумеречной ткани|415|425|0|41545|1|41510*9;38426*1|0",
+		"55923|Наплечники из сумеречной ткани|420|430|0|41550|1|41510*10;38426*1|0",
+		"55924|Сапоги из сумеречной ткани|420|430|0|41544|1|41510*10;38426*1|0",
+		"55925|Черные поножи из сумеречной ткани|425|435|0|41553|1|41511*5;42253*2;38426*2|0",
+		"55943|Черные напульсники из сумеречной ткани|425|435|0|41555|1|41511*4;42253*2;38426*2|0",
+		"56001|Лунный тюль|425|435|0|41594|1|41511*1;35625*2|0",
+		"56002|Иссиня-черная ткань|425|435|0|41593|1|41511*1;35627*2|0",
+		"56003|Колдовская ткань|425|435|0|41595|1|41511*1;36860*2|0",
+		"59582|Пояс ледяной ярости|425|445|0|43969|1|41511*3;37702*3;37701*3;38426*2|0",
+		"59583|Наручи ледяной ярости|425|445|0|43974|1|41511*3;37702*3;37701*3;38426*2|0",
+		"55941|Черное одеяние из сумеречной ткани|430|440|0|41554|1|41511*5;42253*2;38426*2|0",
+		"56007|Сумка из ледяной ткани|430|450|0|41599|1|41511*6;38426*2|0",
+		"56019|Шелковые сапоги ледяных осколков|430|450|0|41985|1|41595*1;41511*5;38425*2;42253*4;38426*1|0",
+		"56020|Ледовый шнурованный ремень|430|450|0|41986|1|41595*1;41511*4;42253*4;38426*1|0",
+		"56022|Благословенные полуперчатки Света|430|450|0|42095|1|41594*1;41511*4;42253*4;38426*1|0",
+		"56023|Туфли утренней зари|430|450|0|42096|1|41594*1;41511*4;38425*2;42253*4;38426*1|0",
+		"59584|Наплечники ледяной ярости|430|450|0|43973|1|41511*3;37702*4;37701*4;38426*2|0",
+		"59585|Сапоги ледяной ярости|430|450|0|43970|1|41511*3;37702*4;37701*4;38426*2|0",
+		"59586|Перчатки ледяной ярости|430|450|0|41516|1|41511*3;37702*4;37701*4;38426*2|0",
+		"59587|Одеяние ледяной ярости|430|450|0|43972|1|41511*4;37702*5;37701*5;38426*2|0",
+		"59588|Поножи ледяной ярости|430|450|0|43975|1|41511*4;37702*5;37701*5;38426*2|0",
+		"59589|Клобук ледяной ярости|430|450|0|43971|1|41511*4;37702*5;37701*5;38426*2|0",
+		"60990|Ледовый боевой пояс|430|450|0|43584|1|41511*4;36860*2;35622*2;38426*2;43102*1|0",
+		"60994|Ледовые туфли|430|450|0|43585|1|41511*4;36860*2;35622*2;38426*2;43102*1|0",
+		"56009|Сверкающая чародейская нить|435|445|0|41602|1|35625*4;42253*4;43102*1|0",
+		"56011|Сапфировая чародейская нить|435|445|0|41604|1|36860*4;42253*4;43102*1|0",
+		"56016|Тончайший плащ|435|455|0|41609|1|41511*5;35625*6;35622*4;36784*1;43102*1|0",
+		"56017|Плащ смертельной стужи|435|455|0|41610|1|41511*5;36860*6;35627*4;36784*1;43102*1|0",
+		"56018|Шляпа безрадостной судьбы|435|445|0|41984|1|41593*1;41511*6;42253*4;38426*1|0",
+		"56021|Штаны холодной луны|435|445|0|42093|1|41594*1;41511*6;42253*4;38426*1|0",
+		"60971|Великолепный ковер-самолет|435|455|0|44558|1|41511*12;36930*4;2604*4;4341*2;42253*4|0",
+		"60993|Ледовое одеяние|435|455|0|43583|1|41511*6;36860*3;35622*3;38426*3;43102*1|0",
+		"75597|Заиндевевший ковер-самолет|435|455|0|54797|1|41594*1;41595*1;41593*1;43102*4|0",
+		"56004|Сумка Бездны|440|450|0|41597|1|41593*4;41595*2;38426*1|0",
+		"63924|Изумрудный вьюк|440|450|0|45773|1|41594*4;36908*6|0",
+		"56006|Таинственная котомка|445|455|0|41598|1|41595*4;41594*2;38426*1|0",
+		"56025|Перчатки из лунного тюля|445|455|0|42103|1|41594*4;41511*4;38426*1;43102*1|0",
+		"56027|Иссиня-черные перчатки|445|455|0|42111|1|41593*4;41511*4;38426*1;43102*1|0",
+		"56029|Перчатки из колдовской ткани|445|455|0|42113|1|41595*4;41511*4;38426*1;43102*1|0",
+		"56005|Ледовая сумка|450|460|0|41600|1|41594*4;41593*4;38426*1|1",
+		"56024|Одеяние из лунного тюля|450|460|0|42100|1|41594*8;41511*6;38426*1;43102*1|0",
+		"56026|Иссиня-черное одеяние|450|460|0|42101|1|41593*8;41511*6;38426*1;43102*1|0",
+		"56028|Одеяние из колдовской ткани|450|460|0|42102|1|41595*8;41511*6;38426*1;43102*1|0",
+		"63203|Кушак древней силы|455|465|0|45557|1|41595*4;41593*4;45087*6|0",
+		"63204|Туфли тонких чар|455|465|0|45566|1|41595*4;41593*4;45087*6|0",
+		"63205|Шнурованный ремень светлого утра|455|465|0|45558|1|41594*8;45087*6|0",
+		"63206|Туфли спасителя|455|465|0|45567|1|41594*8;45087*6|0",
+		"321756|Рулон ветрошерстной ткани|460|475|0|82441|1|72988*5|0",
+		"67064|Королевское одеяние из лунного тюля|460|475|0|47605|1|41594*20;36922*2;47556*8|0",
+		"67065|Королевские наручи из лунного тюля|460|475|0|47587|1|41594*12;47556*4|0",
+		"67066|Одеяние Мерлина|460|475|0|47603|1|41593*8;41595*8;34052*8;47556*8|0",
+		"67079|Наручи волшебника с самоцветами|460|475|0|47585|1|41595*8;36934*1;36919*1;36925*1;47556*4|0",
+		"67144|Королевское одеяние из лунного тюля|460|475|0|47606|1|41594*20;36922*2;47556*8|0",
+		"67145|Наручи волшебника с самоцветами|460|475|0|47586|1|41595*8;36934*1;36919*1;36925*1;47556*4|0",
+		"67146|Одеяние Мерлина|460|475|0|47604|1|41593*8;41595*8;34052*8;47556*8|0",
+		"67147|Королевские наручи из лунного тюля|460|475|0|47588|1|41594*12;47556*4|0",
+		"315365|Клобук ледяной ярости претендента|470|490|0|154180|1|41511*8;37702*10;37701*10;38426*4;43102*2|0",
+		"315366|Поножи ледяной ярости претендента|470|490|0|154182|1|41511*8;37702*10;37701*10;38426*4;43102*2|0",
+		"315367|Одеяние ледяной ярости претендента|470|490|0|154183|1|41511*8;37702*10;37701*10;38426*4;43102*2|0",
+		"315368|Перчатки ледяной ярости претендента|470|490|0|154181|1|41511*6;37702*8;37701*8;38426*4;43102*2|0",
+		"315369|Сапоги ледяной ярости претендента|470|490|0|154178|1|41511*6;37702*8;37701*8;38426*4;43102*2|0",
+		"315370|Наплечники ледяной ярости претендента|470|490|0|154184|1|41511*6;37702*8;37701*8;38426*4;43102*2|0",
+		"315371|Наручи ледяной ярости претендента|470|490|0|154179|1|41511*6;37702*6;37701*6;38426*4;43102*2|0",
+		"315372|Пояс ледяной ярости претендента|470|490|0|154177|1|41511*6;37702*6;37701*6;38426*4;43102*2|0",
+		"321757|Императорский шелк|470|485|0|82447|1|72988*8|1",
+		"321764|Накидка борца со смертью|470|480|0|177557|1|102371*1;82441*6|0",
+		"321765|Накидка ткача таинств|470|480|0|177558|1|102371*1;82441*6|0",
+		"321766|Пелерина сотворителя жизни|470|480|0|177559|1|102371*1;82441*6|0",
+		"321767|Плащ защитника пределов|470|480|0|177560|1|102371*1;82441*6|0",
+		"321774|Смертошелковый пояс|470|480|0|177565|1|102371*1;82441*6|0",
+		"321776|Смертошелковые наручи|470|480|0|177567|1|102371*1;82441*6|0",
+		"321782|Лунношелковый пояс|470|480|0|177573|1|102371*1;82441*6|0",
+		"321784|Лунношелковые наручи|470|480|0|177575|1|102371*1;82441*6|0",
+		"319601|Летний пояс мага-новичка|475|500|0|97850|1|41593*12;41595*12;24272*8;24271*8;23572*30;32428*4|0",
+		"319602|Старообрядческий пояс из шелка|475|500|0|97851|1|41593*12;41594*12;24272*8;21845*8;23572*30;32428*4|0",
+		"319603|Покров силы магии из ветроткани|475|500|0|97852|1|41595*12;41594*12;24271*8;21845*8;23572*30;32428*4|0",
+		"319604|Шаль силы духа из редкого шелка|475|500|0|97853|1|41593*12;41594*12;24272*8;21845*8;23572*30;32428*4|0",
+		"321779|Смертошелковый клобук|475|485|0|177570|1|102371*1;82441*8|0",
+		"321787|Лунношелковый клобук|475|485|0|177578|1|102371*1;82441*8|0",
+		"70550|Поножи паутины смерти|475|500|0|49891|1|41595*10;41593*10;49908*8|0",
+		"70551|Сапоги смертной стужи|475|500|0|49890|1|41595*6;41593*6;49908*5|0",
+		"70552|Светлотканые поножи|475|500|0|49892|1|41594*20;49908*8|0",
+		"70553|Сандалии освящения|475|500|0|49893|1|41594*10;49908*5|0",
+		"321780|Смертошелковые туфли|480|490|0|177571|1|102371*1;82441*6|0",
+		"321781|Смертошелковые перчатки|480|490|0|177572|1|102371*1;82441*6|0",
+		"321788|Лунношелковые туфли|480|490|0|177579|1|102371*1;82441*6|0",
+		"321789|Лунношелковые перчатки|480|490|0|177580|1|102371*1;82441*6|0",
+		"321775|Смертошелковые поножи|485|495|0|177566|1|102371*1;82441*10|0",
+		"321778|Смертошелковое одеяние|485|495|0|177569|1|102371*1;82441*10|0",
+		"321783|Лунношелковые поножи|485|495|0|177574|1|102371*1;82441*10|0",
+		"321786|Лунношелковое одеяние|485|495|0|177577|1|102371*1;82441*10|0",
+		"321777|Смертошелковые наплечники|490|500|0|177568|1|102371*1;82441*8|0",
+		"321785|Лунношелковые наплечники|490|500|0|177576|1|102371*1;82441*8|0",
+		"321790|Искусно изготовленный смертошелковый пояс|495|505|0|105019|1|102371*1;82447*7;102351*1|0",
+		"321792|Искусно изготовленные смертошелковые наручи|495|505|0|105021|1|102371*1;82447*7;102351*1|0",
+		"321798|Искусно изготовленный лунношелковый пояс|495|505|0|105029|1|102371*1;82447*7;102351*1|0",
+		"321800|Искусно изготовленные лунношелковые наручи|495|505|0|105031|1|102371*1;82447*7;102351*1|0",
+		"280003|Прочная сверкающая чародейская нить|500|510|0|280003|1|35625*16;42253*16;43102*4|0",
+		"280004|Прочная сапфировая чародейская нить|500|510|0|280004|1|36860*16;42253*16;43102*4|0",
+		"321795|Искусно изготовленный смертошелковый клобук|500|510|0|105024|1|102371*1;82447*8;102351*1|0",
+		"321803|Искусно изготовленный лунношелковый клобук|500|510|0|105034|1|102371*1;82447*8;102351*1|0",
+		"321773|Троекратно укрепленная сумка|505|515|0|54443|1|102371*1;82441*6;82447*2|0",
+		"321796|Искусно изготовленные смертошелковые туфли|505|515|0|105025|1|102371*1;82447*7;102351*1|0",
+		"321797|Искусно изготовленные смертошелковые перчатки|505|515|0|105026|1|102371*1;82447*7;102351*1|0",
+		"321804|Искусно изготовленные лунношелковые туфли|505|515|0|105035|1|102371*1;82447*7;102351*1|0",
+		"321805|Искусно изготовленные лунношелковые перчатки|505|515|0|105036|1|102371*1;82447*7;102351*1|0",
+		"321758|Песня жизни|510|520|0|92960|1|82441*5;52329*3|0",
+		"321760|Лазурная чародейская нить|510|520|0|82443|1|82441*28|0",
+		"321761|Перламутровая чародейская нить|510|520|0|82442|1|82441*28|0",
+		"321768|Искусно изготовленная накидка ткача таинств|510|520|0|177562|1|102371*1;82447*8;102351*1|0",
+		"321769|Искусно изготовленная пелерина сотворителя жизни|510|520|0|177563|1|102371*1;82447*8;102351*1|0",
+		"321771|Искусно изготовленная накидка борца со смертью|510|520|0|177561|1|102371*1;82447*8;102351*1|0",
+		"321772|Искусно изготовленный плащ защитника пределов|510|520|0|177564|1|102371*1;82447*8;102351*1|0",
+		"321791|Искусно изготовленные смертошелковые поножи|510|520|0|105020|1|102371*1;82447*9;102351*1|0",
+		"321794|Искусно изготовленное смертошелковое одеяние|510|520|0|105023|1|102371*1;82447*9;102351*1|0",
+		"321799|Искусно изготовленные лунношелковые поножи|510|520|0|105030|1|102371*1;82447*9;102351*1|0",
+		"321802|Искусно изготовленное лунношелковое одеяние|510|520|0|105033|1|102371*1;82447*9;102351*1|0",
+		"321762|Великая лазурная чародейская нить|515|525|0|82445|1|82447*6|0",
+		"321763|Великая перламутровая чародейская нить|515|525|0|82444|1|82447*6|0",
+		"321793|Искусно изготовленные смертошелковые наплечники|515|525|0|105022|1|102371*1;82447*8;102351*1|0",
+		"321801|Искусно изготовленные лунношелковые наплечники|515|525|0|105032|1|102371*1;82447*8;102351*1|0",
+		"321806|Смертошелковые вышитый талисман|520|530|0|177919|1|82447*1;177929*1|0",
+		"321807|Лунношелковый вышитый талисман|520|530|0|177920|1|82447*1;177929*1|0",
+		"321808|Стихийношелковый вышитый талисман|520|530|0|177921|1|82447*1;177929*1|0",
+		"321770|Реликвия прошлого: Портняжное дело|525|535|0|180059|1|82441*15;82447*15;102371*3;52329*1;52326*1|0",
+		"321759|Ковер-самолет древней знати|535|545|0|157064|1|82441*50;82447*15;52329*5;102351*1|0",
+	},
+	[202] = {
+		"13240|Орудие: перезаряжено|1|1|0|10577|1|10577*1;3860*1;10505*3|0",
+		"3918|Грубое взрывчатое вещество|20|40|1|4357|1|2835*1|0",
+		"150246|Искусно изготовленная амуниция|30|60|1|158654|1|4357*2;2840*2|0",
+		"3919|Грубый динамит|30|60|1|4358|2|4357*2;2589*1|0",
+		"3922|Горсть медных винтов|45|60|0|4359|1|2840*1|0",
+		"3923|Грубая медная бомба|60|90|0|4360|2|2840*1;4359*1;4357*2;2589*1|0",
+		"7430|Тангенциальный вращатель|70|90|0|6219|1|2840*6|0",
+		"3924|Медная труба|80|110|0|4361|1|2840*2;2880*1|0",
+		"3925|Грубый огнестрел|80|110|0|4362|1|4361*1;4359*1;4399*1|0",
+		"150247|Тяжелая искусно изготовленная амуниция|85|95|0|158656|1|4364*2;2840*2|0",
+		"3929|Низкосортное взрывчатое вещество|85|95|0|4364|1|2836*1|0",
+		"3931|Низкосортный динамит|90|105|0|4365|1|4364*3;2589*1|0",
+		"3977|Кустарный прицел|90|120|0|4405|1|4361*1;774*1;4359*1|0",
+		"3926|Медный регулятор|95|125|0|4363|1|4359*2;2840*1;2589*2|0",
+		"3928|Коробка с механической белкой|105|135|0|4401|1|4363*1;4359*1;2840*1;774*2|0",
+		"3937|Большая медная бомба|105|155|0|4370|2|2840*3;4364*4;4404*1|0",
+		"3938|Бронзовая трубка|105|155|0|4371|1|2841*2;2880*1|0",
+		"3973|Серебряный контакт|110|140|0|4404|5|2842*1|0",
+		"3932|Манекен-мишень|115|145|0|4366|1|4363*1;4359*2;2841*1;2592*1|0",
+		"8334|Учебный замок|115|130|0|6712|1|2841*1;4359*2;2880*1|0",
+		"8339|Динамит 'Pro-100-брос'|115|130|0|6714|1|4364*4;2592*1|0",
+		"3941|Небольшая бронзовая бомба|120|170|0|4374|1|4364*4;2841*2;4404*1;2592*1|0",
+		"150248|Твердая искусно изготовленная амуниция|125|145|0|158657|1|4377*2;2841*2|0",
+		"26416|Маленькая синяя ракета|125|150|0|21558|3|4364*1;2319*1|0",
+		"26417|Маленькая зеленая ракета|125|150|0|21559|3|4364*1;2319*1|0",
+		"26418|Маленькая красная ракета|125|150|0|21557|3|4364*1;2319*1|0",
+		"3942|Трещащий бронзовый механизм|125|175|0|4375|1|2841*2;2592*1|0",
+		"3944|Отражатель пламени|125|175|0|4376|1|4375*1;4402*1|0",
+		"3945|Тяжелое взрывчатое вещество|125|145|0|4377|1|2838*1|0",
+		"3946|Тяжелый динамит|125|145|0|4378|1|4377*2;2592*1|0",
+		"3933|Малый сефориевый заряд|130|160|0|4367|1|4364*2;4363*1;2318*1;159*1|0",
+		"3934|Очки летающего тигра|130|160|0|4368|1|2318*6;818*2|0",
+		"3936|Смертоносный мушкетон|130|155|0|4369|1|4361*2;4359*4;4399*1;2319*2|0",
+		"3978|Обычный прицел|135|160|0|4406|1|4371*1;1206*1|0",
+		"3950|Большая бронзовая бомба|140|190|0|4380|2|4377*2;2841*3;4404*1|0",
+		"3939|Любовно выделанный огнестрел|145|170|0|4372|1|4371*2;4359*2;4400*1;1206*3|0",
+		"3940|Теневые очки|145|170|0|4373|1|2319*4;1210*2|0",
+		"3953|Бронзовый каркас|145|195|0|4382|1|2841*2;2319*1;2592*1|0",
+		"12584|Золотое силовое ядро|150|190|0|10558|3|3577*1|0",
+		"23066|Красная ракета|150|175|0|9318|3|4377*1;4234*1|0",
+		"23067|Голубая ракета|150|175|0|9312|3|4377*1;4234*1|0",
+		"23068|Зеленая ракета|150|175|0|9313|3|4377*1;4234*1|0",
+		"9269|Универсальный гномский дистанционный пульт|150|175|0|7506|1|2841*6;4375*1;814*2;818*1;774*1|0",
+		"9271|Аквадинамический магнит для рыбы|150|170|0|6533|3|2841*2;6530*1;4364*1|0",
+		"3949|Посеребренный дробовик|155|180|0|4379|1|4371*2;4375*2;4400*1;2842*3|0",
+		"3958|Железная балка|160|180|0|4387|1|3575*2|0",
+		"6458|Украшенная подзорная труба|160|185|0|5507|1|4371*2;4375*2;4363*1;1206*1|0",
+		"9273|Гоблинский кабельный дефибриллятор|160|200|0|7148|1|3575*6;4375*2;814*2;4306*2;1210*2;7191*1|0",
+		"3952|Малый атомарный перенаправлятор|165|190|0|4381|1|4371*1;4375*2;2319*2;1206*1|0",
+		"3954|Лунная винтовка|170|195|0|4383|1|4371*3;4375*3;4400*1;1705*2|0",
+		"3961|Гирохронатом|170|210|0|4389|1|3575*1;10558*1|0",
+		"12585|Твердое взрывчатое вещество|175|195|0|10505|1|7912*2|0",
+		"12586|Твердый динамит|175|195|0|10507|2|10505*1;4306*1|0",
+		"12590|Шлицевой гироинструмент|175|215|0|10498|1|3859*4|0",
+		"26420|Большая синяя ракета|175|200|0|21589|3|4377*1;4234*1|0",
+		"26421|Большая зеленая ракета|175|200|0|21590|3|4377*1;4234*1|0",
+		"26422|Большая красная ракета|175|200|0|21592|3|4377*1;4234*1|0",
+		"3955|Взрывоопасная овца|175|200|0|4384|1|4382*1;4375*1;4377*2;2592*2|0",
+		"3956|Зеленые тонированные очки|175|200|0|4385|1|2319*4;1206*2;4368*1|0",
+		"3957|Ледяной отражатель|175|195|0|4386|1|4375*1;3829*1|0",
+		"3962|Железная граната|175|215|0|4390|2|3575*1;4377*1;4306*1|0",
+		"3963|Сборный компактный уборочный голем|175|215|0|4391|1|4387*2;4382*1;4389*2;4234*4|0",
+		"3959|Анти-перенаправляющий луч|180|200|0|4388|1|4375*3;4306*2;1529*1;4371*1|0",
+		"3960|Переносной бронзовый миномет|185|205|0|4403|1|4371*4;4387*1;4377*4;2319*4|0",
+		"3965|Усовершенствованный манекен-мишень|185|225|0|4392|1|4387*1;4382*1;4389*1;4234*4|0",
+		"8243|Световая бомба|185|225|0|4852|1|4611*1;4377*1;4306*1|0",
+		"21940|Создатель снега 9000|190|230|0|17716|1|3860*8;4389*4;17202*4;3829*1|0",
+		"3967|Большая железная бомба|190|230|0|4394|2|3575*3;4377*3;4404*1|0",
+		"12587|Яркоглазые очки|195|215|0|10499|1|4234*6;3864*2|0",
+		"12589|Мифриловая труба|195|235|0|10559|1|3860*3|0",
+		"12591|Нестабильное пусковое устройство|200|240|0|10560|1|3860*1;4338*1;10505*1|0",
+		"15255|Автоматический ремонтный набор|200|240|0|11590|1|3860*1;4338*1;10505*1|0",
+		"23069|Динамит 'Pro-100-брос II'|200|220|0|18588|1|10505*1;4338*2|0",
+		"3972|Большой сефориевый заряд|200|240|0|4398|1|10505*2;4234*2;159*1|0",
+		"3979|Точный прицел|200|220|0|4407|1|4371*1;1529*1;3864*1|0",
+		"12715|Гоблинское ракетное топливо - рецепт|205|205|0|10644|1|10648*1;10647*1|0",
+		"12760|Гоблинская мина|205|245|0|10646|1|4338*1;10505*3;10560*1|0",
+		"12895|Инкрустированный мифриловый цилиндр - чертеж|205|205|0|10713|1|10648*1;10647*1|0",
+		"12900|Передвижная сирена|205|245|0|10719|1|10559*1;10560*1;3860*4|0",
+		"15628|Крошечная ходячая бомба|205|205|0|11825|1|4394*1;7077*1;7191*1;3860*6|0",
+		"15633|Крошка Дымок|205|205|0|11826|1|7075*1;4389*2;7191*1;3860*2;6037*1|0",
+		"3966|Монокль ремесленника|205|225|0|4393|1|4234*6;3864*2|0",
+		"150249|Бронебойная мифриловая амуниция|210|250|0|158658|1|3860*2;10505*2|0",
+		"12599|Мифриловая обшивка|215|255|0|10561|1|3860*3|0",
+		"12603|Мифриловая осколочная бомба|215|255|0|10514|3|10561*1;10560*1;10505*1|0",
+		"3968|Гоблинская наземная мина|215|235|0|4395|1|4377*3;3575*2;4389*1|0",
+		"3969|Механический дракончик|220|240|0|4396|1|4382*1;4387*2;4389*2;3864*1|0",
+		"3971|Маскировочный механизм гномов|220|240|0|4397|1|4389*4;1529*2;1705*2;3864*2;7191*1|0",
+		"12594|Огненные очки|225|245|0|10500|1|4385*1;3864*2;7068*2;4234*4|0",
+		"12595|Мифриловый мушкетон|225|245|0|10508|1|10559*1;10560*1;4400*1;3860*4;7068*2|0",
+		"12716|Гоблинская мортира|225|245|0|10577|1|10559*2;3860*4;10505*5;10558*1;7068*1|0",
+		"12717|Шахтерская гоблинская каска|225|245|0|10542|1|3860*8;3864*1;7067*4|0",
+		"12718|Шлем гоблинской конструкции|225|245|0|10543|1|3860*8;3864*1;7068*4|0",
+		"12899|Уменьшающий луч гномов|225|245|0|10716|1|10559*1;10560*1;3860*4;8151*4;1529*2|0",
+		"26423|Связка синих фейерверков|225|250|0|21571|3|10505*1;4304*1|0",
+		"26424|Связка зеленых фейерверков|225|250|0|21574|3|10505*1;4304*1|0",
+		"26425|Связка красных фейерверков|225|250|0|21576|3|10505*1;4304*1|0",
+		"12597|Смертоносный прицел|230|250|0|10546|1|10559*1;7909*2;4304*2|0",
+		"12755|Гоблинский бомбомет|230|270|0|10587|1|10561*2;10505*4;6037*6;10560*1;4407*2|0",
+		"12897|Гномские очки|230|250|0|10545|1|10500*1;10559*1;10558*2;8151*2;4234*2|0",
+		"12902|Гномский сетестрел|230|250|0|10720|1|10559*1;10285*2;4337*4;10505*2;3860*4|0",
+		"12619|Фугасная бомба|235|275|0|10562|4|10561*2;10560*1;10505*2|0",
+		"12720|Гоблинская 'коробка с сюрпризом'|235|255|0|10580|1|10561*1;10505*2;10558*1;3860*2|0",
+		"12754|Великан|235|275|0|10586|2|10561*1;9061*1;10507*6;10560*1|0",
+		"12903|Пояс гномов, хранящий от вреда|235|255|0|10721|1|7387*1;3860*4;6037*2;10560*1;7909*2|0",
+		"12607|Ультра-очки 'Кошачий глаз'|240|260|0|10501|1|4304*4;7909*2;10592*1|0",
+		"12614|Мифриловая крупнокалиберная винтовка|240|260|0|10510|1|10559*2;10560*1;4400*1;3860*6;3864*2|0",
+		"12722|Гоблинское радио|240|260|0|10585|1|10561*1;3860*2;4389*1;10560*1|0",
+		"12904|Любительское радио гномов|240|260|0|10723|1|10561*1;3860*2;4389*1;10560*1|0",
+		"12615|Очки волшебного могущества-Экстрим|245|265|0|10502|1|4304*4;7910*2|0",
+		"12616|Плащ-парашют|245|265|0|10518|1|4339*4;10285*2;10560*1;10505*4|0",
+		"12905|Гномские реактивные сапоги|245|265|0|10724|1|10026*1;10559*2;4234*4;10505*8;4389*4|0",
+		"150251|Мифриловая гиро-амуниция|245|285|0|158659|1|3860*4;10505*4|0",
+		"26442|Пусковая установка для фейерверков|245|265|0|21569|1|9060*1;9061*1;10560*1;10561*1|0",
+		"8895|Гоблинские реактивные сапоги|245|265|0|7189|1|10026*1;10559*2;4234*4;9061*2;10560*1|0",
+		"12617|Шлем ныряльщика|250|270|0|10506|1|3860*8;10561*1;6037*1;818*4;774*4|0",
+		"12618|Розовые очки|250|270|0|10503|1|4304*6;7910*2|0",
+		"12906|Боевой цыпленок гномов|250|270|0|10725|1|10561*1;6037*6;3860*6;9060*2;10558*1;1529*2|0",
+		"19788|Концентрированное взрывчатое вещество|250|260|0|15992|1|12365*2|0",
+		"23070|Концентрированный динамит|250|270|0|18641|2|15992*2;14047*3|0",
+		"23507|Петарда 'Змеиное жало'|250|270|0|19026|4|15992*2;14047*2;8150*1|0",
+		"12907|Гномская шапка контроля над разумом|255|275|0|10726|1|3860*10;6037*4;10558*1;7910*2;4338*4|0",
+		"12620|Снайперский прицел|260|280|0|10548|1|10559*1;7910*1;6037*2|0",
+		"12759|Смертоносный луч гномов|260|280|0|10645|1|10559*2;10560*1;12808*1;7972*4;9060*1|0",
+		"12908|Гоблинское драконье ружье|260|280|0|10727|1|10559*2;9061*4;3860*6;6037*6;10560*1|0",
+		"23129|Увеличитель мира|260|270|0|18660|1|10561*1;15994*2;10558*1;10560*1;3864*1|0",
+		"12622|Зеленая линза|265|285|0|10504|1|4304*8;1529*3;7909*3;10286*2;8153*2|0",
+		"12758|Гоблинский реактивный шлем|265|285|0|10588|1|10543*1;9061*4;3860*4;10560*1|0",
+		"12624|Мифриловый механический дракончик|270|290|0|10576|1|3860*4;7077*2;6037*4;7910*1|0",
+		"19567|Солонка|270|290|0|15846|1|10561*1;12359*6;10558*3|0",
+		"23071|Преобразователь истинного серебра|270|280|0|18631|1|6037*2;7067*2;7069*1|0",
+		"63750|Мощный фонарь|270|290|0|45631|1|15994*4;6037*6;7078*6|0",
+		"23080|Мощный сефориевый заряд|275|295|0|18594|1|15994*2;15992*3;8170*2;159*1|0",
+		"23096|Гномский тревого-бот|275|285|0|18645|2|12359*4;7191*1|0",
+		"26426|Большая связка синих фейерверков|275|285|0|21714|3|15992*1;8170*1|0",
+		"26427|Большая связка зеленых фейерверков|275|285|0|21716|3|15992*1;8170*1|0",
+		"26428|Большая связка красных фейерверков|275|285|0|21718|3|15992*1;8170*1|0",
+		"28327|Пульт управления паровым танком|275|285|0|22728|1|3860*3;10558*1|0",
+		"39895|Кабельная система с плавкими предохранителями|275|285|0|7191|5|20816*3;7078*2|0",
+		"19790|Ториевая граната|280|300|0|15993|3|15994*1;12359*3;15992*3;14047*3|0",
+		"19791|Ториевое устройство|280|300|0|15994|1|12359*3;14047*1|0",
+		"19792|Ториевая винтовка|280|300|0|15995|1|10559*2;10561*2;15994*2;12359*4;10546*1|0",
+		"23077|Гирозамораживающий ледяной отражатель|280|300|0|18634|1|15994*6;18631*2;12361*2;7078*4;3829*2;13467*4|0",
+		"19793|Механическая жаба|285|305|0|15996|1|12803*1;15994*4;10558*1;8170*1|0",
+		"23078|Гоблинский кабельный макси-дефибриллятор|285|305|0|18587|1|15994*2;18631*2;7191*2;14227*2;7910*2|0",
+		"23079|Большой атомарный перенаправлятор|285|295|0|18637|1|16000*2;18631*1;14047*2|0",
+		"23486|Пространственный проходчик - Круговзор|285|305|0|18984|1|3860*10;18631*1;7077*4;7910*2;10586*1|0",
+		"23489|Сверхбезопасный транспортер: Прибамбасск|285|305|0|18986|1|3860*12;18631*2;7075*4;7079*2;7909*4;9060*1|0",
+		"19794|Очки волшебного могущества Экстрим-Плюс|290|310|0|15999|1|10502*1;7910*4;12810*2;14047*8|0",
+		"150252|Амуниция с ториевым наконечником|295|305|0|158638|1|12359*4;15992*2|0",
+		"19795|Ториевая труба|295|315|0|16000|1|12359*6|0",
+		"19796|Винтовка из черного железа|295|315|0|16004|1|16000*2;11371*6;10546*2;12361*2;12799*2;8170*4|0",
+		"19814|Манекен-мишень искусной работы|295|315|0|16023|1|10561*1;16000*1;15994*2;6037*1;8170*2;14047*4|0",
+		"26443|Пусковая установка для связок фейерверков|295|315|0|21570|2|10561*1;9061*1|0",
+		"30303|Взрывчатое вещество стихий|300|320|0|23781|4|22574*1;22573*2|0",
+		"30304|Обшивка из оскверненного железа|300|320|0|23782|1|23445*3|0",
+		"30305|Горсть винтов из оскверненного железа|300|310|0|23783|1|23445*1|0",
+		"19799|Бомба из черного железа|305|325|0|16005|3|15994*2;11371*1;15992*3;14047*3|0",
+		"19815|Сверхточный арканитовый преобразователь|305|325|0|16006|1|12360*1;14227*1|0",
+		"30548|Удаленный конденсатор выхлопов|305|325|0|23821|1|23782*2;23783*2;21886*4;16006*1|0",
+		"150253|Амуниция из оскверненного железа|310|330|0|158641|1|23445*4;23781*2|0",
+		"19819|Модулирующий усилитель голоса|310|330|0|16009|1|16006*2;10558*1;15994*1;12799*1|0",
+		"19825|Очки старшего инженера|310|330|0|16008|1|10500*1;12364*2;12810*4|0",
+		"23081|Гипер-излучающий отражатель пламени|310|330|0|18638|1|11371*4;18631*3;7080*6;7910*4;12800*2|0",
+		"19830|Арканитовый дракончик|320|340|0|16022|1|10576*1;16006*4|0",
+		"19831|Чародейская бомба|320|340|0|16040|3|16006*1;12359*3;14047*1|0",
+		"19833|Отличная арканитовая винтовка|320|340|0|16007|1|12360*10;16000*2;7078*2;7076*2;12800*2;12810*2|0",
+		"22704|Полевой ремонтный робот 74A|320|340|0|18232|1|12359*16;7191*2|0",
+		"22793|Прицел 'Бизникс' 247x128|320|340|0|18283|1|17011*2;7076*2;16006*4;11371*6;16000*1|0",
+		"22795|Снайперская винтовка Недр|320|340|0|18282|1|17010*4;17011*2;12360*6;16006*2;16000*2|0",
+		"22797|Реактивный диск|320|340|0|18168|1|12360*6;16006*2;7082*8;12803*12;7076*8|0",
+		"23082|Ультра-вспышечный отражатель тьмы|320|340|0|18639|1|11371*8;18631*4;12803*6;12808*4;12800*2;12799*2|0",
+		"24356|Очки кровавой лозы|320|340|0|19999|1|19726*4;7910*2;12804*6;12810*4|0",
+		"24357|Линза кровавой лозы|320|340|0|19998|1|19726*6;12800*1;12804*6|0",
+		"26011|Спокойный механический йети|320|340|0|21277|1|15407*1;15994*4;7079*2;18631*2;10558*1|0",
+		"30310|Бомба из оскверненного железа|320|340|0|23736|4|23782*1;23783*2;23781*1|0",
+		"30306|Адамантитовая рамка|325|335|0|23784|1|23446*4;22452*1|0",
+		"30348|Ящик для инструментов из оскверненного железа|325|345|0|23774|1|23782*1;23445*5;23783*2|0",
+		"30549|Твареувеличитель|325|345|0|23820|1|23784*1;23783*2;10558*1|0",
+		"30558|Величайший|325|345|0|23826|3|23782*3;23781*6;17020*3;23783*2|0",
+		"30561|Гоблинский пульт управления танком|325|335|0|23831|1|23782*1;23783*4;10558*1|0",
+		"30573|Гномский пульт управления танком|325|335|0|23832|1|23782*1;23783*4;10558*1|0",
+		"30312|Мушкет из оскверненного железа|330|350|0|23742|1|4400*1;23782*3;23783*6|0",
+		"30551|Набор для лечебных инъекций|330|350|0|33092|20|23782*1;23783*1;21887*2;22829*20|0",
+		"44155|Ветролет|330|350|0|34060|1|23782*2;23781*20;23783*20;11291*8|0",
+		"30311|Адамантитовая граната|335|355|0|23737|3|23446*4;23783*2;23781*1|0",
+		"30337|Робот 'Бей-Молоти'|335|355|0|23767|1|23784*1;23782*2;10558*1;23783*2|0",
+		"30341|Белая дымовая сигнальная ракета|335|355|0|23768|3|23781*1;21877*1|0",
+		"30342|Красная дымовая сигнальная ракета|335|355|0|23769|3|23781*1;21877*1;2604*1|0",
+		"30343|Синяя дымовая сигнальная ракета|335|355|0|23770|3|23781*1;21877*1;6260*1|0",
+		"30344|Зеленая дымовая сигнальная ракета|335|355|0|23771|3|23781*1;21877*1;2605*1|0",
+		"30347|Станок для адамантитовых патронов|335|355|0|34504|1|23446*1;23781*2;4470*4|0",
+		"30568|Огненная турель гномов|335|355|0|23841|3|23784*1;23783*2;23781*3;23782*1|0",
+		"32814|Лиловая дымовая сигнальная ракета|335|355|0|25886|3|23781*1;21877*1;4342*1|0",
+		"39971|Ледяные взрывчатые запалы|335|345|0|32423|10|21885*1;23781*2;21877*2|0",
+		"43676|Станок адамантитовой амуниции|335|355|0|20475|1|23446*1;4470*4;23783*2|0",
+		"30560|Превосходная мина|340|360|0|23827|2|21877*4;23781*4;22457*1|0",
+		"30329|Адамантитовый прицел|345|365|0|23764|1|23446*8;23112*2|0",
+		"30552|Набор для инъекций маны|345|365|0|33093|20|23782*1;23783*1;21887*2;22832*20|0",
+		"39973|Замораживающие гранаты|345|365|0|32413|5|32423*1;23782*1;23783*1|0",
+		"30307|Труба из закаленного адамантита|350|370|0|23785|1|23573*3|0",
+		"30308|Кориевое силовое ядро|350|370|0|23786|1|23449*3;21884*1|0",
+		"30309|Стабилизатор из оскверненной стали|350|370|0|23787|1|23448*2|0",
+		"30316|Очки прядильщика|350|370|0|23758|1|23793*4;23077*2;22445*8|0",
+		"30317|Умножающие силу очки|350|370|0|23761|1|23793*4;21929*2;22445*8|0",
+		"30547|Сефориевый заряд стихий|350|360|0|23819|2|23781*2;23782*1;23783*1|0",
+		"36954|Пространственный проходчик - Зона 52|350|370|0|30542|1|23784*1;21884*2;23826*2;23783*4;23786*1|0",
+		"36955|Сверхбезопасный транспортер: станция Тошли|350|370|0|30544|1|23784*1;22451*2;23787*2;23783*4;23786*1|0",
+		"30313|Адамантитовая винтовка|360|380|0|23746|1|23782*3;23784*2;23783*4|0",
+		"30318|Ультраскопические очки обнаружения|360|380|0|23762|1|23793*4;23449*2;23079*2;22448*2|0",
+		"30563|Гоблинский ракетомет|360|380|0|23836|1|23785*2;23786*1;23787*2;21884*6;22452*6;16006*2|0",
+		"30569|Полюсный птицефикатор гномов|360|380|0|23835|1|23785*2;23786*2;22445*10;22449*2|0",
+		"30570|Пояс почти-неуязвимости|360|380|0|23825|1|23793*8;23786*4;21886*10;22456*10;16006*2|0",
+		"56349|Пригоршня кобальтовых болтов|360|380|0|39681|1|36916*2|0",
+		"30556|Экстремальные реактивные сапоги|365|385|0|23824|1|23793*8;23786*2;23785*2;23787*4|0",
+		"46697|Облегченные экстремальные реактивые сапоги|365|385|0|35581|1|21840*8;23786*2;23785*2;23787*4|0",
+		"53281|Неустойчивый детонатор|366|385|0|39690|2|36916*3;37705*1|0",
+		"30314|Огнестрел из оскверненной стали|370|390|0|23747|1|23785*1;23787*4;23783*4|0",
+		"30325|Очки гиперзрения|370|390|0|23763|1|23793*4;23449*2;23441*2;22449*2|0",
+		"30332|Кориевый прицел|370|390|0|23765|1|23785*1;23449*4;23440*2|0",
+		"40274|Яростные механические очки|370|390|0|32461|1|23793*6;23786*1;23785*2;23787*4;23571*1;23436*2|0",
+		"41311|Очки 'Воздаятель 2000'|370|390|0|32472|1|23793*6;23786*1;23785*2;23787*4;23571*1;23440*2|0",
+		"41312|Танкатронные очки|370|390|0|32473|1|23793*6;23786*1;23785*2;23787*4;23571*1;23437*2|0",
+		"41314|Очки верного удара модель 2.0|370|390|0|32474|1|23793*6;23786*1;23785*2;23787*4;23571*1;23441*2|0",
+		"41315|Очки механического шторма|370|390|0|32476|1|23793*6;23786*1;23785*2;23787*4;23571*1;23436*2|0",
+		"41316|Живые реплицирующие очки|370|390|0|32475|1|23793*6;23786*1;23785*2;23787*4;23571*1;23439*2|0",
+		"41317|Очки смертельного удара X11|370|390|0|32478|1|23793*6;23786*1;23785*2;23787*4;23571*1;23436*2|0",
+		"41318|Исцеляющий рассеиватель теней XT40|370|390|0|32479|1|23793*6;23786*1;23785*2;23787*4;23571*1;23440*2|0",
+		"41319|Увеличивающие лунные очки|370|390|0|32480|1|23793*6;23786*1;23785*2;23787*4;23571*1;23437*2|0",
+		"41320|Голографические очки уничтожения|370|390|0|32494|1|23793*6;23786*1;23785*2;23787*4;23571*1;23438*2|0",
+		"41321|Линза могущественного целителя-4000|370|390|0|32495|1|23793*6;23786*1;23785*2;23787*4;23571*1;23439*2|0",
+		"44391|Полевой ремонтный робот 110G|370|390|0|34113|5|23446*8;23783*8;23786*1|0",
+		"30565|Зачарованный шлем штейгера|375|395|0|23838|1|24272*4;22457*12;22451*12|0",
+		"30566|Укрепленный шлем старшины|375|395|0|23839|1|23573*8;22452*12;21884*12|0",
+		"30574|Гномские силовые очки|375|395|0|23828|1|24271*4;21884*8;22451*8;22452*8;21885*8;23437*2|0",
+		"30575|Гномские боевые очки|375|395|0|23829|1|23793*8;22456*12;22452*12;21884*12;23436*2|0",
+		"41307|Гиро-балансированный кориевый Разрушитель|375|410|0|32756|1|23785*1;23449*20;23787*4;21884*12;22451*12;23572*1|0",
+		"56460|Кобальтовая осколочная бомба|375|390|0|40771|3|39681*2;39690*1|0",
+		"54793|Наременные осколочные бомбы|380|385|0|0|1|36916*8;39690*8|0",
+		"55002|Эластичная подкладка|380|385|0|0|1|33470*12;39682*1|0",
+		"56459|Кирка-молот|380|390|0|40892|1|36916*5|0",
+		"56461|Заостренная кирка|380|390|0|40893|1|36916*5|0",
+		"56464|Перегруженный конденсатор|380|390|0|39682|1|36916*4;37701*1|0",
+		"63765|Пружинистая паутинка|380|385|0|0|1|33470*12;39682*1|0",
+		"30315|Узорчатая кориевая винтовка|385|405|0|23748|1|23785*2;23449*12;23783*4;23439*2|0",
+		"30334|Стабилизированный этерниевый прицел|385|405|0|23766|1|23785*2;23787*6;23438*2|0",
+		"44157|Турбоветролет|385|395|0|34061|1|23784*4;23786*8;23787*8;34249*1|0",
+		"56463|Взрывчатая приманка|385|395|0|40536|5|33470*1;39690*3|0",
+		"46106|Исцеляющий рассеиватель теней XT68|390|430|0|35183|1|32479*1;21885*4;22457*8;23572*4|0",
+		"46107|Очки 'Воздаятель-3000'|390|430|0|35185|1|32472*1;21886*8;22457*8;22452*8;23572*4|0",
+		"46108|Линза могущественного целителя-9000|390|430|0|35181|1|32495*1;21886*8;22457*8;23572*4|0",
+		"46109|Гипер-увеличивающие лунные очки|390|430|0|35182|1|32480*1;21885*6;21886*12;23572*4|0",
+		"46110|Очки изначальной гармонии|390|430|0|35184|1|32475*1;21886*5;22457*5;21885*5;23572*4|0",
+		"46111|Голографические очки аннигиляции|390|430|0|34847|1|32494*1;22456*4;21884*4;22457*4;23572*4|0",
+		"46112|Иссеченные молниями очки|390|430|0|34355|1|32476*1;23571*2;22451*2;23572*4|0",
+		"46113|Очки верного удара модель 3.0|390|430|0|34356|1|32474*1;22451*12;23572*4|0",
+		"46114|Проекционные очки резни|390|430|0|34354|1|32461*1;21884*10;23572*4|0",
+		"46115|Очки из закаленного кория|390|430|0|34357|1|32473*1;35128*2;23571*1;23572*4|0",
+		"46116|Очки квадри-смертельного удара X44|390|430|0|34353|1|32478*1;22456*12;23572*4|0",
+		"54736|Персональный генератор электромагнитных импульсов|390|395|0|0|1|39682*4|0",
+		"56471|Труба из ледяной стали|395|405|0|39683|1|36916*8;37705*1|0",
+		"320369|Статические гиперускорители|400|405|0|0|1|36913*6;37700*4|0",
+		"54998|Нарукавная зажигательная ракетница|400|405|0|0|1|36913*6;37702*4|0",
+		"54999|Гиперскоростные ускорители|400|405|0|0|1|36913*6;37700*4|0",
+		"55016|Нитроускорители|400|410|0|0|1|39690*6;39681*6|0",
+		"61471|Рефракторный прицел с бриллиантовой огранкой|400|415|0|44739|1|39683*1;39681*2|0",
+		"63770|Укрепленный решетчатый каркас|400|405|0|0|1|36913*4;35624*2|0",
+		"54353|Огнестрел модели 'С'|405|415|0|39688|1|36913*10;39683*2;39684*1;40533*1|0",
+		"56474|Мамонтобои|405|420|0|41164|1000|36913*1;39690*1|0",
+		"150255|Острейшая саронитовая амуниция|410|425|0|158648|1|36913*4|0",
+		"56468|Ящик бомб|410|420|0|44951|1|36913*5;39690*1|0",
+		"67839|Транслятор нервных импульсов|410|420|0|0|1|36913*8;39683*1|0",
+		"55252|Комплект для сборки Хламобота|415|420|0|40769|5|36913*10|0",
+		"56476|Детали для набора лечебных инъекций|415|425|0|37567|8|36913*12;39681*2|0",
+		"67326|Гоблинский лучевой трансформатор|415|425|0|47828|1|36913*6;37702*3;37705*3|0",
+		"56477|Детали для набора инъекций маны|420|430|0|42546|8|36913*12;37705*2|0",
+		"30349|Титановый ящик с инструментами|425|440|0|23775|1|36913*8;41163*8;39681*4|0",
+		"56465|Механизированные снегозащитные очки|425|440|0|41112|1|36913*8;33568*2;35627*1|0",
+		"56514|Сверхмощный заряд термической саперной взрывчатки|425|435|0|42641|5|36913*1;39690*1|0",
+		"61481|Механизированные снегозащитные очки|425|440|0|44740|1|36913*8;33568*2;35627*1|0",
+		"61482|Механизированные снегозащитные очки|425|440|0|44741|1|36913*8;33568*2;35627*1|0",
+		"61483|Механизированные снегозащитные очки|425|440|0|44742|1|36913*8;33568*2;35627*1|0",
+		"56469|Гномский генератор молний|430|440|0|41121|1|41163*2;36913*8;35622*2;35623*2|0",
+		"56470|Солнечный прицел|430|435|0|41146|1|39683*1;36920*1;36921*1|0",
+		"56472|МЯЛЛ-И|430|435|0|40768|1|36913*8;35623*8|0",
+		"56473|Гномские рентгеновские очки|430|440|0|40895|1|41163*6;34052*2;39681*2|0",
+		"56466|Усилитель звука|435|445|0|40767|1|39683*2;39682*4;39681*2|0",
+		"56467|Генератор шума|435|445|0|40865|1|39683*2;39682*2;39681*8|0",
+		"56478|Прицел 'Пронзатель сердец'|435|455|0|41167|1|36913*10;36927*2|0",
+		"67790|Межпространственный тоннель: К-3|435|445|0|48933|1|39683*2;35623*2;36860*2;35622*2;39681*10;42546*5|0",
+		"150256|Амуниция с ледяным наконечником|440|460|0|158649|1|37703*4|0",
+		"56462|Гномский армейский нож|440|450|0|40772|1|36913*10;7005*1;2901*1;5956*1|0",
+		"72952|Осколочные патроны|440|460|0|52020|1000|37701*2|0",
+		"305900|Облегченные биооптические очки целителя|450|500|0|105606|1|41594*10;21845*6;49908*4;23784*4;39681*20|0",
+		"305901|Облегченные биооптические очки заклинателя|450|500|0|105607|1|41595*10;24271*6;49908*4;23784*4;39681*20|0",
+		"305902|Повышающие проворство биооптические очки целителя|450|500|0|105608|1|23793*10;38557*20;49908*4;23784*4;39681*20|0",
+		"305903|Повышающие проворство биооптические очки заклинателя|450|500|0|105609|1|23793*10;38558*20;49908*4;23784*4;39681*20|0",
+		"305904|Повышающие проворство биооптические очки бойца|450|500|0|105610|1|23793*10;38561*20;49908*4;23784*4;39681*20|0",
+		"305905|Смертоносные биооптические очки целителя|450|500|0|105611|1|38425*20;29548*10;49908*4;23784*4;39681*20|0",
+		"305906|Смертоносные биооптические очки заклинателя|450|500|0|105612|1|38425*20;25707*10;49908*4;23784*4;39681*20|0",
+		"305907|Смертоносные биооптические очки бойца|450|500|0|105613|1|38425*20;29547*10;49908*4;23784*4;39681*20|0",
+		"305908|Армированные биооптические очки целителя|450|500|0|105614|1|36916*30;23449*20;49908*4;23784*4;39681*20|0",
+		"305909|Армированные биооптические очки бойца|450|500|0|105615|1|36913*40;23573*10;49908*4;23784*4;39681*20|0",
+		"305910|Армированные биооптические очки защитника|450|500|0|105616|1|41163*10;23448*20;49908*4;23784*4;39681*20|0",
+		"316184|Горсть обсидиановых болтов|450|470|0|60224|3|54849*2|0",
+		"56480|Бронированные титановые очки|450|460|0|42549|1|41163*8;38425*4;36924*2;35624*4;43102*1|0",
+		"56481|Спектральный выявитель слабости|450|460|0|42550|1|41163*8;38425*4;36918*2;35623*4;43102*1|0",
+		"56483|Заряженные титановые очки|450|460|0|42552|1|41163*8;38425*4;36930*2;36860*4;43102*1|0",
+		"56484|Затуманивающие взор очки|450|460|0|42553|1|41163*8;38425*4;36918*2;35627*4;43102*1|0",
+		"56486|Очки с зелеными стеклами|450|460|0|42554|1|41163*8;38425*4;36933*2;35625*4;43102*1|0",
+		"56487|Электропотоковое улучшение зрения|450|460|0|42555|1|41163*8;38425*4;36921*2;35623*4;43102*1|0",
+		"56574|Снегозащитные очки острого зрения|450|460|0|42551|1|41163*8;38425*4;36927*2;35622*4;43102*1|0",
+		"62271|Нерушимые усилители исцеления|450|460|0|44949|1|41163*8;38425*4;36933*2;35624*4;43102*1|0",
+		"67920|Генератор червоточины: Нордскол|450|460|0|48933|1|41163*8;35627*2;35622*2;36860*2;35623*2|0",
+		"56479|Бронированный боевой дробовик|455|465|0|41168|1|41163*10;36913*20;35623*15;35622*15;43102*1;40533*1|0",
+		"60874|Эрнестуэй 4000|455|465|0|44504|1|41163*10;43102*1;36860*12;35627*12;41146*3;40533*1|0",
+		"302211|Набор для снятия ограничителя|460|480|0|59596|1|39683*1;36920*4;36921*4;23447*2;23446*3|0",
+		"302213|Угрозодетектор R19|460|480|0|59595|1|36913*10;36927*4;23447*4;23446*6|0",
+		"302215|Трицикл|460|480|0|62461|1|37663*2;39681*10;44128*3;23446*3;44501*2;23447*4|0",
+		"302216|Турботрицикл|460|480|0|62462|1|37663*3;39681*15;44128*4;23446*4;44501*3;23447*5|0",
+		"302219|Гоблинский планер|460|480|0|0|1|33470*12;44128*1;39682*2;44501*2|0",
+		"315377|Механическая пелерина претендента|470|490|0|154176|1|36913*2;38425*4;33470*8;21877*8;43102*2|0",
+		"315378|Механический плащ претендента|470|490|0|154175|1|36913*2;38425*4;33470*8;21877*8;43102*2|0",
+		"371842|Подлинные очки мл. инженера|470|480|0|60222|1|54849*8;52976*4;76137*2|0",
+		"316185|Искрящийся эфир|475|495|0|67749|3|54849*2|0",
+		"319589|Активная наручная защита ХМ-52 \"Титан\"|475|500|0|97838|1|36913*30;39683*5;39681*10;23785*2;23572*30;32428*4|0",
+		"319590|Наручные подавители боли ХМ-51 \"Узурпатор\"|475|500|0|97839|1|36913*30;39683*5;39681*10;23786*20;23572*30;32428*4|0",
+		"319591|Наручный источник сил ХМ-75 \"Очищение\"|475|500|0|97840|1|36913*30;39683*5;39681*10;23787*5;23572*30;32428*4|0",
+		"319592|Наручный сканер слабостей ХТ-27 \"Трепет\"|475|500|0|97841|1|38425*30;39683*5;39681*10;23786*20;23572*30;32428*4|0",
+		"319593|Наручная маскировка ХТ-92 \"Леший\"|475|500|0|97842|1|38425*30;39683*5;39681*10;23787*5;23572*30;32428*4|0",
+		"319594|Наручный целеуказатель ХЕ-41 \"Раптор\"|475|500|0|97843|1|36913*30;39683*5;39681*10;23786*20;23572*30;32428*4|0",
+		"319595|Наручный инъектор ХЕ-39 \"Водяной\"|475|500|0|97844|1|36913*30;39683*5;39681*10;23787*5;23572*30;32428*4|0",
+		"319596|Наручная электрозащита ХЕ-89 \"Буря\"|475|500|0|97845|1|36913*30;39683*5;39681*10;23787*5;23572*30;32428*4|0",
+		"371857|Электростатический конденсатор|475|495|0|67494|1|54849*4;60224*6;52327*4|0",
+		"310597|Чоппер изгоя|480|490|0|101256|1|37663*12;39681*40;44128*2;44499*1;44501*8;44500*1|0",
+		"371831|Синтетические очки типа \"L0-SKUT-W1Z\"|480|500|0|177502|1|60224*6;67749*6;52186*3;52328*2;52190*2|0",
+		"371832|Синтетические очки типа \"L0-SKUT-M3D\"|480|500|0|177503|1|60224*6;67749*6;52186*3;52328*2;52191*2|0",
+		"371833|Синтетические очки типа \"GA-CH1-W1Z\"|480|500|0|177504|1|60224*6;67749*6;52186*3;52328*2;52192*2|0",
+		"371834|Синтетические очки типа \"GA-CH1-UK162\"|480|500|0|177505|1|60224*6;67749*6;52186*3;52328*2;52193*2|0",
+		"371835|Синтетические очки типа \"GA-CH1-M3D\"|480|500|0|177506|1|60224*6;67749*6;52186*3;52328*2;52194*2|0",
+		"371836|Синтетические очки типа \"CHM-BK1N1-W1Z\"|480|500|0|177507|1|60224*6;67749*6;52186*3;52328*2;52195*2|0",
+		"371837|Синтетические очки типа \"CHM-BK1N1-UK162\"|480|500|0|177508|1|60224*6;67749*6;52186*3;52328*2;52190*2|0",
+		"371838|Синтетические очки типа \"CHM-BK1N1-M3D\"|480|500|0|177509|1|60224*6;67749*6;52186*3;52328*2;52191*2|0",
+		"371839|Синтетические очки типа \"B-ANK-UK162\"|480|500|0|177510|1|60224*6;67749*6;52186*3;52328*2;52192*2|0",
+		"371840|Синтетические очки типа \"B-ANK-M3D\"|480|500|0|177511|1|60224*6;67749*6;52186*3;52328*2;52193*2|0",
+		"371841|Синтетические очки типа \"B-ANK-J1R:\"|480|500|0|177512|1|60224*6;67749*6;52186*3;52328*2;52194*2|0",
+		"371858|Летучий сефориевый взрывпакет|480|485|0|60853|1|67749*1;52186*1|0",
+		"60866|Механоцикл|480|490|0|41508|1|37663*12;39681*40;44128*2;44499*1;44501*8;44500*1|0",
+		"60867|Анжинерский чоппер|480|490|0|44413|1|37663*12;39681*40;44128*2;44499*1;44501*8;44500*1|0",
+		"68067|Дживс|480|490|0|49040|1|18232*2;34113*10;40769*20;37663*8;36922*2;39681*30|0",
+		"371859|Зеркальный прицел|485|495|0|77531|1|54849*6;60224*6;76134*4|0",
+		"371860|Высокомощный крепежный пистолет|490|500|0|60223|1|60224*8;67749*4;54849*10|0",
+		"371861|Гоблинское барбекю|495|505|0|60858|1|52186*4;60224*2;74847*6;74837*6;74661*1|0",
+		"371863|Термостойкая вращающаяся наживка|500|510|0|68049|1|52186*3;60224*1;52325*1|0",
+		"371864|Большой папочка|505|515|0|63396|1|67749*1;52186*1|0",
+		"305896|Лечебная граната истинного золота|510|520|0|105604|5|60224*5;39684*5;52329*5;58480*1|0",
+		"305897|Колчедановый детонатор|510|520|0|105605|5|60224*10;39684*5;52329*10;51950*10|0",
+		"371854|Обсидиановый дракончик|510|520|0|177500|1|60224*2;67749*8;54849*16;72988*20|0",
+		"371862|Гоблинское бургербекю|510|520|0|68679|1|51950*1;60224*1;87701*1;87725*1;74659*5;74662*1;177423*1|0",
+		"371865|Прицел судьбы лорда Бумтингона|510|520|0|77529|1|52186*6;60224*6;52195*4|0",
+		"371855|Элементиевый дракончик|515|525|0|60403|1|60224*6;67749*10;52186*12;92960*10;102351*1|0",
+		"371867|Куробойка повышенной мощности|515|525|0|59364|1|52186*12;60224*6;67749*6;52976*1;52195*1|0",
+		"371868|Тонко отлаженный шприцевик|515|525|0|59598|1|52186*6;60224*12;67749*6;40533*1;52193*1|0",
+		"371869|Летучий громоотвод|515|525|0|59599|1|52186*3;52325*3;67749*12;39684*1;52190*1|0",
+		"371876|Элементиевые снаряды|515|525|0|177529|200|52186*2;177853*1|0",
+		"371877|Амуниция с колчедановым наконечником|515|525|0|158651|1|51950*2;177853*1|0",
+		"371843|Заряженные синтетические очки типа \"L0-SKUT-W1Z\"|520|530|0|177513|1|60224*8;67749*18;53039*3;102351*1;76131*2|0",
+		"371844|Заряженные синтетические очки типа \"L0-SKUT-M3D\"|520|530|0|177514|1|60224*8;67749*18;53039*3;102351*1;76138*2|0",
+		"371845|Заряженные синтетические очки типа \"GA-CH1-W1Z\"|520|530|0|177515|1|60224*8;67749*18;53039*3;102351*1;76142*2|0",
+		"371846|Заряженные синтетические очки типа \"GA-CH1-UK162\"|520|530|0|177516|1|60224*8;67749*18;53039*3;102351*1;76141*2|0",
+		"371847|Заряженные синтетические очки типа \"GA-CH1-M3D\"|520|530|0|177517|1|60224*8;67749*18;53039*3;102351*1;76139*2|0",
+		"371848|Заряженные синтетические очки типа \"CHM-BK1N1-W1Z\"|520|530|0|177518|1|60224*8;67749*18;53039*3;102351*1;76140*2|0",
+		"371849|Заряженные синтетические очки типа \"CHM-BK1N1-UK162\"|520|530|0|177519|1|60224*8;67749*18;53039*3;102351*1;76131*2|0",
+		"371850|Заряженные синтетические очки типа \"CHM-BK1N1-M3D\"|520|530|0|177520|1|60224*8;67749*18;53039*3;102351*1;76138*2|0",
+		"371851|Заряженные синтетические очки типа \"B-ANK-UK162\"|520|530|0|177521|1|60224*8;67749*18;53039*3;102351*1;76142*2|0",
+		"371852|Заряженные синтетические очки типа \"B-ANK-M3D\"|520|530|0|177522|1|60224*8;67749*18;53039*3;102351*1;76141*2|0",
+		"371853|Заряженные синтетические очки типа \"B-ANK-J1R:\"|520|530|0|177523|1|60224*8;67749*18;53039*3;102351*1;76139*2|0",
+		"371871|Курогилятор|520|530|0|177524|1|58480*3;60224*4;67749*12;52976*1;63327*1;52195*1;102351*1|0",
+		"371872|Шпашко-метатель|520|530|0|177525|1|58480*2;60224*30;67749*8;40533*1;63342*3;52193*1;102351*1|0",
+		"371873|Ударный шорох|520|530|0|177526|1|58480*1;52325*10;67749*28;39684*1;63318*2;52190*1;102351*1|0",
+		"305894|Автоматический молот|525|535|0|105603|1|60224*6;67749*3;51950*3;76134*1|0",
+		"371830|Термическая наковальня|525|535|0|177499|1|60224*6;67749*3;51950*3;76136*1|0",
+		"371856|Генератор червоточины: Фельярд|525|535|0|177501|1|67749*24;52325*2;52326*2;52327*2;52328*2|0",
+		"371866|Образцовый гномский армейский нож|525|535|0|102395|1|60224*12;67749*12;51950*12;52329*12;58480*2;102351*1|0",
+		"371874|Затемненный зеркальный прицел|525|535|0|177527|1|54849*3;51950*3;60224*6;53039*2;76134*4|0",
+		"371875|Прицел быстрорукого Джека|525|535|0|177528|1|52186*3;51950*3;60224*6;53039*2;76141*4|0",
+		"371870|Механокот модели Х-995|535|545|0|157002|1|60224*50;67749*50;51950*50;53039*5;102351*1|0",
+	},
+	[333] = {
+		"28022|Большой радужный осколок|5|10|0|22449|1|22448*3|0",
+		"7421|Рунический медный жезл|5|10|1|6218|1|6217*1;10940*1;10938*1|0",
+		"25124|Слабое волшебное масло|55|75|0|20744|1|10940*2;17034*1;3371*1|0",
+		"7418|Чары для наручей - здоровье I|70|110|1|0|1|10940*1|0",
+		"7420|Чары для нагрудника - здоровье I|70|110|0|0|1|10940*1|0",
+		"14293|Малый магический жезл|75|115|0|11287|1|4470*1;10938*1|0",
+		"7428|Чары для наручей - отражение I|80|120|1|0|1|10938*1;10940*1|0",
+		"7443|Чары для нагрудника - мана I|80|120|0|0|1|10938*1|0",
+		"7426|Чары для нагрудника - поглощение I|90|130|0|0|1|10940*2;10938*1|0",
+		"7454|Чары для плаща - сопротивление I|95|135|0|0|1|10940*1;10938*2|0",
+		"7457|Чары для наручей - выносливость I|100|140|0|0|1|10940*3|0",
+		"7748|Чары для нагрудника - здоровье II|105|145|0|0|1|10940*2;10938*2|0",
+		"7766|Чары для наручей - дух I|105|145|0|0|1|10938*2|0",
+		"14807|Большой магический жезл|110|150|0|11288|1|4470*1;10939*1|0",
+		"7771|Чары для плаща - броня I|110|150|0|0|1|10940*3;10939*1|0",
+		"7776|Чары для нагрудника - мана II|115|155|0|0|1|10939*1;10938*1|0",
+		"7779|Чары для наручей - ловкость I|115|155|0|0|1|10940*2;10939*1|0",
+		"7782|Чары для наручей - сила I|115|155|0|0|1|10940*5|0",
+		"7786|Чары для оружия - зверобой I|120|160|0|0|1|10940*4;10939*2|0",
+		"7788|Чары для оружия - удар I|120|160|0|0|1|10940*2;10939*1;10978*1|0",
+		"13378|Чары для щита - выносливость I|130|170|0|0|1|10998*1;10940*2|0",
+		"7745|Чары для двуручного оружия - импульс I|130|170|0|0|1|10940*4;10978*1|0",
+		"7793|Чары для двуручного оружия - интеллект I|130|170|0|0|1|10939*3|0",
+		"7795|Рунический серебряный жезл|130|170|0|6339|1|6338*1;10940*6;10939*3;6218*1|0",
+		"13380|Чары для двуручного оружия - дух I|135|175|0|0|1|10998*1;10940*6|0",
+		"13419|Чары для плаща - ловкость I|135|175|0|0|1|10998*1|0",
+		"13421|Чары для плаща - броня II|140|180|0|0|1|10940*6;10978*1|0",
+		"13464|Чары для щита - броня I|140|180|0|0|1|10998*1;10940*1;10978*1|0",
+		"7857|Чары для нагрудника - здоровье III|145|185|0|0|1|10940*4;10998*1|0",
+		"7859|Чары для наручей - дух II|145|185|0|0|1|10998*2|0",
+		"7861|Чары для плаща - сопротивление огню II|150|190|0|0|1|6371*1;10998*1|0",
+		"7863|Чары для обуви - выносливость I|150|190|0|0|1|10940*8|0",
+		"7867|Чары для обуви - ловкость I|150|190|0|0|1|10940*6;10998*2|0",
+		"13485|Чары для щита - дух I|155|195|0|0|1|10998*2;10940*4|0",
+		"13501|Чары для наручей - выносливость II|155|195|0|0|1|11083*2|0",
+		"13522|Чары для плаща - сопротивление темной магии I|160|200|0|0|1|11082*1;6048*1|0",
+		"25125|Слабое масло маны|160|180|0|20745|1|11083*3;17034*2;3372*1|0",
+		"13503|Чары для оружия - удар II|165|205|0|0|1|11083*2;11084*1|0",
+		"13536|Чары для наручей - сила II|165|205|0|0|1|11083*2|0",
+		"13538|Чары для нагрудника - поглощение II|165|205|0|0|1|10940*2;11082*1;11084*1|0",
+		"13529|Чары для двуручного оружия - импульс II|170|210|0|0|1|11083*3;11084*1|0",
+		"13607|Чары для нагрудника - мана III|170|210|0|0|1|11082*1;10998*2|0",
+		"13612|Чары для перчаток - горное дело I|170|210|0|0|1|11083*1;2772*3|0",
+		"13617|Чары для перчаток - травничество I|170|210|0|0|1|11083*1;3356*3|0",
+		"13620|Чары для перчаток - рыбная ловля|170|210|0|0|1|11083*1;6370*3|0",
+		"13622|Чары для наручей - интеллект I|175|215|0|0|1|11082*2|0",
+		"13626|Чары для нагрудника - все характеристики I|175|215|0|0|1|11082*1;11083*1;11084*1|0",
+		"13628|Рунический золотой жезл|175|215|0|11130|1|11128*1;5500*1;11082*2;11083*2;6339*1|0",
+		"13631|Чары для щита - выносливость II|175|215|0|0|1|11134*1;11083*1|0",
+		"13635|Чары для плаща - защита I|175|215|0|0|1|11138*1;11083*3|0",
+		"14809|Малый мистический жезл|175|215|0|11289|1|11291*1;11134*1;11083*1|0",
+		"13637|Чары для обуви - ловкость II|180|220|0|0|1|11083*1;11134*1|0",
+		"13640|Чары для нагрудника - здоровье IV|180|220|0|0|1|11083*3|0",
+		"13642|Чары для наручей - дух III|185|225|0|0|1|11134*1|0",
+		"13644|Чары для обуви - выносливость II|190|230|0|0|1|11083*4|0",
+		"13646|Чары для наручей - отражение II|190|230|0|0|1|11134*1;11083*2|0",
+		"13648|Чары для наручей - выносливость III|190|230|0|0|1|11083*6|0",
+		"13653|Чары для оружия - зверобой II|195|235|0|0|1|11134*1;5637*2;11138*1|0",
+		"13655|Чары для оружия - малое убийство элементалей|195|235|0|0|1|11134*1;7067*1;11138*1|0",
+		"13657|Чары для плаща - сопротивление огню|195|235|0|0|1|11134*1;7068*1|0",
+		"14810|Большой таинственный жезл|195|235|0|11290|1|11291*1;11135*1;11137*1|0",
+		"13659|Чары для щита - дух II|200|240|0|0|1|11135*1;11137*1|0",
+		"13661|Чары для наручей - сила III|200|240|0|0|1|11137*1|0",
+		"13663|Чары для нагрудника - мана IV|205|245|0|0|1|11135*1|0",
+		"13687|Чары для обуви - дух I|210|250|0|0|1|11135*1;11134*2|0",
+		"21931|Чары для оружия - могущество зимы|210|250|0|0|1|11135*3;11137*3;11139*1;3819*2|0",
+		"25126|Простое волшебное масло|210|230|0|20746|1|11137*3;17035*2;3372*1|0",
+		"13689|Чары для щита - блок I|215|255|0|0|1|11135*2;11137*2;11139*1|0",
+		"13693|Чары для оружия - удар III|215|255|0|0|1|11135*2;11139*1|0",
+		"13695|Чары для двуручного оружия - импульс III|220|260|0|0|1|11137*4;11139*1|0",
+		"13698|Чары для перчаток - снятие шкур|220|260|0|0|1|11137*1;7392*3|0",
+		"13700|Чары для нагрудника - все характеристики II|220|260|0|0|1|11135*2;11137*2;11139*1|0",
+		"13702|Рунический жезл истинного серебра|220|260|0|11145|1|11144*1;7971*1;11135*2;11137*2;11130*1|0",
+		"13746|Чары для плаща - защита II|225|265|0|0|1|11137*3|0",
+		"13794|Чары для плаща - сопротивление II|225|265|0|0|1|11174*1|0",
+		"13815|Чары для перчаток - ловкость I|230|270|0|0|1|11174*1;11137*1|0",
+		"13817|Чары для щита - выносливость III|230|270|0|0|1|11137*5|0",
+		"13822|Чары для наручей - интеллект II|230|270|0|0|1|11174*2|0",
+		"13836|Чары для обуви - выносливость III|235|275|0|0|1|11137*5|0",
+		"13841|Чары для перчаток - горное дело II|235|275|0|0|1|11137*3;6037*3|0",
+		"13846|Чары для наручей - дух IV|240|280|0|0|1|11174*3;11137*1|0",
+		"13858|Чары для нагрудника - здоровье V|240|280|0|0|1|11137*6|0",
+		"13868|Чары для перчаток - травничество II|245|285|0|0|1|11137*3;8838*3|0",
+		"13882|Чары для плаща - ловкость II|245|285|0|0|1|11174*2|0",
+		"13887|Чары для перчаток - сила I|245|285|0|0|1|11174*2;11137*3|0",
+		"13890|Чары для обуви - скорость|245|285|0|0|1|11177*1;7909*1;11174*1|0",
+		"63746|Чары для обуви - меткость I|245|285|0|0|1|11137*4;11174*1|0",
+		"13905|Чары для щита - дух III|250|290|0|0|1|11175*1;11176*2|0",
+		"13915|Чары для оружия - истребитель демонов|250|290|0|0|1|11177*1;11176*2;9224*1|0",
+		"13917|Чары для нагрудника - мана V|250|290|0|0|1|11175*1;11174*2|0",
+		"17180|Зачарованный торий|250|260|0|12655|1|12359*1;11176*3|0",
+		"17181|Зачарованная кожа|250|260|0|12810|1|8170*1;16202*1|0",
+		"13931|Чары для наручей - отражение III|255|295|0|0|1|11175*1;11176*2|0",
+		"13933|Чары для щита - сопротивление льду|255|295|0|0|1|11178*1;3829*1|0",
+		"13935|Чары для обуви - ловкость III|255|295|0|0|1|11175*2|0",
+		"13937|Чары для двуручного оружия - импульс IV|260|300|0|0|1|11178*2;11176*2|0",
+		"13939|Чары для наручей - сила IV|260|300|0|0|1|11176*2;11175*1|0",
+		"25127|Простое масло маны|260|280|0|20747|1|11176*3;8831*2;8925*1|0",
+		"13941|Чары для нагрудника - все характеристики III|265|305|0|0|1|11178*1;11176*3;11175*2|0",
+		"13943|Чары для оружия - удар IV|265|305|0|0|1|11178*2;11175*2|0",
+		"13945|Чары для наручей - выносливость IV|265|305|0|0|1|11176*5|0",
+		"13947|Чары для перчаток - навык верховой езды|270|310|0|0|1|11178*2;11176*3|0",
+		"13948|Чары для перчаток - слабое ускорение|270|310|0|0|1|11178*2;8153*2|0",
+		"20008|Чары для наручей - интеллект III|275|315|0|0|1|16202*3|0",
+		"20020|Чары для обуви - выносливость IV|280|320|0|0|1|11176*5|0",
+		"13898|Чары для оружия - огненное оружие|285|325|0|0|1|11177*4;7078*1|0",
+		"15596|Дымящееся сердце горы|285|325|0|11811|1|7078*3;14343*3|0",
+		"20014|Чары для плаща - сопротивление III|285|325|0|0|1|7077*1;7075*1;7079*1;7081*1;7972*1|0",
+		"20017|Чары для щита - выносливость IV|285|325|0|0|1|11176*5|0",
+		"25128|Волшебное масло|285|305|0|20750|1|16204*3;4625*2;8925*1|0",
+		"20009|Чары для наручей - дух V|290|330|0|0|1|16202*3;11176*4|0",
+		"20012|Чары для перчаток - ловкость II|290|330|0|0|1|16202*2;16204*3|0",
+		"20024|Чары для обуви - дух II|295|335|0|0|1|16203*2|0",
+		"20026|Чары для нагрудника - здоровье VI|295|335|0|0|1|14343*2|0",
+		"42613|Преображение кристалла-источника|295|305|0|22448|1|20725*1|0",
+		"20015|Чары для плаща - защита III|300|335|0|0|1|16204*8|0",
+		"20016|Чары для щита - Живучесть|300|340|0|0|1|16203*1;16204*4|0",
+		"20029|Чары для оружия - леденящая стужа|300|335|0|0|1|14343*4;7080*1;7082*1;13467*1|0",
+		"20028|Чары для нагрудника - мана VI|305|340|0|0|1|16204*8|0",
+		"20051|Рунический арканитовый жезл|305|340|0|16207|1|16206*1;13926*1;16204*10;16203*4;11145*1;14344*2|0",
+		"23799|Чары для оружия - сила|305|340|0|0|1|14344*4;7076*4|0",
+		"23800|Чары для оружия - ловкость I|305|340|0|0|1|14344*4;7082*4|0",
+		"23801|Чары для наручей - восполнение маны|305|340|0|0|1|16204*4;16202*4;7080*2|0",
+		"27837|Чары для двуручного оружия - ловкость I|305|340|0|0|1|14344*8;7082*4|0",
+		"20010|Чары для наручей - сила V|310|340|0|0|1|16204*6;16203*2|0",
+		"20011|Чары для наручей - выносливость V|310|340|0|0|1|16204*10|0",
+		"20013|Чары для перчаток - сила II|310|340|0|0|1|16202*4;16204*4|0",
+		"20023|Чары для обуви - ловкость IV|310|340|0|0|1|16202*2;8153*2|0",
+		"20025|Чары для нагрудника - все характеристики IV|310|340|0|0|1|14344*2;16204*6|0",
+		"20030|Чары для двуручного оружия - импульс V|310|340|0|0|1|14344*4;16204*10|0",
+		"20031|Чары для оружия - удар V|310|340|0|0|1|14344*2;16203*4|0",
+		"20032|Чары для оружия - похищение жизни|310|340|0|0|1|14344*4;12808*4;12803*4|0",
+		"20033|Чары для оружия - нечестивое оружие|310|340|0|0|1|14344*4;12808*4|0",
+		"20034|Чары для оружия - рыцарь|310|340|0|0|1|14344*4;12811*2|0",
+		"20035|Чары для двуручного оружия - дух II|310|340|0|0|1|16203*4;14344*2|0",
+		"20036|Чары для двуручного оружия - интеллект II|310|340|0|0|1|16203*4;14344*2|0",
+		"22749|Чары для оружия - сила заклинаний|310|340|0|0|1|14344*4;16203*6;13926*2|0",
+		"22750|Чары для оружия - целительная сила|310|340|0|0|1|14344*4;16203*4;7080*4|0",
+		"23802|Чары для наручей - целительная сила|310|340|0|0|1|14344*2;16204*4;16202*4|0",
+		"23803|Чары для оружия - могучий дух|310|340|0|0|1|14344*6;16203*4;16204*12|0",
+		"23804|Чары для оружия - могучий интеллект|310|340|0|0|1|14344*6;16203*5;16204*20|0",
+		"25072|Чары для перчаток - угроза|310|340|0|0|1|22448*4;22446*2;21886*8|0",
+		"25073|Чары для перчаток - энергия Тьмы|310|340|0|0|1|22448*3;14344*10;12808*6|0",
+		"25074|Чары для перчаток - сила льда|310|340|0|0|1|22448*3;14344*10;7080*4|0",
+		"25078|Чары для перчаток - сила огня|310|340|0|0|1|22448*2;14344*10;7078*4|0",
+		"25079|Чары для перчаток - целительная сила|310|340|0|0|1|22448*3;14344*8;12811*1|0",
+		"25080|Чары для перчаток - ловкость III|310|340|0|0|1|22448*3;22446*3;22451*2|0",
+		"25081|Чары для плаща - сопротивление огню III|310|340|0|0|1|22448*3;22446*3;7078*4|0",
+		"25082|Чары для плаща - сопротивление силам природы I|310|340|0|0|1|22448*2;22446*3;12803*4|0",
+		"25083|Чары для плаща - незаметность|310|340|0|0|1|22448*3;22446*3;22794*2|0",
+		"25084|Чары для плаща - скрытность|310|340|0|0|1|22448*4;22446*2;22456*8|0",
+		"25086|Чары для плаща - уклонение|310|340|0|0|1|22448*3;22446*3;22452*8|0",
+		"25129|Сверкающее волшебное масло|310|330|0|20749|1|14344*2;4625*3;18256*1|0",
+		"25130|Сверкающее масло маны|310|330|0|20748|1|14344*2;8831*3;18256*1|0",
+		"28016|Превосходное масло маны|310|330|0|22521|1|22445*3;22791*1;18256*1|0",
+		"32664|Рунический жезл из оскверненного железа|310|340|0|22461|1|25843*1;16203*4;14344*6;16207*1|0",
+		"33991|Чары для нагрудника - быстрое восполнение маны|310|340|0|0|1|22447*2;22445*2|0",
+		"34002|Чары для наручей - штурм I|310|340|0|0|1|22445*6|0",
+		"27899|Чары для наручей - грубая сила|315|345|0|0|1|22445*6|0",
+		"27948|Чары для обуви - живучесть I|315|345|0|0|1|22445*6;13446*4;13444*4|0",
+		"33993|Чары для перчаток - взрыв I|315|345|0|0|1|22447*1;22445*4|0",
+		"34001|Чары для наручей - интеллект IV|315|345|0|0|1|22447*3|0",
+		"42615|Малый радужный осколок|315|335|0|22448|3|22449*1|0",
+		"27944|Чары для щита - прочный щит|320|350|0|0|1|22445*6;22452*10|0",
+		"27961|Чары для плаща - броня III|320|350|0|0|1|22445*8|0",
+		"33996|Чары для перчаток - штурм I|320|350|0|0|1|22445*8|0",
+		"34004|Чары для плаща - ловкость III|320|350|0|0|1|22446*1;22445*4;22451*1|0",
+		"27905|Чары для наручей - все характеристики|325|355|0|0|1|22445*6;22447*6|0",
+		"27957|Чары для нагрудника - здоровье VII|325|355|0|0|1|22445*8;13446*4;14344*2|0",
+		"28027|Радужная сфера|325|335|0|22460|1|22449*4|1",
+		"27906|Чары для наручей - защита|330|360|0|0|1|22448*2;22445*10|0",
+		"27950|Чары для обуви - стойкость I|330|360|0|0|1|22445*12|0",
+		"33990|Чары для нагрудника - дух|330|360|0|0|1|22446*2|0",
+		"27911|Чары для наручей - лечение II|335|365|0|0|1|22446*4;21886*4|0",
+		"27945|Чары для щита - интеллект I|335|365|0|0|1|22446*4|0",
+		"28021|Чародейная пыль|335|355|0|22445|3|12363*1|0",
+		"34003|Чары для плаща - проникающая способность заклинаний|335|365|0|0|1|22446*2;22445*6;22457*2|0",
+		"34009|Чары для щита - выносливость V|335|365|0|0|1|22445*15|0",
+		"27962|Чары для плаща - сопротивление IV|340|370|0|0|1|22446*4;21884*4;22451*4;22452*4;21885*4|0",
+		"28019|Превосходное волшебное масло|340|360|0|22522|1|22445*3;22792*1;18256*1|0",
+		"44383|Чары для щита - устойчивость|340|370|0|0|1|22449*1;22447*4|0",
+		"27913|Чары для наручей - быстрое восполнение маны|345|375|0|0|1|22446*8|0",
+		"27946|Чары для щита - блок II|350|380|0|0|1|22445*12;22446*4;22452*10|0",
+		"27951|Чары для обуви - стремительность|350|380|0|0|1|22446*8;22445*8|0",
+		"27967|Чары для оружия - удар VI|350|380|0|0|1|22449*2;22446*6;22445*6|0",
+		"27968|Чары для оружия - интеллект I|350|380|0|0|1|22449*2;22446*10|0",
+		"33995|Чары для перчаток - сила III|350|380|0|0|1|22445*12;22446*1|0",
+		"46578|Чары для оружия - смертельный мороз|350|365|0|0|1|22456*2;21885*2|0",
+		"27960|Чары для нагрудника - все характеристики V|355|380|0|0|1|22449*4;22445*4;22446*4|0",
+		"33992|Чары для нагрудника - устойчивость I|355|380|0|0|1|22446*4;22445*10|0",
+		"27958|Чары для нагрудника - мана VII|360|380|0|0|1|34054*6|0",
+		"42620|Чары для оружия - ловкость II|360|375|0|0|1|22445*8;22446*4;22449*6;22451*2|0",
+		"45765|Дробление кристалла Бездны|360|365|0|22449|2|22450*1|0",
+		"60609|Чары для плаща - скорость I|360|380|0|0|1|34054*6|0",
+		"27914|Чары для наручей - стойкость|370|380|0|0|1|22449*1;22446*10;22445*20|0",
+		"27917|Чары для наручей - сила заклинаний I|370|400|0|0|1|22449*6;21884*6;21885*6|0",
+		"27920|Чары для кольца - удар|370|385|0|0|1|22449*2;22445*6|0",
+		"27924|Чары для кольца - сила заклинаний I|370|385|0|0|1|22449*2;22446*2|0",
+		"27947|Чары для щита - сопротивление|370|385|0|0|1|22449*2;22573*1;22574*1;22572*1;22578*1|0",
+		"27971|Чары для двуручного оружия - свирепость|370|380|0|0|1|22449*4;22445*40|0",
+		"27972|Чары для оружия - могущество I|370|380|0|0|1|22449*4;22446*5;22445*20|0",
+		"27975|Чары для оружия - сила заклинаний I|370|380|0|0|1|22449*8;22446*8|0",
+		"27977|Чары для двуручного оружия - ловкость II|370|385|0|0|1|22449*8;22446*6;22445*20|0",
+		"28003|Чары для оружия - всплеск чар|370|385|0|0|1|22449*12;22446*10;22445*20|0",
+		"28004|Чары для оружия - военачальник|370|385|0|0|1|22450*8;22449*8;21885*2|0",
+		"28028|Пустая сфера|370|380|0|22459|1|22450*2|0",
+		"32665|Рунический адамантитовый жезл|370|380|0|22462|1|25844*1;22446*8;22449*8;23571*1;22461*1|0",
+		"32667|Рунический этерниевый жезл|370|385|0|22463|1|25845*1;22446*6;22445*6;22462*1|0",
+		"33994|Чары для перчаток - точные удары|370|385|0|0|1|22446*8;22445*2;22449*2|0",
+		"33997|Чары для перчаток - сила заклинаний I|370|385|0|0|1|22446*6;22449*6;22457*6|0",
+		"33999|Чары для перчаток - лечение I|370|380|0|0|1|22446*6;22449*6;21886*6|0",
+		"34005|Чары для плаща - сопротивление тайной магии I|370|380|0|0|1|22449*4;22457*8|0",
+		"34006|Чары для плаща - сопротивление темной магии II|370|380|0|0|1|22449*4;22456*8|0",
+		"34007|Чары для обуви - проворство кошки|370|385|0|0|1|22449*8;22451*8|0",
+		"34008|Чары для обуви - быстрота вепря|370|385|0|0|1|22449*8;22452*8|0",
+		"34010|Чары для оружия - лечение I|370|380|0|0|1|22449*8;21885*8;21886*8|0",
+		"44506|Чары для перчаток - собиратель|370|390|0|0|1|34055*1|0",
+		"44592|Чары для перчаток - сила заклинаний II|370|390|0|0|1|34054*4;34056*1|0",
+		"46594|Чары для нагрудника - защита I|370|400|0|0|1|22446*4;22445*8;23427*4|0",
+		"60616|Чары для наручей - удар III|370|390|0|0|1|34054*6|0",
+		"27926|Чары для кольца - целительная сила|380|390|0|0|1|22449*2;22446*3;22445*5|0",
+		"27927|Чары для кольца - все характеристики|380|390|0|0|1|22450*2;22449*2|0",
+		"27954|Чары для обуви - верный шаг|380|390|0|0|1|22450*2;22449*4|0",
+		"27982|Чары для оружия - ледяная душа|380|390|0|0|1|22450*12;22449*10;22446*8;21885*6;22456*6|0",
+		"27984|Чары для оружия - мангуст|380|390|0|0|1|22450*6;22449*10;22446*8;22445*40|0",
+		"42974|Чары для оружия - палач|380|390|0|0|1|22450*6;22449*10;22446*6;22445*30;22824*3|0",
+		"44528|Чары для обуви - стойкость II|380|400|0|0|1|34056*3;34054*3|0",
+		"44623|Чары для нагрудника - все характеристики VI|380|400|0|0|1|34054*4;34056*2|0",
+		"47051|Чары для плаща - стальная ткань|380|390|0|0|1|22446*8;22452*8|0",
+		"44555|Чары для наручей - интеллект II|385|400|0|0|1|34054*10|0",
+		"60606|Чары для обуви - штурм I|385|405|0|0|1|34054*4;34056*4|0",
+		"71692|Чары для перчаток - рыболов|385|400|0|0|1|34054*1;44958*3|0",
+		"27981|Чары для оружия - солнечный огонь|390|390|0|0|1|22450*12;22449*10;22446*8;21884*6;23571*1|0",
+		"60621|Чары для оружия - могущество II|390|410|0|0|1|34054*2;34056*4|0",
+		"44582|Чары для плаща - пронзающие заклинания I|395|410|0|0|1|34054*15|0",
+		"60623|Чары для обуви - ледопроходец|395|415|0|0|1|34054*8;37705*1|0",
+		"62959|Чары для посоха - сила заклинаний I|395|415|0|0|1|34054*12;34055*2|0",
+		"44630|Чары для двуручного оружия - свирепость II|400|420|0|0|1|34054*6;34055*2|0",
+		"44636|Чары для кольца - сила заклинаний II|400|415|0|0|1|34054*8;34055*1|0",
+		"44645|Чары для кольца - штурм I|400|415|0|0|1|34054*8;34055*1|0",
+		"59636|Чары для кольца - выносливость III|400|415|0|0|1|34054*8;34055*1|0",
+		"44492|Чары для нагрудника - здоровье VIII|405|425|0|0|1|34055*3|0",
+		"44500|Чары для плаща - ловкость IV|405|425|0|0|1|34054*9|0",
+		"44513|Чары для перчаток - штурм II|405|425|0|0|1|34054*6;34055*1|0",
+		"44612|Чары для перчаток - взрыв II|405|420|0|0|1|34054*30;34052*1|0",
+		"44629|Чары для оружия - сила заклинаний II|405|425|0|0|1|34054*10;34055*2|0",
+		"44635|Чары для наручей - сила заклинаний II|405|425|0|0|1|34054*8;34056*4|0",
+		"60653|Чары для щита - интеллект II|405|425|0|0|1|34054*12|0",
+		"44616|Чары для наручей - все характеристики II|410|430|0|0|1|34054*16;34055*3|0",
+		"47766|Чары для нагрудника - защита II|410|430|0|0|1|34054*10;35624*1|0",
+		"44483|Чары для плаща - сопротивление магии льда|415|435|0|0|1|34054*6;34055*3;36860*1|0",
+		"44484|Чары для перчаток - мастерство|415|435|0|0|1|34054*12|0",
+		"44494|Чары для плаща - сопротивление силам природы II|415|435|0|0|1|34054*15;34055*1;35627*1|0",
+		"44556|Чары для плаща - сопротивление огню IV|415|435|0|0|1|34055*4;35622*1|0",
+		"44584|Чары для обуви - живучесть II|415|435|0|0|1|34054*8;34055*2|0",
+		"44590|Чары для плаща - сопротивление темной магии III|415|435|0|0|1|34054*8;34056*2;35625*1|0",
+		"44596|Чары для плаща - сопротивление тайной магии II|415|435|0|0|1|34054*20;35624*1|0",
+		"44488|Чары для перчаток - точность|420|440|0|0|1|34055*4|0",
+		"44508|Чары для обуви - дух III|420|440|0|0|1|34054*10;34055*1|0",
+		"44510|Чары для оружия - дух II|420|440|0|0|1|34054*16;34052*4|0",
+		"44633|Чары для оружия - ловкость III|420|440|0|0|1|34052*4;35623*4|0",
+		"44529|Чары для перчаток - ловкость IV|425|445|0|0|1|34055*4;34052*1|0",
+		"44589|Чары для обуви - ловкость V|425|445|0|0|1|34054*16;34055*4|0",
+		"44598|Чары для наручей - мастерство|425|445|0|0|1|34054*14;34055*3|0",
+		"44489|Чары для щита - защита|430|450|0|0|1|34054*6;35624*6|0",
+		"44509|Чары для нагрудника - восстановление маны|430|450|0|0|1|34054*4;34055*4|0",
+		"44593|Чары для наручей - дух VI|430|450|0|0|1|34054*16;34055*4|0",
+		"60663|Чары для плаща - ловкость V|430|450|0|0|1|34054*8;34055*2;34052*2|0",
+		"44524|Чары для оружия - ледорез|435|455|0|0|1|34052*4;36860*4|0",
+		"44576|Чары для оружия - оберег|435|455|0|0|1|34052*1;35625*4|0",
+		"44588|Чары для нагрудника - устойчивость II|435|455|0|0|1|34055*2;34052*2|0",
+		"47900|Чары для нагрудника - здоровье IX|435|455|0|0|1|34054*20;34055*4|0",
+		"60619|Рунический титановый жезл|435|455|0|44452|1|41745*1;34054*40;34055*12;34052*8;22463*1|0",
+		"60668|Чары для перчаток - крушитель|435|455|0|0|1|34054*20;34055*4;34052*1|0",
+		"44575|Чары для наручей - штурм II|440|460|0|0|1|34054*24;34055*6|0",
+		"44595|Чары для двуручного оружия - проклятие Плети|440|460|0|0|1|34054*6;34052*6|0",
+		"44621|Чары для оружия - истребитель великанов|440|460|0|0|1|34055*2;34052*6|0",
+		"47672|Чары для плаща - могучая броня|440|460|0|0|1|34054*15;34055*2|0",
+		"47898|Чары для плаща - скорость II|440|460|0|0|1|34054*16;34055*4|0",
+		"60691|Чары для двуручного оружия - резня|440|460|0|0|1|34054*40;34055*6;34057*6|0",
+		"44591|Чары для плаща - ткань титанов|445|465|0|0|1|34054*8;41163*2;34052*2|0",
+		"44625|Чары для перчаток - оружейник|445|465|0|0|1|34052*2;35624*8|0",
+		"60707|Чары для оружия - могущество III|445|465|0|0|1|34054*10;34055*2;34052*2;34057*4|0",
+		"60714|Чары для оружия - сила заклинаний III|445|465|0|0|1|34054*30;34052*6;34057*6|0",
+		"69412|Обледенение Бездны|445|450|0|0|1|34057*1|0",
+		"318464|Космический осколок|450|460|0|74247|1|52721*5|0",
+		"318465|Простая божественная субстанция|450|460|0|52718|1|52555*5|0",
+		"318466|Распыление простой божественная субстанция|450|460|0|52555|3|52718*1|0",
+		"318467|Малый небесный осколок|450|460|0|52720|1|52718*5|0",
+		"318468|Дробление небесного осколока|450|460|0|52719|3|52721*1|0",
+		"318469|Дробление космического осколока|450|460|0|52721|2|74247*1|0",
+		"322527|Дробление космического осколока|450|460|0|52721|3|74247*1|0",
+		"322528|Дробление небесного осколока|450|460|0|52719|3|52721*1|0",
+		"322529|Космический осколок|450|460|0|74247|1|52721*5|0",
+		"322530|Малый небесный осколок|450|460|0|52720|1|52718*5|0",
+		"322531|Простая божественная субстанция|450|460|0|52718|1|52555*5|0",
+		"322532|Распыление простой божественной субстанции|450|460|0|52555|3|52718*1|0",
+		"44631|Чары для плаща - теневая броня|450|470|0|0|1|34054*12;34057*1|0",
+		"47899|Чары для плаща - мудрость|450|470|0|0|1|34055*6;34057*1|0",
+		"47901|Чары для обуви - живучесть клыкарра|450|470|0|0|1|34054*10;34055*2;34052*2|0",
+		"59619|Чары для оружия - меткость|450|470|0|0|1|34054*20;34055*4;34052*4;34057*6|0",
+		"59621|Чары для оружия - берсерк|450|470|0|0|1|34054*12;34055*4;34052*4;34057*10|0",
+		"59625|Чары для оружия - черная магия|450|470|0|0|1|34055*6;34052*6;34057*6|0",
+		"60692|Чары для нагрудника - все характеристики VII|450|470|0|0|1|34052*4;34057*4|0",
+		"60763|Чары для обуви - штурм II|450|470|0|0|1|34055*4;34052*4|0",
+		"60767|Чары для наручей - сила заклинаний III|450|470|0|0|1|34054*6;34055*6;34052*1|0",
+		"318554|Фельярдские чары для обуви - сила|455|470|0|0|1|52555*12;52718*6|0",
+		"318555|Фельярдские чары для обуви - ловкость|455|470|0|0|1|52555*12;52718*6|0",
+		"318556|Фельярдские чары для обуви - выносливость|455|470|0|0|1|52555*12;52718*6|0",
+		"318557|Фельярдские чары для обуви - интеллект|455|470|0|0|1|52555*12;52718*6|0",
+		"318558|Фельярдские чары для обуви - дух|455|470|0|0|1|52555*12;52718*6|0",
+		"318559|Фельярдские чары для обуви - броня|455|470|0|0|1|52555*12;52718*6|0",
+		"318560|Фельярдские чары для обуви - скорость|455|470|0|0|1|52555*12;52718*6|0",
+		"318561|Фельярдские чары для обуви - меткость|455|470|0|0|1|52555*12;52718*6|0",
+		"318562|Фельярдские чары для обуви - пробивание брони|455|470|0|0|1|52555*12;52718*6|0",
+		"318563|Фельярдские чары для обуви - критический удар|455|470|0|0|1|52555*12;52718*6|0",
+		"318564|Фельярдские чары для обуви - восполнение маны|455|470|0|0|1|52555*12;52718*6|0",
+		"318565|Фельярдские чары для обуви - проникающая способность заклинаний|455|470|0|0|1|52555*12;52718*6|0",
+		"318566|Фельярдские чары для обуви - защита|455|470|0|0|1|52555*12;52718*6|0",
+		"318567|Фельярдские чары для обуви - уклонение|455|470|0|0|1|52555*12;52718*6|0",
+		"318568|Фельярдские чары для обуви - парирование|455|470|0|0|1|52555*12;52718*6|0",
+		"318569|Фельярдские чары для обуви - рейтинг блокирования|455|470|0|0|1|52555*12;52718*6|0",
+		"318570|Фельярдские чары для обуви - показатель блокирования|455|470|0|0|1|52555*12;52718*6|0",
+		"318571|Фельярдские чары для обуви - устойчивость|455|470|0|0|1|52555*12;52718*6|0",
+		"318572|Фельярдские чары для обуви - сила атаки|455|470|0|0|1|52555*12;52718*6|0",
+		"318573|Фельярдские чары для обуви - сила заклинаний|455|470|0|0|1|52555*12;52718*6|0",
+		"318574|Фельярдские чары для обуви - сопротивление стихиям|455|470|0|0|1|52555*12;52718*6|0",
+		"318595|Фельярдские чары для обуви - мастерство|455|470|0|0|1|52555*12;52718*6|0",
+		"62948|Чары для посоха - сила заклинаний II|455|465|0|0|1|34054*40;34052*6;34057*6|0",
+		"64441|Чары для оружия - Отведение удара|455|465|0|0|1|34057*4;34055*8;37663*1|0",
+		"64579|Чары для оружия - вытягивание крови|455|465|0|0|1|34057*4;34054*40;36918*1|0",
+		"322533|Чары для плаща - ловкость VII|460|490|0|0|1|52555*45;52718*12|0",
+		"322534|Чары для плаща - выносливость|460|490|0|0|1|52555*45;52718*12|0",
+		"322562|Чары для нагрудника - все характеристики IX|460|490|0|0|1|52719*2;52718*6;52555*9|0",
+		"322570|Чары для обуви - выносливость|460|490|0|0|1|52718*5;52555*30|0",
+		"322582|Чары для перчаток - выносливость|460|490|0|0|1|52718*10;52555*15|0",
+		"322591|Чары для щита - выносливость|460|490|0|0|1|52718*15|0",
+		"322592|Чары для щита - интеллект|460|490|0|0|1|52718*15;52718*12|0",
+		"322627|Чары для наручей - сила VI|460|490|0|0|1|52719*5;52718*12|0",
+		"322628|Чары для наручей - ловкость II|460|490|0|0|1|52719*5;52718*12|0",
+		"322629|Чары для наручей - выносливость VIII|460|490|0|0|1|52719*5;52718*12|0",
+		"322630|Чары для наручей - интеллект V|460|490|0|0|1|52719*5;52718*12|0",
+		"322631|Чары для наручей - дух VIII|460|490|0|0|1|52719*5;52718*12|0",
+		"62256|Чары для наручей - выносливость VI|460|480|0|0|1|34055*4;34057*1|0",
+		"62257|Чары для оружия - титановый страж|460|480|0|0|1|34052*4;37663*1|0",
+		"318533|Фельярдские чары для перчаток - сила|465|480|0|0|1|52555*16;52718*10|0",
+		"318534|Фельярдские чары для перчаток - ловкость|465|480|0|0|1|52555*16;52718*10|0",
+		"318535|Фельярдские чары для перчаток - выносливость|465|480|0|0|1|52555*16;52718*10|0",
+		"318536|Фельярдские чары для перчаток - интеллект|465|480|0|0|1|52555*16;52718*10|0",
+		"318537|Фельярдские чары для перчаток - дух|465|480|0|0|1|52555*16;52718*10|0",
+		"318538|Фельярдские чары для перчаток - броня|465|480|0|0|1|52555*16;52718*10|0",
+		"318539|Фельярдские чары для перчаток - скорость|465|480|0|0|1|52555*16;52718*10|0",
+		"318540|Фельярдские чары для перчаток - меткость|465|480|0|0|1|52555*16;52718*10|0",
+		"318541|Фельярдские чары для перчаток - пробивание брони|465|480|0|0|1|52555*16;52718*10|0",
+		"318542|Фельярдские чары для перчаток - критический удар|465|480|0|0|1|52555*16;52718*10|0",
+		"318543|Фельярдские чары для перчаток - восполнение маны|465|480|0|0|1|52555*16;52718*10|0",
+		"318544|Фельярдские чары для перчаток - проникающая способность заклинаний|465|480|0|0|1|52555*16;52718*10|0",
+		"318545|Фельярдские чары для перчаток - защита|465|480|0|0|1|52555*16;52718*10|0",
+		"318546|Фельярдские чары для перчаток - уклонение|465|480|0|0|1|52555*16;52718*10|0",
+		"318547|Фельярдские чары для перчаток - парирование|465|480|0|0|1|52555*16;52718*10|0",
+		"318548|Фельярдские чары для перчаток - рейтинг блокирования|465|480|0|0|1|52555*16;52718*10|0",
+		"318549|Фельярдские чары для перчаток - показатель блокирования|465|480|0|0|1|52555*16;52718*10|0",
+		"318550|Фельярдские чары для перчаток - устойчивость|465|480|0|0|1|52555*16;52718*10|0",
+		"318551|Фельярдские чары для перчаток - сила атаки|465|480|0|0|1|52555*16;52718*10|0",
+		"318552|Фельярдские чары для перчаток - сила заклинаний|465|480|0|0|1|52555*16;52718*10|0",
+		"318553|Фельярдские чары для перчаток - сопротивление стихиям|465|480|0|0|1|52555*16;52718*10|0",
+		"318594|Фельярдские чары для перчаток - мастерство|465|480|0|0|1|52555*16;52718*10|0",
+		"315384|Иллюзорное масло маны|470|490|0|154169|1|34057*1;34052*2;34054*8;35625*1|0",
+		"315385|Иллюзорное волшебное масло|470|490|0|154170|1|34057*1;34052*2;34054*8;35627*1|0",
+		"318491|Фельярдские чары для нагрудника - сила|475|490|0|0|1|52555*16;52718*10|0",
+		"318492|Фельярдские чары для нагрудника - ловкость|475|490|0|0|1|52555*16;52718*10|0",
+		"318493|Фельярдские чары для нагрудника - выносливость|475|490|0|0|1|52555*16;52718*10|0",
+		"318494|Фельярдские чары для нагрудника - интеллект|475|490|0|0|1|52555*16;52718*10|0",
+		"318495|Фельярдские чары для нагрудника - дух|475|490|0|0|1|52555*16;52718*10|0",
+		"318496|Фельярдские чары для нагрудника - броня|475|490|0|0|1|52555*16;52718*10|0",
+		"318497|Фельярдские чары для нагрудника - скорость|475|490|0|0|1|52555*16;52718*10|0",
+		"318498|Фельярдские чары для нагрудника - меткость|475|490|0|0|1|52555*16;52718*10|0",
+		"318499|Фельярдские чары для нагрудника - пробивание брони|475|490|0|0|1|52555*16;52718*10|0",
+		"318500|Фельярдские чары для нагрудника - критический удар|475|490|0|0|1|52555*16;52718*10|0",
+		"318501|Фельярдские чары для нагрудника - восполнение маны|475|490|0|0|1|52555*16;52718*10|0",
+		"318502|Фельярдские чары для нагрудника - проникающая способность заклинаний|475|490|0|0|1|52555*16;52718*10|0",
+		"318503|Фельярдские чары для нагрудника - защита|475|490|0|0|1|52555*16;52718*10|0",
+		"318504|Фельярдские чары для нагрудника - уклонение|475|490|0|0|1|52555*16;52718*10|0",
+		"318505|Фельярдские чары для нагрудника - парирование|475|490|0|0|1|52555*16;52718*10|0",
+		"318506|Фельярдские чары для нагрудника - рейтинг блокирования|475|490|0|0|1|52555*16;52718*10|0",
+		"318507|Фельярдские чары для нагрудника - показатель блокирования|475|490|0|0|1|52555*16;52718*10|0",
+		"318508|Фельярдские чары для нагрудника - устойчивость|475|490|0|0|1|52555*16;52718*10|0",
+		"318509|Фельярдские чары для нагрудника - сила атаки|475|490|0|0|1|52555*16;52718*10|0",
+		"318510|Фельярдские чары для нагрудника - сила заклинаний|475|490|0|0|1|52555*16;52718*10|0",
+		"318511|Фельярдские чары для нагрудника - сопротивление стихиям|475|490|0|0|1|52555*16;52718*10|0",
+		"318592|Фельярдские чары для нагрудника - мастерство|475|490|0|0|1|52555*16;52718*10|0",
+		"318470|Фельярдские чары для плаща - сила|485|500|0|0|1|52555*18;52718*12|0",
+		"318471|Фельярдские чары для плаща - ловкость|485|500|0|0|1|52555*18;52718*12|0",
+		"318472|Фельярдские чары для плаща - выносливость|485|500|0|0|1|52555*18;52718*12|0",
+		"318473|Фельярдские чары для плаща - интеллект|485|500|0|0|1|52555*18;52718*12|0",
+		"318474|Фельярдские чары для плаща - дух|485|500|0|0|1|52555*18;52718*12|0",
+		"318475|Фельярдские чары для плаща - броня|485|500|0|0|1|52555*18;52718*12|0",
+		"318476|Фельярдские чары для плаща - скорость|485|500|0|0|1|52555*18;52718*12|0",
+		"318477|Фельярдские чары для плаща - меткость|485|500|0|0|1|52555*18;52718*12|0",
+		"318478|Фельярдские чары для плаща - пробивание брони|485|500|0|0|1|52555*18;52718*12|0",
+		"318479|Фельярдские чары для плаща - критический удар|485|500|0|0|1|52555*18;52718*12|0",
+		"318480|Фельярдские чары для плаща - восполнение маны|485|500|0|0|1|52555*18;52718*12|0",
+		"318481|Фельярдские чары для плаща - проникающая способность заклинаний|485|500|0|0|1|52555*18;52718*12|0",
+		"318482|Фельярдские чары для плаща - защита|485|500|0|0|1|52555*18;52718*12|0",
+		"318483|Фельярдские чары для плаща - уклонение|485|500|0|0|1|52555*18;52718*12|0",
+		"318484|Фельярдские чары для плаща - парирование|485|500|0|0|1|52555*18;52718*12|0",
+		"318485|Фельярдские чары для плаща - рейтинг блокирования|485|500|0|0|1|52555*18;52718*12|0",
+		"318486|Фельярдские чары для плаща - показатель блокирования|485|500|0|0|1|52555*18;52718*12|0",
+		"318487|Фельярдские чары для плаща - устойчивость|485|500|0|0|1|52555*18;52718*12|0",
+		"318488|Фельярдские чары для плаща - сила атаки|485|500|0|0|1|52555*18;52718*12|0",
+		"318489|Фельярдские чары для плаща - сила заклинаний|485|500|0|0|1|52555*18;52718*12|0",
+		"318490|Фельярдские чары для плаща - сопротивление стихиям|485|500|0|0|1|52555*18;52718*12|0",
+		"318591|Фельярдские чары для плаща - мастерство|485|500|0|0|1|52555*18;52718*12|0",
+		"322535|Чары для плаща - броня|490|510|0|0|1|52555*135;52718*12|0",
+		"322536|Чары для плаща - скорость III|490|510|0|0|1|52555*135;52718*12|0",
+		"322537|Чары для плаща - меткость|490|510|0|0|1|52555*135;52718*12|0",
+		"322538|Чары для плаща - восполнение маны|490|510|0|0|1|52555*135;52718*12|0",
+		"322539|Чары для плаща - защита|490|510|0|0|1|52555*135;52718*12|0",
+		"322543|Чары для плаща - мастерство|490|510|0|0|1|52555*135;52718*12|0",
+		"322556|Чары для нагрудника - броня|490|510|0|0|1|52719*5;52718*15;52555*45|0",
+		"322557|Чары для нагрудника - меткость|490|510|0|0|1|52719*5;52718*15;52555*45|0",
+		"322558|Чары для нагрудника - восполнение маны III|490|510|0|0|1|52719*5;52718*15;52555*45|0",
+		"322559|Чары для нагрудника - защита IV|490|510|0|0|1|52719*5;52718*15;52555*45|0",
+		"322561|Чары для нагрудника - мастерство|490|510|0|0|1|52719*5;52718*15;52555*45|0",
+		"322571|Чары для обуви - броня|490|510|0|0|1|52718*45;52718*12|0",
+		"322572|Чары для обуви - меткость II|490|510|0|0|1|52718*45;52718*12|0",
+		"322573|Чары для обуви - восполнение маны|490|510|0|0|1|52718*45;52718*12|0",
+		"322583|Чары для перчаток - восполнение маны|490|510|0|0|1|52718*15;52555*90|0",
+		"322584|Чары для перчаток - сила атаки|490|510|0|0|1|52718*15;52555*90|0",
+		"322585|Чары для перчаток - мастерство III|490|510|0|0|1|52718*15;52555*90|0",
+		"322593|Чары для щита - восполнение маны|490|510|0|0|1|52719*10;52718*15|0",
+		"322594|Чары для щита - защита|490|510|0|0|1|52719*10;52718*15|0",
+		"322595|Чары для щита - блокирование|490|510|0|0|1|52719*10;52718*15|0",
+		"322596|Чары для щита - показатель блокирования|490|510|0|0|1|52719*10;52718*15|0",
+		"322632|Чары для наручей - броня|490|510|0|0|1|52719*15;52718*12|0",
+		"322633|Чары для наручей - восполнение маны II|490|510|0|0|1|52719*15;52718*12|0",
+		"322636|Чары для наручей - мастерство III|490|510|0|0|1|52719*15;52718*12|0",
+		"318512|Фельярдские чары для наручей - сила|495|510|0|0|1|52555*20;52718*14|0",
+		"318513|Фельярдские чары для наручей - ловкость|495|510|0|0|1|52555*20;52718*14|0",
+		"318514|Фельярдские чары для наручей - выносливость|495|510|0|0|1|52555*20;52718*14|0",
+		"318515|Фельярдские чары для наручей - интеллект|495|510|0|0|1|52555*20;52718*14|0",
+		"318516|Фельярдские чары для наручей - дух|495|510|0|0|1|52555*20;52718*14|0",
+		"318517|Фельярдские чары для наручей - броня|495|510|0|0|1|52555*20;52718*14|0",
+		"318518|Фельярдские чары для наручей - скорость|495|510|0|0|1|52555*20;52718*14|0",
+		"318519|Фельярдские чары для наручей - меткость|495|510|0|0|1|52555*20;52718*14|0",
+		"318520|Фельярдские чары для наручей - пробивание брони|495|510|0|0|1|52555*20;52718*14|0",
+		"318521|Фельярдские чары для наручей - критический удар|495|510|0|0|1|52555*20;52718*14|0",
+		"318522|Фельярдские чары для наручей - восполнение маны|495|510|0|0|1|52555*20;52718*14|0",
+		"318523|Фельярдские чары для наручей - проникающая способность заклинаний|495|510|0|0|1|52555*20;52718*14|0",
+		"318524|Фельярдские чары для наручей - защита|495|510|0|0|1|52555*20;52718*14|0",
+		"318525|Фельярдские чары для наручей - уклонение|495|510|0|0|1|52555*20;52718*14|0",
+		"318526|Фельярдские чары для наручей - парирование|495|510|0|0|1|52555*20;52718*14|0",
+		"318527|Фельярдские чары для наручей - рейтинг блокирования|495|510|0|0|1|52555*20;52718*14|0",
+		"318528|Фельярдские чары для наручей - показатель блокирования|495|510|0|0|1|52555*20;52718*14|0",
+		"318529|Фельярдские чары для наручей - устойчивость|495|510|0|0|1|52555*20;52718*14|0",
+		"318530|Фельярдские чары для наручей - сила атаки|495|510|0|0|1|52555*20;52718*14|0",
+		"318531|Фельярдские чары для наручей - сила заклинаний|495|510|0|0|1|52555*20;52718*14|0",
+		"318532|Фельярдские чары для наручей - сопротивление стихиям|495|510|0|0|1|52555*20;52718*14|0",
+		"318593|Фельярдские чары для наручей - мастерство|495|510|0|0|1|52555*20;52718*14|0",
+		"250000|Чары для плаща - скорость III|500|510|0|0|1|34054*24;34055*6;22446*6;22445*24|0",
+		"250001|Чары для плаща - могучая броня II|500|510|0|0|1|34054*23;34055*3;22446*3;22445*23|0",
+		"250002|Чары для плаща - ткань титанов II|500|510|0|0|1|34054*12;41163*3;34052*3;22445*12;23447*3|0",
+		"250003|Чары для плаща - мудрость II|500|510|0|0|1|34055*9;34057*2;22446*9;22450*2|0",
+		"250004|Чары для плаща - пронзающие заклинания II|500|510|0|0|1|22445*23;34054*23|0",
+		"250005|Чары для плаща - колосс|500|510|0|0|1|22448*6;22446*3;22456*6;34053*6;34055*3;35627*6|0",
+		"250006|Чары для плаща - ловкость VI|500|510|0|0|1|34054*12;34055*3;34052*3;22445*12;22446*3;22449*3|0",
+		"250007|Чары для плаща - сопротивление V|500|510|0|0|1|34054*16;22445*16;34055*4;22446*4|0",
+		"250012|Чары для нагрудника - защита III|500|510|0|0|1|34054*15;35624*2;22445*15;22452*2|0",
+		"250013|Чары для нагрудника - устойчивость III|500|510|0|0|1|34055*3;34052*3;22446*3;22449*3|0",
+		"250014|Чары для нагрудника - восстановление маны II|500|510|0|0|1|34054*6;34055*6;22445*6;22446*6|0",
+		"250015|Чары для нагрудника - все характеристики VIII|500|510|0|0|1|34052*6;34057*6;22449*6;22450*6|0",
+		"250017|Чары для обуви - стойкость III|500|510|0|0|1|34056*5;34054*5;22447*5;22445*5|0",
+		"250018|Чары для обуви - штурм III|500|510|0|0|1|34055*6;34052*6;22446*6;22449*6|0",
+		"250019|Чары для обуви - живучесть клыкарра II|500|510|0|0|1|34054*15;34055*3;34052*3;22445*15;22446*3;22449*3|0",
+		"250020|Чары для обуви - ледопроходец II|500|510|0|0|1|34054*12;37705*2;22445*12;22578*2|0",
+		"250021|Чары для обуви - ловкость VI|500|510|0|0|1|34054*24;34055*6;22445*24;22446*6|0",
+		"250022|Чары для обуви - дух IV|500|510|0|0|1|34054*15;34055*2;22445*15;22446*2|0",
+		"250024|Чары для перчаток - ловкость V|500|510|0|0|1|34055*4;34052*2;22446*4;22449*2|0",
+		"250025|Чары для перчаток - мастерство II|500|510|0|0|1|34054*18;22445*18|0",
+		"250026|Чары для перчаток - оружейник II|500|510|0|0|1|34052*3;35624*12;22449*3;22452*12|0",
+		"250027|Чары для перчаток - сила заклинаний III|500|510|0|0|1|34054*6;34056*2;22445*6;22447*2|0",
+		"250028|Чары для перчаток - крушитель II|500|510|0|0|1|34054*30;34055*6;34052*2;22445*30;22446*6;22449*2|0",
+		"250030|Чары для щита - блок III|500|510|0|0|1|22445*18;22446*6;22452*15;34054*18;34055*6;35624*15|0",
+		"250031|Чары для щита - выносливость VI|500|510|0|0|1|22445*23;34054*23|0",
+		"250032|Чары для щита - устойчивость II|500|510|0|0|1|22449*2;22447*6;34052*2;34056*6|0",
+		"250033|Чары для щита - защита II|500|510|0|0|1|34054*12;35624*12;22445*12;22452*12|0",
+		"250034|Чары для щита - интеллект III|500|510|0|0|1|34054*18;22445*18|0",
+		"250035|Чары для щита - сопротивление II|500|510|0|0|1|22449*12;22573*5;22574*5;22572*5;22578*5;34052*12|0",
+		"250037|Чары для наручей - все характеристики III|500|510|0|0|1|34054*24;34055*5;22445*24;22446*5|0",
+		"250038|Чары для наручей - мастерство II|500|510|0|0|1|34054*21;34055*4;22445*21;22446*4|0",
+		"250039|Чары для наручей - дух VII|500|510|0|0|1|34054*24;34055*6;22445*24;22446*6|0",
+		"250040|Чары для наручей - штурм III|500|510|0|0|1|34054*36;34055*9;22445*36;22446*9|0",
+		"250041|Чары для наручей - сила заклинаний IV|500|510|0|0|1|34054*9;34055*9;34052*2;22445*9;22446*9;22449*2|0",
+		"250042|Чары для наручей - выносливость VII|500|510|0|0|1|34055*6;34057*2;22446*6;22450*2|0",
+		"250044|Чары для оружия - мангуст II|500|510|0|0|1|22450*9;22449*15;22445*40;34057*9;34052*15;34054*40|0",
+		"250045|Чары для оружия - ловкость IV|500|510|0|0|1|34052*6;35623*6;22449*6;22451*6|0",
+		"250046|Чары для оружия - дух III|500|510|0|0|1|34054*24;34052*4;22445*24;22449*4|0",
+		"250047|Чары для оружия - могущество IV|500|510|0|0|1|34057*8;34052*4;34055*4;22450*8;22449*4;22446*2|0",
+		"250048|Чары для оружия - сила заклинаний IV|500|510|0|0|1|34054*45;34052*6;34057*6;22445*45;22449*6;22450*6|0",
+		"250049|Чары для оружия - берсерк II|500|510|0|0|1|34054*18;34055*6;34052*6;34057*6;22445*18;22450*6;22446*6|0",
+		"250050|Чары для оружия - меткость II|500|510|0|0|1|34054*30;34055*6;34052*6;34057*9;22445*30;22450*6|0",
+		"250053|Чары для двуручного оружия - резня II|500|510|0|0|1|34054*60;34055*9;34057*9;22445*60;22446*9;22450*9|0",
+		"250054|Чары для посоха - сила заклинаний III|500|510|0|0|1|34054*60;34052*9;34057*9;22445*60;22449*9;22450*9|0",
+		"250056|Чары для оружия - черная магия II|500|510|0|0|1|34055*9;34052*9;34057*9;22446*9;22449*9;22450*9|0",
+		"322540|Чары для плаща - сила атаки|500|520|0|0|1|52555*225;52718*12|0",
+		"322541|Чары для плаща - сила заклинаний|500|520|0|0|1|52555*225;52718*12|0",
+		"322542|Чары для плаща - сопротивление VI|500|520|0|0|1|52555*225;52718*12|0",
+		"322560|Чары для нагрудника - устойчивость IV|500|520|0|0|1|52719*10;52718*30;52555*45|0",
+		"322574|Чары для обуви - сила атаки|500|520|0|0|1|52719*15;52555*90|0",
+		"322575|Чары для обуви - сила заклинаний|500|520|0|0|1|52719*15;52555*90|0",
+		"322597|Чары для щита - устойчивость|500|520|0|0|1|52719*25;52718*12|0",
+		"322598|Чары для щита - сила заклинаний|500|520|0|0|1|52719*25;52718*12|0",
+		"322599|Чары для щита - сопротивление VI|500|520|0|0|1|52719*25;52718*12|0",
+		"322617|Чары для одноручного оружия - руническая вязь Нарфи|500|520|0|0|1|74247*3;52720*6;52719*9;102351*1|0",
+		"322626|Чары для двуручного оружия - руническая вязь Нарфи|500|520|0|0|1|74247*6;52720*12;52719*18;102351*2|0",
+		"322634|Чары для наручей - сила атаки|500|520|0|0|1|52719*15;52718*30|0",
+		"322635|Чары для наручей - сила заклинаний V|500|520|0|0|1|52719*15;52718*30|0",
+		"318575|Фельярские чары для одноручного оружия - дыхание Сиф|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318576|Фельярские чары для одноручного оружия - проклятие Имирона|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318577|Фельярские чары для одноручного оружия - увядание Галдора|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318578|Фельярские чары для одноручного оружия - благодать Ранульфа|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318579|Фельярские чары для одноручного оружия - пламя Фенгира|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318580|Фельярские чары для одноручного оружия - оберег Исулдофа|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318581|Фельярские чары для одноручного оружия - мощь Бьорна|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318582|Фельярские чары для одноручного оружия - чародейство Квалда|505|515|0|0|1|52555*25;52719*7;52721*6;74247*2|0",
+		"318692|Фельярдские чары для щита - сила|505|515|0|0|1|52555*12;52718*6|0",
+		"318693|Фельярдские чары для щита - выносливость|505|515|0|0|1|52555*12;52718*6|0",
+		"318694|Фельярдские чары для щита - интеллект|505|515|0|0|1|52555*12;52718*6|0",
+		"318695|Фельярдские чары для щита - дух|505|515|0|0|1|52555*12;52718*6|0",
+		"318696|Фельярдские чары для щита - броня|505|515|0|0|1|52555*12;52718*6|0",
+		"318697|Фельярдские чары для щита - скорость|505|515|0|0|1|52555*12;52718*6|0",
+		"318698|Фельярдские чары для щита - меткость|505|515|0|0|1|52555*12;52718*6|0",
+		"318699|Фельярдские чары для щита - пробивание брони|505|515|0|0|1|52555*12;52718*6|0",
+		"318700|Фельярдские чары для щита - критический удар|505|515|0|0|1|52555*12;52718*6|0",
+		"318701|Фельярдские чары для щита - мастерство|505|515|0|0|1|52555*12;52718*6|0",
+		"318702|Фельярдские чары для щита - восполнение маны|505|515|0|0|1|52555*12;52718*6|0",
+		"318703|Фельярдские чары для щита - проникающая способность заклинаний|505|515|0|0|1|52555*12;52718*6|0",
+		"318704|Фельярдские чары для щита - защита|505|515|0|0|1|52555*12;52718*6|0",
+		"318705|Фельярдские чары для щита - уклонение|505|515|0|0|1|52555*12;52718*6|0",
+		"318706|Фельярдские чары для щита - парирование|505|515|0|0|1|52555*12;52718*6|0",
+		"318707|Фельярдские чары для щита - рейтинг блокирования|505|515|0|0|1|52555*12;52718*6|0",
+		"318708|Фельярдские чары для щита - показатель блокирования|505|515|0|0|1|52555*12;52718*6|0",
+		"318709|Фельярдские чары для щита - устойчивость|505|515|0|0|1|52555*12;52718*6|0",
+		"318710|Фельярдские чары для щита - сила заклинаний|505|515|0|0|1|52555*12;52718*6|0",
+		"318711|Фельярдские чары для щита - сопротивление стихиям|505|515|0|0|1|52555*12;52718*6|0",
+		"322544|Чары для плаща - ловкость VIII|510|530|0|0|1|52720*5;52555*338|0",
+		"322545|Чары для плаща - выносливость II|510|530|0|0|1|52720*5;52555*338|0",
+		"322546|Чары для плаща - броня II|510|530|0|0|1|52720*5;52555*338|0",
+		"322547|Чары для плаща - скорость IV|510|530|0|0|1|52720*5;52555*338|0",
+		"322548|Чары для плаща - меткость II|510|530|0|0|1|52720*5;52555*338|0",
+		"322549|Чары для плаща - мастерство II|510|530|0|0|1|52720*5;52555*338|0",
+		"322550|Чары для плаща - восполнение маны II|510|530|0|0|1|52720*5;52555*338|0",
+		"322551|Чары для плаща - пронзающие заклинания III|510|530|0|0|1|52720*5;52555*338|0",
+		"322552|Чары для плаща - защита II|510|530|0|0|1|52720*5;52555*338|0",
+		"322553|Чары для плаща - сила атаки II|510|530|0|0|1|52720*5;52555*338|0",
+		"322554|Чары для плаща - сила заклинаний II|510|530|0|0|1|52720*5;52555*338|0",
+		"322555|Чары для плаща - сопротивление VII|510|530|0|0|1|52720*5;52555*338|0",
+		"322563|Чары для нагрудника - все характеристики X|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322564|Чары для нагрудника - броня II|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322565|Чары для нагрудника - меткость II|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322566|Чары для нагрудника - мастерство II|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322567|Чары для нагрудника - восполнение маны IV|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322568|Чары для нагрудника - защита V|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322569|Чары для нагрудника - устойчивость V|510|530|0|0|1|52721*5;52719*10;52718*30;52555*90|0",
+		"322576|Чары для обуви - выносливость II|510|530|0|0|1|52720*5;52719*38|0",
+		"322577|Чары для обуви - броня II|510|530|0|0|1|52720*5;52719*38|0",
+		"322578|Чары для обуви - меткость III|510|530|0|0|1|52720*5;52719*38|0",
+		"322579|Чары для обуви - восполнение маны II|510|530|0|0|1|52720*5;52719*38|0",
+		"322580|Чары для обуви - сила атаки II|510|530|0|0|1|52720*5;52719*38|0",
+		"322581|Чары для обуви - сила заклинаний II|510|530|0|0|1|52720*5;52719*38|0",
+		"322586|Чары для перчаток - выносливость II|510|530|0|0|1|52720*5;52718*112|0",
+		"322587|Чары для перчаток - мастерство IV|510|530|0|0|1|52720*5;52718*112|0",
+		"322588|Чары для перчаток - восполнение маны II|510|530|0|0|1|52720*5;52718*112|0",
+		"322589|Чары для перчаток - сила атаки II|510|530|0|0|1|52720*5;52718*112|0",
+		"322590|Чары для перчаток - сила заклинаний IV|510|530|0|0|1|52720*5;52718*112|0",
+		"322600|Чары для щита - выносливость II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322601|Чары для щита - интеллект II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322602|Чары для щита - показатель блокирования II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322603|Чары для щита - устойчивость II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322604|Чары для щита - сила заклинаний II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322605|Чары для щита - сопротивление VII|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322606|Чары для щита - восполнение маны II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322607|Чары для щита - защита II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322608|Чары для щита - блокирование II|510|530|0|0|1|52720*5;52718*45;52555*202|0",
+		"322609|Чары для одноручного оружия - дыхание Сиф|510|530|0|0|1|74247*3;52720*6;52719*9;102351*1|0",
+		"322610|Чары для одноручного оружия - проклятие Имирона|510|530|0|0|1|74247*3;52720*6;52718*27;102351*1|0",
+		"322611|Чары для одноручного оружия - увядание Галдора|510|530|0|0|1|74247*1;52721*9;52555*81;102351*1|0",
+		"322612|Чары для одноручного оружия - благодать Ранульфа|510|530|0|0|1|74247*1;52721*9;52719*9;102351*1|0",
+		"322613|Чары для одноручного оружия - пламя Фенгира|510|530|0|0|1|74247*3;52720*6;52555*81|0",
+		"322614|Чары для одноручного оружия - оберег Исулдофа|510|530|0|0|1|74247*3;52720*6;52719*9;102351*1|0",
+		"322615|Чары для одноручного оружия - мощь Бьорна|510|530|0|0|1|74247*3;52720*6;52718*27;102351*1|0",
+		"322616|Чары для одноручного оружия - чародейство Квалда|510|530|0|0|1|74247*1;52721*9;52555*81;102351*1|0",
+		"322618|Чары для двуручного оружия - дыхание Сиф|510|530|0|0|1|74247*6;52720*12;52719*18;102351*2|0",
+		"322619|Чары для двуручного оружия - проклятие Имирона|510|530|0|0|1|74247*6;52720*12;52718*54;102351*2|0",
+		"322620|Чары для двуручного оружия - увядание Галдора|510|530|0|0|1|74247*2;52721*18;52555*162;102351*2|0",
+		"322621|Чары для двуручного оружия - благодать Ранульфа|510|530|0|0|1|74247*2;52721*18;52719*18;102351*2|0",
+		"322622|Чары для двуручного оружия - пламя Фенгира|510|530|0|0|1|74247*6;52720*12;52555*162|0",
+		"322623|Чары для двуручного оружия - оберег Исулдофа|510|530|0|0|1|74247*6;52720*12;52719*18;102351*2|0",
+		"322624|Чары для двуручного оружия - мощь Бьорна|510|530|0|0|1|74247*6;52720*12;52718*54;102351*2|0",
+		"322625|Чары для двуручного оружия - чародейство Квалда|510|530|0|0|1|74247*2;52721*18;52555*162;102351*2|0",
+		"322637|Чары для наручей - сила VII|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322638|Чары для наручей - ловкость III|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322639|Чары для наручей - выносливость IX|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322640|Чары для наручей - интеллект VI|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322641|Чары для наручей - дух IX|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322642|Чары для наручей - броня II|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322643|Чары для наручей - мастерство IV|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322644|Чары для наручей - восполнение маны III|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322645|Чары для наручей - сила атаки II|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"322646|Чары для наручей - сила заклинаний VI|510|530|0|0|1|52720*5;52719*15;52555*202|0",
+		"318583|Фельярские чары для двуручного оружия - дыхание Сиф|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318584|Фельярские чары для двуручного оружия - проклятие Имирона|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318585|Фельярские чары для двуручного оружия - увядание Галдора|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318586|Фельярские чары для двуручного оружия - благодать Ранульфа|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318587|Фельярские чары для двуручного оружия - пламя Фенгира|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318588|Фельярские чары для двуручного оружия - оберег Исулдофа|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318589|Фельярские чары для двуручного оружия - мощь Бьорна|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318590|Фельярские чары для двуручного оружия - чародейство Квалда|515|525|0|0|1|52555*50;52719*14;52721*12;74247*4|0",
+		"318619|Поводья манапарда чародея|535|545|0|153421|1|52555*100;52719*50;74247*10;102351*1|0",
+	},
+	[755] = {
+		"25255|Тонкая медная проволока|20|50|1|20816|1|2840*2|0",
+		"25493|Оплетенное медное кольцо|30|60|1|20906|1|20816*2|0",
+		"26925|Плетеное медное кольцо|30|60|1|21931|1|20816*2;2840*1|0",
+		"32259|Статуя из грубого камня|30|50|1|25498|1|2835*8|0",
+		"26926|Тяжелое медное кольцо|35|65|0|21932|1|2840*4;20816*2|0",
+		"32178|Малахитовая подвеска|50|80|0|25438|1|774*1;20816*1|0",
+		"32179|Кольцо с тигровым глазом|50|80|0|25439|1|818*1;20816*1|0",
+		"25283|Инкрустированное малахитом кольцо|60|90|0|20821|1|774*2;2840*2|0",
+		"26928|Изысканное ожерелье тигрового глаза|60|90|0|21934|1|818*2;2840*2;20816*1|0",
+		"25278|Бронзовая оправа|70|90|0|20817|1|2841*2|0",
+		"32801|Статуя из необработанного камня|70|90|0|25880|1|2836*8|0",
+		"25280|Элегантное серебряное кольцо|80|110|0|20818|1|2842*1|0",
+		"25490|Цельное бронзовое кольцо|80|110|0|20907|1|2841*4|0",
+		"26927|Толстое бронзовое ожерелье|80|110|0|21933|1|2841*2;1210*1;20816*1|0",
+		"25284|Простое жемчужное кольцо|90|120|0|20820|1|5498*1;20817*1;2840*2|0",
+		"37818|Бронзовое кольцо силы|95|125|0|30804|1|2841*2;20817*1;774*3;818*3;1210*2|0",
+		"25287|Мрачное кольцо|100|130|0|20823|1|1210*2;20817*1;20816*2|0",
+		"36523|Сверкающее ожерелье|105|135|0|30419|1|2841*4;20817*1;1206*1|0",
+		"25317|Серебряное кольцо могущества|110|140|0|20827|1|2842*2|0",
+		"38175|Бронзовое ожерелье|110|140|0|31154|1|2841*6;20817*1;1705*1|0",
+		"25305|Тяжелое серебряное кольцо|120|150|0|20826|1|2842*2;20817*1;1206*1;1705*1|0",
+		"32807|Массивная каменная статуя|120|140|0|25881|1|2838*8|0",
+		"25318|Кольцо сумеречных призраков|130|160|0|20828|1|1210*2;2841*2|0",
+		"36524|Тяжелое нефритовое кольцо|135|165|0|30420|1|1529*1;20817*1;3575*2|0",
+		"25339|Амулет Луны|140|170|0|20830|1|1705*2;20817*1|0",
+		"25498|Варварский железный ошейник|140|170|0|20909|1|3575*8;5637*2;20817*2|0",
+		"25321|Корона лунной души|150|180|0|20832|1|1705*3;5498*3;11083*4;2842*4;3827*2|0",
+		"25610|Подвеска Агатового Щита|150|180|0|20950|1|1206*1;20817*1|0",
+		"25323|Гибельное кольцо лунного камня|155|185|0|20833|1|1705*1;3824*1;3575*4|0",
+		"25612|Тяжелый железный кастет|155|185|0|20954|1|3575*8;3391*2|0",
+		"25613|Кольцо золотого дракона|165|195|0|20955|1|1529*1;3577*2;20816*2|0",
+		"25615|Мифриловая филигрань|170|190|0|20963|1|3860*2|0",
+		"25614|Подвеска серебряной розы|175|205|0|20956|1|1206*1;1529*1;2842*2;20817*2|0",
+		"32808|Твердая каменная статуя|175|195|0|25882|1|7912*10|0",
+		"25320|Тяжелое золотое ожерелье битвы|180|210|0|20831|1|3577*1;1206*2;3391*1|0",
+		"25617|Пылающее цитриновое кольцо|180|210|0|20958|1|3864*1;20963*1|0",
+		"25618|Нефритовая подвеска взрыва|190|220|0|20966|1|1529*1;20963*2|0",
+		"34955|Золотое кольцо власти|190|210|0|29157|1|3577*4;1705*1;1529*1;3864*1|0",
+		"25619|Нефритовое око|200|230|0|20959|1|1529*1;7067*2|0",
+		"25620|Чеканное кольцо из истинного серебра|200|230|0|20960|1|6037*1;20963*2|0",
+		"25621|Цитриновое кольцо быстрого исцеления|210|240|0|20961|1|3864*1;3860*2|0",
+		"34959|Кольцо командора из истинного серебра|210|230|0|29158|1|6037*3;7910*2;3864*2|0",
+		"63743|Амулет проницательности|210|230|0|45627|1|6037*8|0",
+		"25622|Цитриновая подвеска исцеления|220|250|0|20967|1|3864*1;7070*2;3577*2;20817*1|0",
+		"26872|Статуэтка нефритовой совы|225|255|0|21748|1|1529*4;6037*2;11137*4;20963*4|0",
+		"26873|Статуэтка золотого зайца|225|255|0|21756|1|3577*6;3864*2|0",
+		"32809|Статуя из массивного камня|225|245|0|25883|1|12365*10|0",
+		"26874|Аквамариновый перстень|235|265|0|20964|1|7909*3;8151*4|0",
+		"26880|Ториевая оправа|235|255|0|21752|1|12359*1|0",
+		"26875|Статуэтка пантеры из черного жемчуга|240|270|0|21758|1|7971*4;8151*4|0",
+		"26876|Аквамариновая подвеска воина|245|275|0|21755|1|7909*1;20963*3|0",
+		"26878|Рубиновая корона восстановления|250|280|0|20969|1|7910*2;7971*2;6037*4;21752*4;6149*4|0",
+		"26881|Статуэтка краба из истинного серебра|250|280|0|21760|1|7909*2;6037*4;7075*2;7079*2;8151*4|0",
+		"36525|Красное кольцо разрушения|255|285|0|30421|1|7910*1;21752*1|0",
+		"26882|Статуэтка вепря из истинного серебра|260|290|0|21763|1|7910*2;6037*4;7077*2;7081*2;8151*4|0",
+		"26883|Рубиновая подвеска огня|260|290|0|21764|1|7910*1;21752*1|0",
+		"26885|Целительное кольцо из истинного серебра|265|295|0|21765|1|6037*2;10286*2|0",
+		"26887|Аквамариновый оберег|270|300|0|21754|1|7909*1;21752*1|0",
+		"26896|Украшенное самоцветами кольцо|275|305|0|21753|1|7909*2;3864*2;21752*4;6037*2|0",
+		"26897|Опаловое ожерелье столкновения|275|305|0|21766|1|12799*2;21752*2;6037*4;11178*2;20963*2|0",
+		"26900|Статуэтка рубиновой змеи|280|300|0|21769|1|7910*2;7078*2;8152*4;6037*2|0",
+		"26902|Простое опаловое кольцо|280|300|0|21767|1|12799*1;21752*1|0",
+		"26903|Сапфировый перстень|285|305|0|21768|1|12361*4;6037*2;21752*1|0",
+		"26906|Изумрудная корона разрушения|285|305|0|21774|1|12364*2;12799*2;12361*2;12360*2;12359*2|0",
+		"36526|Бриллиантовое кольцо концентрации|285|305|0|30422|1|12800*1;21752*1|0",
+		"26907|Кольцо нападения|290|310|0|21775|1|21752*1;12804*1;7076*1|0",
+		"26908|Сапфировая подвеска зимней ночи|290|310|0|21790|1|12361*1;12808*1;21752*1|0",
+		"34960|Светящееся ториевое кольцо|290|310|0|29159|1|12800*2;21752*1|0",
+		"26909|Статуэтка изумрудной совы|295|315|0|21777|1|12364*2;12360*2;12359*2;12804*4|0",
+		"26910|Кольцо жестоких теней|295|315|0|21778|1|12363*1;12808*2;12662*1|0",
+		"26911|Подвеска из животворного изумруда|300|320|0|21791|1|12364*2;12803*4;12804*4|0",
+		"28903|Каплевидный кровавый гранат|300|340|0|23094|1|23077*1|0",
+		"28910|Покрытый письменами пламенный спессарит|300|340|0|23098|1|21929*1|0",
+		"28916|Светозарный хризолит|300|340|0|23103|1|23079*1|0",
+		"28925|Светящийся сумрачный дренит|300|340|0|23108|1|23107*1|0",
+		"28938|Сверкающий золотой дренит|300|340|0|23113|1|23112*1|0",
+		"28950|Цельный лазурный лунный камень|300|340|0|23118|1|23117*1|0",
+		"32810|Изначальная каменная статуя|300|320|0|25884|1|22452*1|0",
+		"34961|Изумрудное кольцо льва|300|320|0|29160|1|12364*2;21752*1|0",
+		"28905|Рельефный кровавый гранат|305|345|0|23095|1|23077*1|0",
+		"28912|Светоносный пламенный спессарит|305|345|0|23099|1|21929*1|0",
+		"28917|Зазубренный хризолит|305|345|0|23104|1|23079*1|0",
+		"28927|Королевский сумрачный дренит|305|345|0|23109|1|23107*1|0",
+		"28944|Искристый золотой дренит|305|345|0|23114|1|23112*1|0",
+		"28953|Искрящийся лазурный лунный камень|305|345|0|23119|1|23117*1|0",
+		"34590|Яркий кровавый гранат|305|345|0|28595|1|23077*1|0",
+		"26912|Статуэтка черного алмазного краба|310|330|0|21784|1|18335*4;11754*4;12800*2;12360*2;12359*4|0",
+		"26914|Статуэтка скорпида из черного железа|310|330|0|21789|1|11371*4;12360*2;7910*2|0",
+		"62941|Радужный черный бриллиант|310|320|0|0|1|11754*1|0",
+		"26915|Ожерелье Адамантовой башни|315|335|0|21792|1|12800*2;21752*2;12360*2|0",
+		"28906|Рунический кровавый гранат|315|355|0|23096|1|23077*1|0",
+		"28914|Блистающий пламенный спессарит|315|355|0|23100|1|21929*1|0",
+		"28918|Отверделый хризолит|315|355|0|23105|1|23079*1|0",
+		"28933|Изменчивый сумрачный дренит|315|355|0|23110|1|23107*1|0",
+		"28947|Матовый золотой дренит|315|355|0|23115|1|23112*1|0",
+		"28955|Грозовой лазурный лунный камень|315|355|0|23120|1|23117*1|0",
+		"26916|Кольцо природного огня|320|340|0|21779|1|21929*1;7078*4;12803*4|0",
+		"31048|Кровавое кольцо из оскверненного железа|320|340|0|24074|1|23445*1;23077*2|0",
+		"31049|Золотое кольцо с дренитом|320|350|0|24075|1|23445*1;23112*2|0",
+		"26918|Подвеска из арканитового меча|325|345|0|21793|1|12360*4;7076*4;7082*4|0",
+		"28907|Изысканный кровавый гранат|325|355|0|23097|1|23077*1|0",
+		"28915|Могущественный пламенный спессарит|325|355|0|23101|1|21929*1|0",
+		"28924|Ослепительный хризолит|325|355|0|23106|1|23079*1|0",
+		"28936|Царственный сумрачный дренит|325|355|0|23111|1|23107*1|0",
+		"28948|Прочный золотой дренит|325|355|0|23116|1|23112*1|0",
+		"28957|Блестящий лазурный лунный камень|325|355|0|23121|1|23117*1|0",
+		"34069|Гладкий золотой дренит|325|355|0|28290|1|23112*1|0",
+		"38068|Переменчивый адамантит|325|345|0|31079|1|24243*4;22452*1|0",
+		"39451|Великий золотой дренит|325|355|0|31860|1|23112*1|0",
+		"39455|Сбалансированный сумрачный дренит|325|355|0|31862|1|23107*1|0",
+		"39458|Заряженный сумрачный дренит|325|355|0|31864|1|23107*1|0",
+		"39466|Сокрытый пламенный спессарит|325|355|0|31866|1|21929*1|0",
+		"39467|Гибельный пламенный спессарит|325|355|0|31869|1|21929*1|0",
+		"41420|Очищенная жемчужина джаггала|325|340|0|32833|1|24478*1;27860*1|0",
+		"31050|Лазурное кольцо из лунного камня|330|350|0|24076|1|23445*1;23117*2;23079*1|0",
+		"26920|Корона Крови|335|355|0|21780|1|12359*8;11382*2;7910*4;12938*2|0",
+		"41414|Сверкающее жемчужное кольцо|335|355|0|32772|1|24478*8;23447*2|0",
+		"40514|Ожерелье глубин|340|370|0|32508|1|22578*3;24478*10;24479*1|0",
+		"41415|Черная жемчужина|340|360|0|32774|1|24479*1;31079*4|0",
+		"31051|Толстое адамантитовое ожерелье|345|365|0|24077|1|23446*2;31079*1|0",
+		"31052|Тяжелое адамантитовое кольцо|345|365|0|24078|1|23446*1;31079*1|0",
+		"31084|Рельефный животворный рубин|350|380|0|24027|1|23436*1|0",
+		"31085|Изысканный животворный рубин|350|380|0|24028|1|23436*1|0",
+		"31087|Каплевидный животворный рубин|350|380|0|24029|1|23436*1|0",
+		"31088|Рунический животворный рубин|350|380|0|24030|1|23436*1|0",
+		"31089|Яркий животворный рубин|350|380|0|24031|1|23436*1|0",
+		"31090|Изящный животворный рубин|350|380|0|24032|1|23436*1|0",
+		"31091|Блистательный животворный рубин|350|380|0|24036|1|23436*1|0",
+		"31092|Цельная звезда Элуны|350|380|0|24033|1|23438*1|0",
+		"31094|Блестящая Звезда Элуны|350|380|0|24037|1|23438*1|0",
+		"31095|Грозовая Звезда Элуны|350|380|0|24039|1|23438*1|0",
+		"31096|Сверкающий зоревик|350|380|0|24047|1|23440*1|0",
+		"31097|Гладкий зоревик|350|380|0|24048|1|23440*1|0",
+		"31098|Прочный зоревик|350|380|0|24051|1|23440*1|0",
+		"31099|Искристый зоревик|350|380|0|24050|1|23440*1|0",
+		"31100|Матовый зоревик|350|380|0|24052|1|23440*1|0",
+		"31101|Мистический зоревик|350|380|0|24053|1|23440*1|0",
+		"31102|Царственное око ночи|350|380|0|24054|1|23441*1|0",
+		"31103|Изменчивое око ночи|350|380|0|24055|1|23441*1|0",
+		"31104|Светящееся око ночи|350|380|0|24056|1|23441*1|0",
+		"31105|Королевское око ночи|350|380|0|24057|1|23441*1|0",
+		"31106|Покрытый письменами благородный топаз|350|380|0|24058|1|23439*1|0",
+		"31107|Могущественный благородный топаз|350|380|0|24059|1|23439*1|0",
+		"31108|Светоносный благородный топаз|350|380|0|24060|1|23439*1|0",
+		"31109|Блистающий благородный топаз|350|380|0|24061|1|23439*1|0",
+		"31110|Отверделый талассит|350|380|0|24062|1|23437*1|0",
+		"31111|Светозарный талассит|350|380|0|24066|1|23437*1|0",
+		"31112|Ослепительный талассит|350|380|0|24065|1|23437*1|0",
+		"31113|Зазубренный талассит|350|380|0|24067|1|23437*1|0",
+		"31149|Искрящаяся Звезда Элуны|350|380|0|24035|1|23438*1|0",
+		"39452|Великий зоревик|350|380|0|31861|1|23440*1|0",
+		"39462|Заряженное око ночи|350|380|0|31865|1|23441*1|0",
+		"39463|Сбалансированное око ночи|350|380|0|31863|1|23441*1|0",
+		"39470|Сокрытый благородный топаз|350|380|0|31867|1|23439*1|0",
+		"39471|Гибельный благородный топаз|350|380|0|31868|1|23439*1|0",
+		"41429|Очищенная сумрачная жемчужина|350|380|0|32836|1|24479*1;27860*1|0",
+		"43493|Неизменный талассит|350|380|0|33782|1|23437*1|0",
+		"46403|Мягкий зоревик|350|380|0|35315|1|23440*1|0",
+		"46404|Тревожный благородный топаз|350|380|0|35316|1|23439*1|0",
+		"46405|Мощный талассит|350|380|0|35318|1|23437*1|0",
+		"46803|Монаршее око ночи|350|380|0|35707|1|23441*1|0",
+		"47280|Сверкающая драгоценность|350|380|0|35945|1|23117*3;23077*3;23079*3;21929*3;23112*3;23107*3|1",
+		"31058|Тяжелое кольцо из оскверненной стали|355|375|0|24087|1|23448*2;31079*4|0",
+		"31053|Кориевое кольцо теней|360|380|0|24079|1|23449*2;31079*3;22456*3|0",
+		"56205|Фокусирующая линза из темного нефрита|360|380|0|41367|1|36932*1|0",
+		"31054|Кориевое кольцо льда|365|380|0|24080|1|23449*2;31079*4;21885*3|0",
+		"31055|Инфернальное кориевое кольцо|365|380|0|24082|1|23449*2;31079*4;21884*3|0",
+		"31060|Изысканное этерниевое кольцо|365|385|0|24088|1|23447*1;31079*5|0",
+		"31067|Толстое ожерелье из оскверненной стали|365|385|0|24106|1|23448*2;31079*3|0",
+		"31068|Подвеска из животворного рубина|365|385|0|24110|1|23449*4;31079*1;23436*1|0",
+		"42558|Сердце дона Хулио|365|375|0|33133|1|23436*1|0",
+		"42588|Роза Кайли|365|375|0|33134|1|23436*1|0",
+		"42589|Пунцовое солнце|365|375|0|33131|1|23436*1|0",
+		"42590|Падающая звезда|365|375|0|33135|1|23438*1|0",
+		"42591|Камень клинков|365|375|0|33143|1|23440*1|0",
+		"42592|Янтарная кровь|365|375|0|33140|1|23440*1|0",
+		"42593|Грань вечности|365|375|0|33144|1|23440*1|0",
+		"31056|Кориевое кольцо листвы|370|380|0|24085|1|23449*2;31079*4;21886*3|0",
+		"31057|Кориевое кольцо тайной магии|370|380|0|24086|1|23449*2;31079*4;22457*3|0",
+		"31062|Подвеска замерзшего пламени|370|380|0|24092|1|23448*2;21885*6;21884*4;31079*1|0",
+		"31063|Подвеска Оттепели|370|380|0|24093|1|23448*2;21884*6;21885*4;31079*1|0",
+		"31064|Подвеска увядания|370|380|0|24095|1|23448*2;22456*6;21886*4;31079*1|0",
+		"31065|Подвеска края теней|370|380|0|24097|1|23448*2;21886*6;22456*4;31079*1|0",
+		"31066|Подвеска пустой руны|370|380|0|24098|1|23448*2;22457*8;31079*1|0",
+		"31070|Оплетенная этерниевая кольчуга|370|385|0|24114|1|23447*2;31079*3|0",
+		"31071|Око ночи|370|380|0|24116|1|23573*2;31079*2;23441*1|0",
+		"37855|Кольцо чародейской защиты|370|380|0|30825|1|23447*2;22457*8|0",
+		"56206|Фокусирующая линза из сумрачного кристалла|370|390|0|42420|1|36926*1|0",
+		"31061|Пылающее этерниевое кольцо|375|380|0|24089|1|23447*2;31079*4;21884*4|0",
+		"31072|Объятия рассвета|375|385|0|24117|1|23447*2;31079*4;23112*2|0",
+		"31076|Цепь Сумеречной Совы|375|385|0|24121|1|23449*2;31079*4;23117*2|0",
+		"31077|Венок Зеленого Пламени|375|385|0|24122|1|23449*20;21886*20;23437*2;31079*5|0",
+		"31078|Венец Чародейской мощи|375|385|0|24123|1|23448*20;22457*20;23438*2;31079*5|0",
+		"31079|Статуэтка вепря из оскверненной стали|375|385|0|24124|1|23448*8;23077*2;22452*4|0",
+		"31080|Статуэтка краба из зоревика|375|385|0|24125|1|23449*4;23440*2;23112*4|0",
+		"31081|Статуэтка змеи из животворного рубина|375|385|0|24126|1|23448*2;23436*2;21884*4|0",
+		"31082|Статуэтка таласситовой совы|375|385|0|24127|1|23447*2;23437*2;22457*4|0",
+		"31083|Статуэтка пантеры из ока ночи|375|385|0|24128|1|23573*6;23441*2;22456*2|0",
+		"32866|Могущественный алмаз земной бури|375|380|0|25896|1|25867*1|0",
+		"32867|Нерушимый алмаз земной бури|375|380|0|25897|1|25867*1|0",
+		"32868|Крепкий алмаз земной бури|375|380|0|25898|1|25867*1|0",
+		"32869|Грубый алмаз земной бури|375|380|0|25899|1|25867*1|0",
+		"32870|Провидческий алмаз земной бури|375|380|0|25901|1|25867*1|0",
+		"32871|Разрушительный алмаз небесного огня|375|380|0|25890|1|25868*1|0",
+		"32872|Мистический алмаз небесного огня|375|380|0|25893|1|25868*1|0",
+		"32873|Стремительный алмаз небесного огня|375|380|0|25894|1|25868*1|0",
+		"32874|Загадочный алмаз небесного огня|375|380|0|25895|1|25868*1|0",
+		"38503|Застывшее око|375|385|0|31398|1|31079*4;23449*2;21885*6;21884*6|0",
+		"38504|Природный оберег|375|385|0|31399|1|31079*4;23448*2;21886*6;22456*6|0",
+		"39705|Рельефная пунцовая шпинель|375|385|0|32193|1|32227*1|0",
+		"39706|Изысканная пунцовая шпинель|375|385|0|32194|1|32227*1|0",
+		"39710|Каплевидная пунцовая шпинель|375|385|0|32195|1|32227*1|0",
+		"39711|Руническая пунцовая шпинель|375|385|0|32196|1|32227*1|0",
+		"39712|Яркая пунцовая шпинель|375|385|0|32197|1|32227*1|0",
+		"39713|Изящная пунцовая шпинель|375|385|0|32198|1|32227*1|0",
+		"39714|Блистательная пунцовая шпинель|375|385|0|32199|1|32227*1|0",
+		"39715|Цельный неземной сапфир|375|385|0|32200|1|32228*1|0",
+		"39716|Искрящийся неземной сапфир|375|385|0|32201|1|32228*1|0",
+		"39717|Блестящий неземной сапфир|375|385|0|32202|1|32228*1|0",
+		"39718|Грозовой неземной сапфир|375|385|0|32203|1|32228*1|0",
+		"39719|Сверкающий львиный глаз|375|385|0|32204|1|32229*1|0",
+		"39720|Гладкий львиный глаз|375|385|0|32205|1|32229*1|0",
+		"39721|Прочный львиный глаз|375|385|0|32206|1|32229*1|0",
+		"39722|Искристый львиный глаз|375|385|0|32207|1|32229*1|0",
+		"39723|Матовый львиный глаз|375|385|0|32208|1|32229*1|0",
+		"39724|Мистический львиный глаз|375|385|0|32209|1|32229*1|0",
+		"39725|Великий львиный глаз|375|385|0|32210|1|32229*1|0",
+		"39727|Царственный аметист Песни Теней|375|385|0|32211|1|32230*1|0",
+		"39728|Изменчивый аметист Песни Теней|375|385|0|32212|1|32230*1|0",
+		"39729|Сбалансированный аметист Песни Теней|375|385|0|32213|1|32230*1|0",
+		"39730|Заряженный аметист Песни Теней|375|385|0|32214|1|32230*1|0",
+		"39731|Светящийся аметист Песни Теней|375|385|0|32215|1|32230*1|0",
+		"39732|Королевский аметист Песни Теней|375|385|0|32216|1|32230*1|0",
+		"39733|Покрытый письменами огнекамень|375|385|0|32217|1|32231*1|0",
+		"39734|Могущественный огнекамень|375|385|0|32218|1|32231*1|0",
+		"39735|Светоносный огнекамень|375|385|0|32219|1|32231*1|0",
+		"39736|Блистающий огнекамень|375|385|0|32220|1|32231*1|0",
+		"39737|Сокрытый огнекамень|375|385|0|32221|1|32231*1|0",
+		"39738|Гибельный огнекамень|375|385|0|32222|1|32231*1|0",
+		"39739|Отверделый морской изумруд|375|385|0|32223|1|32249*1|0",
+		"39740|Светозарный морской изумруд|375|385|0|32224|1|32249*1|0",
+		"39741|Ослепительный морской изумруд|375|385|0|32225|1|32249*1|0",
+		"39742|Зазубренный морской изумруд|375|385|0|32226|1|32249*1|0",
+		"39961|Алмаз жестокой земной бури|375|380|0|32409|1|25867*1|0",
+		"39963|Громовой алмаз небесного огня|375|380|0|32410|1|25868*1|0",
+		"41418|Корона морской ведьмы|375|385|0|32776|1|23449*12;31079*4;24478*20;24479*3|0",
+		"44794|Хаотический алмаз небесного огня|375|380|0|34220|1|25868*1|0",
+		"46122|Кольцо скованной мощи|375|385|0|34362|1|35128*4;23571*4;31079*12;34664*5|0",
+		"46123|Кольцо бьющего ключа|375|385|0|34363|1|35128*4;21886*20;31079*12;34664*5|0",
+		"46124|Кольцо из закаленного кория|375|385|0|34361|1|35128*4;22451*20;31079*12;34664*5|0",
+		"46125|Подвеска солнечного огня|375|385|0|34359|1|31079*12;32227*3;32228*3|0",
+		"46126|Амулет бьющего ключа|375|385|0|34360|1|31079*6;32249*6|0",
+		"46127|Колье из закаленного кория|375|385|0|34358|1|35128*6;23572*9|0",
+		"46597|Вечный алмаз земной бури|375|380|0|35501|1|25867*1|0",
+		"46601|Угасающий алмаз небесного огня|375|380|0|35503|1|25868*1|0",
+		"46775|Статуэтка неземной черепахи|375|385|0|35693|1|23449*8;32228*2;23440*6|0",
+		"46776|Статуэтка кориевого вепря|375|385|0|35694|1|23449*8;32231*2;22452*8|0",
+		"46777|Статуэтка багровой змейки|375|385|0|35700|1|23447*8;32227*2;21884*8|0",
+		"46778|Статуэтка пантеры Песни Теней|375|385|0|35702|1|23573*4;32230*2;22456*8|0",
+		"46779|Статуэтка морского альбатроса|375|385|0|35703|1|23447*8;32249*2;22457*8|0",
+		"47053|Мощный морской изумруд|375|385|0|35759|1|32249*1|0",
+		"47054|Неизменный морской изумруд|375|385|0|35758|1|32249*1|0",
+		"47055|Тревожный огнекамень|375|385|0|35760|1|32231*1|0",
+		"47056|Мягкий львиный глаз|375|385|0|35761|1|32229*1|0",
+		"48789|Очищенный аметист Песни Теней|375|385|0|37503|1|32230*1|0",
+		"53831|Рельефный кровавый камень|375|415|0|0|1|36917*1|0",
+		"53832|Изысканный кровавый камень|375|415|0|0|1|36917*1|0",
+		"53834|Рунический кровавый камень|375|415|0|0|1|36917*1|0",
+		"53835|Яркий кровавый камень|375|415|0|0|1|36917*1|0",
+		"53843|Изящный кровавый камень|375|415|0|0|1|36917*1|0",
+		"53844|Блистательный кровавый камень|375|415|0|0|1|36917*1|0",
+		"53845|Растрескавшийся кровавый камень|375|415|0|0|1|36917*1|0",
+		"53852|Сверкающий солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53853|Гладкий солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53854|Прочный солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53855|Матовый солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53856|Мягкий солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53857|Мистический солнечный хрусталь|375|415|0|0|1|36920*1|0",
+		"53859|Царственный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53860|Изменчивый сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53861|Непрочный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53862|Светящийся сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53863|Очищенный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53864|Королевский сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53865|Таинственный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53866|Сбалансированный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53867|Заряженный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53868|Монарший сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53869|Сумрачный кристалл защитника|375|415|0|0|1|36926*1|0",
+		"53870|Всевластный сумрачный кристалл|375|415|0|0|1|36926*1|0",
+		"53871|Сумрачный кристалл стража|375|415|0|0|1|36926*1|0",
+		"53872|Покрытый письменами огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53873|Гравированный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53874|Огромный цитрин воителя|375|415|0|0|1|36929*1|0",
+		"53875|Глянцевый огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53876|Броский огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53877|Смертоносный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53878|Блистающий огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53879|Прозрачный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53880|Огромный цитрин проворства|375|415|0|0|1|36929*1|0",
+		"53881|Светоносный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53882|Могущественный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53883|Сокрытый огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53884|Надежный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53885|Тревожный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53886|Гибельный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53887|Нетронутый огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53888|Наделенный силой огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53889|Застывший огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53890|Стойкий огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53891|Мерцающий огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53892|Идеально ограненный огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53893|Затвердевший огромный цитрин|375|415|0|0|1|36929*1|0",
+		"53894|Вневременной темный нефрит|375|415|0|0|1|36932*1|0",
+		"53916|Зазубренный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53917|Насыщенный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53918|Отверделый темный нефрит|375|415|0|0|1|36932*1|0",
+		"53919|Неизменный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53920|Мощный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53921|Темный нефрит провидца|375|415|0|0|1|36932*1|0",
+		"53922|Смутный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53923|Сияющий темный нефрит|375|415|0|0|1|36932*1|0",
+		"53924|Померкший темный нефрит|375|415|0|0|1|36932*1|0",
+		"53925|Замысловатый темный нефрит|375|415|0|0|1|36932*1|0",
+		"53926|Ослепительный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53927|Расколотый темный нефрит|375|415|0|0|1|36932*1|0",
+		"53928|Лучистый темный нефрит|375|415|0|0|1|36932*1|0",
+		"53929|Непрозрачный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53930|Усиленный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53931|Светозарный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53932|Плотный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53933|Раздробленный темный нефрит|375|415|0|0|1|36932*1|0",
+		"53934|Цельный кальцедоний|375|415|0|0|1|36923*1|0",
+		"53940|Искрящийся кальцедоний|375|415|0|0|1|36923*1|0",
+		"53941|Блестящий кальцедоний|375|415|0|0|1|36923*1|0",
+		"53943|Грозовой кальцедоний|375|415|0|0|1|36923*1|0",
+		"54017|Ясный кровавый камень|375|415|0|0|1|36917*1|0",
+		"56193|Кольцо кровавого камня|380|420|0|42336|1|37701*2;36917*1|0",
+		"56194|Кольцо Солнечного Камня|380|420|0|42337|1|37701*2;36920*1|0",
+		"56208|Фокусирующая линза из сумрачного нефрита|380|400|0|42421|1|36926*1;36932*1|0",
+		"56530|Зачарованная жемчужина|380|420|0|42701|1|36783*1;34054*1|0",
+		"58141|Ожерелье с кристаллом цитрина|380|420|0|43244|1|37701*2;36929*1|0",
+		"58142|Амулет с кристаллом кальцедония|380|420|0|43245|1|37701*2;36923*1|0",
+		"56049|Рельефное око дракона|390|440|0|42142|1|42225*1|0",
+		"56052|Изысканное око дракона|390|440|0|42143|1|42225*1|0",
+		"56053|Руническое око дракона|390|440|0|42144|1|42225*1|0",
+		"56054|Яркое око дракона|390|440|0|36766|1|42225*1|0",
+		"56055|Изящное око дракона|390|440|0|42151|1|42225*1|0",
+		"56056|Блистательное око дракона|390|440|0|42152|1|42225*1|0",
+		"56074|Сверкающее око дракона|390|440|0|42148|1|42225*1|0",
+		"56076|Растрескавшееся око дракона|390|440|0|42153|1|42225*1|0",
+		"56077|Блестящее око дракона|390|440|0|42146|1|42225*1|0",
+		"56079|Мистическое око дракона|390|440|0|42158|1|42225*1|0",
+		"56081|Ясное око дракона|390|440|0|42154|1|42225*1|0",
+		"56083|Мягкое око дракона|390|440|0|42150|1|42225*1|0",
+		"56084|Прочное око дракона|390|440|0|42156|1|42225*1|0",
+		"56085|Гладкое око дракона|390|440|0|42149|1|42225*1|0",
+		"56086|Цельное око дракона|390|440|0|36767|1|42225*1|0",
+		"56087|Искрящееся око дракона|390|440|0|42145|1|42225*1|0",
+		"56088|Грозовое око дракона|390|440|0|42155|1|42225*1|0",
+		"56089|Матовое око дракона|390|440|0|42157|1|42225*1|0",
+		"58143|Кольцо тени земли|390|420|0|43246|1|35624*1;36926*2|0",
+		"58144|Нефритовое кольцо истребления|390|420|0|43247|1|35624*1;36932*2|0",
+		"56195|Нефритовый кинжал-подвеска|400|420|0|42338|1|35624*1;36929*2;36932*2|0",
+		"56196|Ожерелье Кровавого солнца|400|420|0|42339|1|35624*1;36917*1;36920*2;36923*1|0",
+		"53830|Рельефный алый рубин|410|440|0|39996|1|36918*1|0",
+		"53945|Изысканный алый рубин|410|440|0|39997|1|36918*1|0",
+		"53946|Рунический алый рубин|410|440|0|39998|1|36918*1|0",
+		"53947|Яркий алый рубин|410|440|0|39999|1|36918*1|0",
+		"53948|Изящный алый рубин|410|440|0|40000|1|36918*1|0",
+		"53949|Блистательный алый рубин|410|440|0|40001|1|36918*1|0",
+		"53950|Растрескавшийся алый рубин|410|440|0|40002|1|36918*1|0",
+		"53951|Ясный алый рубин|410|440|0|40003|1|36918*1|0",
+		"53952|Цельный небесный сапфир|410|440|0|40008|1|36924*1|0",
+		"53953|Искрящийся небесный сапфир|410|440|0|40009|1|36924*1|0",
+		"53954|Блестящий небесный сапфир|410|440|0|40010|1|36924*1|0",
+		"53955|Грозовой небесный сапфир|410|440|0|40011|1|36924*1|0",
+		"53956|Сверкающее сияние осени|410|440|0|40012|1|36921*1|0",
+		"53957|Гладкое сияние осени|410|440|0|40013|1|36921*1|0",
+		"53958|Прочное сияние осени|410|440|0|40014|1|36921*1|0",
+		"53959|Матовое сияние осени|410|440|0|40015|1|36921*1|0",
+		"53960|Мистическое сияние осени|410|440|0|40016|1|36921*1|0",
+		"53961|Мягкое сияние осени|410|440|0|40017|1|36921*1|0",
+		"53962|Царственный сумеречный опал|410|440|0|40022|1|36927*1|0",
+		"53963|Изменчивый сумеречный опал|410|440|0|40023|1|36927*1|0",
+		"53964|Непрочный сумеречный опал|410|440|0|40024|1|36927*1|0",
+		"53965|Светящийся сумеречный опал|410|440|0|40025|1|36927*1|0",
+		"53966|Очищенный сумеречный опал|410|440|0|40026|1|36927*1|0",
+		"53967|Королевский сумеречный опал|410|440|0|40027|1|36927*1|0",
+		"53968|Таинственный сумеречный опал|410|440|0|40028|1|36927*1|0",
+		"53969|Сбалансированный сумеречный опал|410|440|0|40029|1|36927*1|0",
+		"53970|Заряженный сумеречный опал|410|440|0|40030|1|36927*1|0",
+		"53971|Монарший сумеречный опал|410|440|0|40031|1|36927*1|0",
+		"53972|Сумеречный опал защитника|410|440|0|40032|1|36927*1|0",
+		"53973|Всевластный сумеречный опал|410|440|0|40033|1|36927*1|0",
+		"53974|Сумеречный опал стража|410|440|0|40034|1|36927*1|0",
+		"53975|Покрытый письменами императорский топаз|410|440|0|40037|1|36930*1|0",
+		"53976|Гравированный императорский топаз|410|440|0|40038|1|36930*1|0",
+		"53977|Императорский топаз воителя|410|440|0|40039|1|36930*1|0",
+		"53978|Глянцевый императорский топаз|410|440|0|40040|1|36930*1|0",
+		"53979|Смертоносный императорский топаз|410|440|0|40043|1|36930*1|0",
+		"53980|Блистающий императорский топаз|410|440|0|40044|1|36930*1|0",
+		"53981|Прозрачный императорский топаз|410|440|0|40045|1|36930*1|0",
+		"53982|Императорский топаз проворства|410|440|0|40046|1|36930*1|0",
+		"53983|Светоносный императорский топаз|410|440|0|40047|1|36930*1|0",
+		"53984|Могущественный императорский топаз|410|440|0|40048|1|36930*1|0",
+		"53985|Сокрытый императорский топаз|410|440|0|40049|1|36930*1|0",
+		"53986|Надежный императорский топаз|410|440|0|40050|1|36930*1|0",
+		"53987|Тревожный императорский топаз|410|440|0|40051|1|36930*1|0",
+		"53988|Гибельный императорский топаз|410|440|0|40052|1|36930*1|0",
+		"53989|Нетронутый императорский топаз|410|440|0|40053|1|36930*1|0",
+		"53990|Наделенный силой императорский топаз|410|440|0|40054|1|36930*1|0",
+		"53991|Застывший императорский топаз|410|440|0|40055|1|36930*1|0",
+		"53992|Стойкий императорский топаз|410|440|0|40056|1|36930*1|0",
+		"53993|Мерцающий императорский топаз|410|440|0|40057|1|36930*1|0",
+		"53994|Идеально ограненный императорский топаз|410|440|0|40058|1|36930*1|0",
+		"53995|Вневременной лесной изумруд|410|440|0|40085|1|36933*1|0",
+		"53996|Зазубренный лесной изумруд|410|440|0|40086|1|36933*1|0",
+		"53997|Насыщенный лесной изумруд|410|440|0|40088|1|36933*1|0",
+		"53998|Отверделый лесной изумруд|410|440|0|40089|1|36933*1|0",
+		"54000|Неизменный лесной изумруд|410|440|0|40090|1|36933*1|0",
+		"54001|Мощный лесной изумруд|410|440|0|40091|1|36933*1|0",
+		"54002|Лесной изумруд провидца|410|440|0|40092|1|36933*1|0",
+		"54003|Смутный лесной изумруд|410|440|0|40095|1|36933*1|0",
+		"54004|Сияющий лесной изумруд|410|440|0|40099|1|36933*1|0",
+		"54005|Померкший лесной изумруд|410|440|0|40102|1|36933*1|0",
+		"54006|Замысловатый лесной изумруд|410|440|0|40104|1|36933*1|0",
+		"54007|Ослепительный лесной изумруд|410|440|0|40094|1|36933*1|0",
+		"54008|Расколотый лесной изумруд|410|440|0|40096|1|36933*1|0",
+		"54009|Лучистый лесной изумруд|410|440|0|40100|1|36933*1|0",
+		"54010|Непрозрачный лесной изумруд|410|440|0|40103|1|36933*1|0",
+		"54011|Усиленный лесной изумруд|410|440|0|40105|1|36933*1|0",
+		"54012|Светозарный лесной изумруд|410|440|0|40098|1|36933*1|0",
+		"54013|Плотный лесной изумруд|410|440|0|40101|1|36933*1|0",
+		"54014|Раздробленный лесной изумруд|410|440|0|40106|1|36933*1|0",
+		"54019|Броский императорский топаз|410|440|0|40041|1|36930*1|0",
+		"54023|Затвердевший императорский топаз|410|440|0|40059|1|36930*1|0",
+		"56531|Зачарованная слеза|410|440|0|42702|1|36784*1;34054*4|0",
+		"58145|Кольцо камнестража|410|430|0|43248|1|35624*2|0",
+		"58146|Кольцо темного могущества|410|430|0|43249|1|35624*1;35627*1|0",
+		"56199|Рубиновый заяц|430|450|0|42341|1|41163*2;36918*2;36921*1|0",
+		"56201|Сумеречная змея|430|450|0|42395|1|41163*2;36927*2;36930*1|0",
+		"56202|Сапфировая сова|430|450|0|42413|1|41163*2;36924*2;36933*1|0",
+		"56203|Изумрудный кабан|430|450|0|42418|1|41163*2;36933*2;36918*1|0",
+		"59759|Королевский краб|430|450|0|44063|1|41163*2;36930*2;36933*1|0",
+		"317550|Слеза забвения|440|465|0|60114|1|42225*2;34054*10;22445*10|0",
+		"319037|Аметрин варвара|440|465|0|97600|1|36931*1|0",
+		"319038|Грубый аметрин|440|465|0|97601|1|36931*1|0",
+		"319039|Округленный аметрин|440|465|0|97602|1|36931*1|0",
+		"319040|Аметрин фехтовальщика|440|465|0|97603|1|36931*1|0",
+		"319041|Аметрин авангарда|440|465|0|97604|1|36931*1|0",
+		"319042|Краеугольный аметрин|440|465|0|97605|1|36931*1|0",
+		"319049|Монументальный страхолит|440|465|0|97606|1|36928*1|0",
+		"319051|Крепкое Око Зула|440|465|0|97607|1|36934*1|0",
+		"371558|Слеза миража|440|465|0|60116|1|42225*5;34054*25;22445*25|0",
+		"371560|Слеза утопии|440|465|0|60117|1|60116*3;30183*1|0",
+		"55384|Лучезарный алмаз небесного сияния|440|460|0|41377|1|41266*1|0",
+		"55386|Неустанный алмаз небесного сияния|440|460|0|41375|1|41266*1|0",
+		"55387|Жалкий алмаз небесного сияния|440|460|0|41378|1|41266*1|0",
+		"55388|Бездушный алмаз небесного сияния|440|460|0|41379|1|41266*1|0",
+		"55389|Хаотический алмаз небесного сияния|440|460|0|41285|1|41266*1|0",
+		"55390|Разрушительный алмаз небесного сияния|440|460|0|41307|1|41266*1|0",
+		"55392|Угасающий алмаз небесного сияния|440|460|0|41333|1|41266*1|0",
+		"55393|Загадочный алмаз небесного сияния|440|460|0|41335|1|41266*1|0",
+		"55394|Стремительный алмаз небесного сияния|440|460|0|41339|1|41266*1|0",
+		"55395|Громовой алмаз небесного сияния|440|460|0|41400|1|41266*1|0",
+		"55396|Провидческий алмаз землеправителя|440|460|0|41401|1|41334*1|0",
+		"55397|Нерушимый алмаз землеправителя|440|460|0|41395|1|41334*1|0",
+		"55398|Вечный алмаз землеправителя|440|460|0|41396|1|41334*1|0",
+		"55399|Могущественный алмаз землеправителя|440|460|0|41397|1|41334*1|0",
+		"55400|Алмаз жестокого землеправителя|440|460|0|41398|1|41334*1|0",
+		"55401|Алмаз строгого землеправителя|440|460|0|41380|1|41334*1|0",
+		"55402|Незыблемый алмаз землеправителя|440|460|0|41381|1|41334*1|0",
+		"55403|Заостренный алмаз землеправителя|440|460|0|41382|1|41334*1|0",
+		"55404|Живительный алмаз землеправителя|440|460|0|41385|1|41334*1|0",
+		"55405|Лучащийся алмаз землеправителя|440|460|0|41389|1|41334*1|0",
+		"55407|Оживляющий алмаз небесного сияния|440|460|0|41376|1|41266*1|0",
+		"56197|Перстень грез|440|460|0|42340|1|41163*1;36933*1;34052*1|0",
+		"58147|Кольцо силы земли|440|460|0|43250|1|41163*2;35624*2|0",
+		"58148|Кольцо алых теней|440|460|0|43251|1|41163*2;35627*3;36918*1|0",
+		"58149|Кольцо огненного ветра|440|460|0|43252|1|41163*2;35623*1;36860*2|0",
+		"58150|Кольцо хладных слез|440|460|0|43253|1|41163*2;35622*1;36783*4|0",
+		"58492|Титановое кольцо свирепости|440|460|0|43482|1|41163*4;36860*4|0",
+		"58507|Титановая печатка свирепости|440|460|0|43498|1|41163*4;36860*4|0",
+		"58954|Титановое кольцо ледяного стража|440|460|0|43582|1|41163*2;35622*3;36860*3;43102*1|0",
+		"64725|Изумрудное колье|440|460|0|45812|1|41163*1;36933*3|0",
+		"64726|Амулет из небесного сапфира|440|460|0|45813|1|41163*2;36924*2|0",
+		"64727|Рунический перстень маны|440|460|0|45808|1|41163*2;36927*2|0",
+		"64728|Алый перстень|440|460|0|45809|1|41163*2;36918*1|0",
+		"66338|Отверделое Око Зула|440|465|0|40167|1|36934*1|0",
+		"66428|Неизменное Око Зула|440|465|0|40168|1|36934*1|0",
+		"66429|Насыщенное Око Зула|440|465|0|40166|1|36934*1|0",
+		"66430|Ослепительное Око Зула|440|465|0|40175|1|36934*1|0",
+		"66431|Зазубренное Око Зула|440|465|0|40165|1|36934*1|0",
+		"66432|Вневременное Око Зула|440|465|0|40164|1|36934*1|0",
+		"66433|Око Зула провидца|440|465|0|40170|1|36934*1|0",
+		"66434|Мощное Око Зула|440|465|0|40169|1|36934*1|0",
+		"66435|Смутное Око Зула|440|465|0|40171|1|36934*1|0",
+		"66436|Расколотое Око Зула|440|465|0|40176|1|36934*1|0",
+		"66437|Сияющее Око Зула|440|465|0|40172|1|36934*1|0",
+		"66438|Плотное Око Зула|440|465|0|40181|1|36934*1|0",
+		"66439|Лучистое Око Зула|440|465|0|40177|1|36934*1|0",
+		"66440|Замысловатое Око Зула|440|465|0|40174|1|36934*1|0",
+		"66441|Светозарное Око Зула|440|465|0|40180|1|36934*1|0",
+		"66442|Усиленное Око Зула|440|465|0|40179|1|36934*1|0",
+		"66443|Раздробленное Око Зула|440|465|0|40182|1|36934*1|0",
+		"66444|Непрозрачное Око Зула|440|465|0|40178|1|36934*1|0",
+		"66445|Померкшее Око Зула|440|465|0|40173|1|36934*1|0",
+		"66446|Рунический багровый рубин|440|465|0|40113|1|36919*1|0",
+		"66447|Рельефный багровый рубин|440|465|0|40111|1|36919*1|0",
+		"66448|Изысканный багровый рубин|440|465|0|40112|1|36919*1|0",
+		"66449|Яркий багровый рубин|440|465|0|40114|1|36919*1|0",
+		"66450|Ясный багровый рубин|440|465|0|40118|1|36919*1|0",
+		"66451|Растрескавшийся багровый рубин|440|465|0|40117|1|36919*1|0",
+		"66452|Изящный багровый рубин|440|465|0|40115|1|36919*1|0",
+		"66453|Блистательный багровый рубин|440|465|0|40116|1|36919*1|0",
+		"66497|Цельный величественный циркон|440|465|0|40119|1|36925*1|0",
+		"66498|Искрящийся величественный циркон|440|465|0|40120|1|36925*1|0",
+		"66499|Грозовой величественный циркон|440|465|0|40122|1|36925*1|0",
+		"66500|Блестящий величественный циркон|440|465|0|40121|1|36925*1|0",
+		"66501|Прочный царский янтарь|440|465|0|40125|1|36922*1|0",
+		"66502|Гладкий царский янтарь|440|465|0|40124|1|36922*1|0",
+		"66503|Сверкающий царский янтарь|440|465|0|40123|1|36922*1|0",
+		"66504|Матовый царский янтарь|440|465|0|40126|1|36922*1|0",
+		"66505|Мистический царский янтарь|440|465|0|40127|1|36922*1|0",
+		"66506|Мягкий царский янтарь|440|465|0|40128|1|36922*1|0",
+		"66553|Сбалансированный страхолит|440|465|0|40136|1|36928*1|0",
+		"66554|Царственный страхолит|440|465|0|40129|1|36928*1|0",
+		"66555|Светящийся страхолит|440|465|0|40132|1|36928*1|0",
+		"66556|Очищенный страхолит|440|465|0|40133|1|36928*1|0",
+		"66557|Изменчивый страхолит|440|465|0|40130|1|36928*1|0",
+		"66558|Королевский страхолит|440|465|0|40134|1|36928*1|0",
+		"66559|Монарший страхолит|440|465|0|40138|1|36928*1|0",
+		"66560|Страхолит защитника|440|465|0|40139|1|36928*1|0",
+		"66561|Страхолит стража|440|465|0|40141|1|36928*1|0",
+		"66562|Таинственный страхолит|440|465|0|40135|1|36928*1|0",
+		"66563|Всевластный страхолит|440|465|0|40140|1|36928*1|0",
+		"66564|Заряженный страхолит|440|465|0|40137|1|36928*1|0",
+		"66565|Непрочный страхолит|440|465|0|40131|1|36928*1|0",
+		"66566|Светоносный аметрин|440|465|0|40151|1|36931*1|0",
+		"66567|Покрытый письменами аметрин|440|465|0|40142|1|36931*1|0",
+		"66568|Смертоносный аметрин|440|465|0|40147|1|36931*1|0",
+		"66569|Могущественный аметрин|440|465|0|40152|1|36931*1|0",
+		"66570|Сокрытый аметрин|440|465|0|40153|1|36931*1|0",
+		"66571|Надежный аметрин|440|465|0|40154|1|36931*1|0",
+		"66572|Гравированный аметрин|440|465|0|40143|1|36931*1|0",
+		"66573|Нетронутый аметрин|440|465|0|40157|1|36931*1|0",
+		"66574|Тревожный аметрин|440|465|0|40155|1|36931*1|0",
+		"66575|Блистающий аметрин|440|465|0|40148|1|36931*1|0",
+		"66576|Идеально ограненный аметрин|440|465|0|40162|1|36931*1|0",
+		"66577|Гибельный аметрин|440|465|0|40156|1|36931*1|0",
+		"66578|Мерцающий аметрин|440|465|0|40161|1|36931*1|0",
+		"66579|Аметрин защитника|440|465|0|40144|1|36931*1|0",
+		"66580|Наделенный силой аметрин|440|465|0|40158|1|36931*1|0",
+		"66581|Стойкий аметрин|440|465|0|40160|1|36931*1|0",
+		"66582|Глянцевый аметрин|440|465|0|40145|1|36931*1|0",
+		"66583|Броский аметрин|440|465|0|40146|1|36931*1|0",
+		"66584|Аметрин проворства|440|465|0|40150|1|36931*1|0",
+		"66585|Прозрачный аметрин|440|465|0|40149|1|36931*1|0",
+		"66586|Затвердевший аметрин|440|465|0|40163|1|36931*1|0",
+		"66587|Застывший аметрин|440|465|0|40159|1|36931*1|0",
+		"68253|Слеза кошмаров|440|465|0|49110|1|42225*1;34054*5|0",
+		"62242|Ледяная призма|445|470|0|44943|1|43102*1;36923*1;36926*1;36932*1|1",
+		"56496|Титановое кольцо сотрясения|450|460|0|42642|1|41163*2;42225*4;36860*4;35627*4;43102*1|0",
+		"56497|Титановое кольцо стража земли|450|460|0|42643|1|41163*2;42225*4;35624*4;35625*4;43102*1|0",
+		"56498|Титановое кольцо чародейского удара|450|460|0|42644|1|41163*2;42225*4;35622*4;35623*4;43102*1|0",
+		"56499|Титановое колье сотрясения|450|460|0|42645|1|41163*2;42225*4;35623*6;36860*6;43102*1|0",
+		"56500|Титановая цепь стража земли|450|460|0|42646|1|41163*2;42225*4;35625*6;35624*6;43102*1|0",
+		"56501|Титановое ожерелье чародейского удара|450|460|0|42647|1|41163*2;42225*4;35627*6;35622*6;43102*1|0",
+		"322018|Грозовой лазурит|460|470|0|76504|1|76133*1|0",
+		"322022|Смутный александрит|460|470|0|76507|1|76137*1|0",
+		"322035|Монарший александрит|460|470|0|76521|1|76137*1|0",
+		"322041|Варварский тигровый опал|460|470|0|177889|1|76130*1|0",
+		"322047|Смертоносный тигровый опал|460|470|0|76526|1|76130*1|0",
+		"322060|Острый тигровый опал|460|470|0|76539|1|76130*1|0",
+		"322071|Идеально ограненный плутовской камень|460|470|0|76549|1|76135*1|0",
+		"322087|Хрупкий врайкульский гранат|460|470|0|76560|1|76136*1|0",
+		"322097|Гладкий солнечный камень|460|470|0|76565|1|76134*1|0",
+		"322023|Прожигающий александрит|465|475|0|76508|1|76137*1|0",
+		"322037|Мощный александрит|465|475|0|76522|1|76137*1|0",
+		"322042|Грубый тигровый опал|465|475|0|177890|1|76130*1|0",
+		"322048|Коварный тигровый опал|465|475|0|76527|1|76130*1|0",
+		"322061|Искусный тигровый опал|465|475|0|76540|1|76130*1|0",
+		"322072|Сокрытый плутовской камень|465|475|0|76550|1|76135*1|0",
+		"322091|Изящный врайкульский гранат|465|475|0|76566|1|76136*1|0",
+		"315373|Рунический перстень маны претендента|470|490|0|154172|1|41163*4;36927*4;43102*2|0",
+		"315374|Алый перстень претендента|470|490|0|154173|1|41163*4;36918*2;43102*2|0",
+		"315375|Амулет из небесного сапфира претендента|470|490|0|154174|1|41163*4;36924*4;43102*2|0",
+		"315376|Изумрудное колье претендента|470|490|0|154171|1|41163*2;36933*6;43102*2|0",
+		"317691|Яркий Глаз химеры|470|490|0|61800|1|36766*1;36925*1;36928*1;36934*1|0",
+		"317692|Непоколебимый Глаз химеры|470|490|0|61801|1|149185*1;36925*1;36928*1;36934*1|0",
+		"317693|Изысканный Глаз химеры|470|490|0|61802|1|42143*1;36925*1;36928*1;36934*1|0",
+		"317694|Рельефный Глаз химеры|470|490|0|61803|1|42142*1;36925*1;36928*1;36934*1|0",
+		"317695|Рунический Глаз химеры|470|490|0|61804|1|42144*1;36925*1;36928*1;36934*1|0",
+		"317696|Изящный Глаз химеры|470|490|0|61805|1|42151*1;36925*1;36928*1;36934*1|0",
+		"317697|Блистательный Глаз химеры|470|490|0|61806|1|42152*1;36925*1;36928*1;36934*1|0",
+		"317698|Растрескавшийся Глаз химеры|470|490|0|61807|1|42153*1;36925*1;36928*1;36934*1|0",
+		"317699|Ясный Глаз химеры|470|490|0|61808|1|42154*1;36925*1;36928*1;36934*1|0",
+		"317700|Стойкий Глаз химеры|470|490|0|61809|1|149184*1;36925*1;36928*1;36934*1|0",
+		"317701|Сверкающий Глаз химеры|470|490|0|61810|1|42148*1;36925*1;36928*1;36934*1|0",
+		"317702|Гладкий Глаз химеры|470|490|0|61811|1|42149*1;36925*1;36928*1;36934*1|0",
+		"317703|Мягкий Глаз химеры|470|490|0|61812|1|42150*1;36925*1;36928*1;36934*1|0",
+		"317704|Прочный Глаз химеры|470|490|0|61813|1|42156*1;36925*1;36928*1;36934*1|0",
+		"317705|Матовый Глаз химеры|470|490|0|61814|1|42157*1;36925*1;36928*1;36934*1|0",
+		"317706|Мистический Глаз химеры|470|490|0|61815|1|42158*1;36925*1;36928*1;36934*1|0",
+		"317707|Цельный Глаз химеры|470|490|0|61816|1|36767*1;36925*1;36928*1;36934*1|0",
+		"317708|Искрящийся Глаз химеры|470|490|0|61817|1|42145*1;36925*1;36928*1;36934*1|0",
+		"317709|Блестящий Глаз химеры|470|490|0|61818|1|42146*1;36925*1;36928*1;36934*1|0",
+		"317710|Грозовой Глаз химеры|470|490|0|61819|1|42155*1;36925*1;36928*1;36934*1|0",
+		"319372|Треснутый рельефный сердолик|470|490|0|104025|1|52177*1;23572*1;40111*1|0",
+		"319373|Треснутый изысканный сердолик|470|490|0|104026|1|52177*1;23572*1;40112*1|0",
+		"319374|Треснутый рунический сердолик|470|490|0|104027|1|52177*1;23572*1;40113*1|0",
+		"319375|Треснутый ясный сердолик|470|490|0|104028|1|52177*1;23572*1;40118*1|0",
+		"319376|Треснутый цельный зефирит|470|490|0|104029|1|52178*1;23572*1;40119*1|0",
+		"319377|Треснутый искрящийся зефирит|470|490|0|104030|1|52178*1;23572*1;40120*1|0",
+		"319378|Треснутый грозовой зефирит|470|490|0|104031|1|52178*1;23572*1;40122*1|0",
+		"319379|Треснутый прочный алицит|470|490|0|104032|1|52179*1;23572*1;40125*1|0",
+		"319380|Треснутый изящный сердолик|470|490|0|104033|1|52177*1;23572*1;40115*1|0",
+		"319381|Треснутый гладкий алицит|470|490|0|104034|1|52179*1;23572*1;40124*1|0",
+		"319382|Треснутый мягкий алицит|470|490|0|104035|1|52179*1;23572*1;40128*1|0",
+		"319383|Треснутый мистический алицит|470|490|0|104036|1|52179*1;23572*1;40127*1|0",
+		"319384|Треснутый царственный камень ночи|470|490|0|104037|1|52180*1;23572*1;40129*1|0",
+		"319385|Треснутый изменчивый камень ночи|470|490|0|104038|1|52180*1;23572*1;40130*1|0",
+		"319386|Треснутый камень ночи защитника|470|490|0|104039|1|52180*1;23572*1;40139*1|0",
+		"319387|Треснутый светящийся камень ночи|470|490|0|104040|1|52180*1;23572*1;40132*1|0",
+		"319388|Треснутый камень ночи стража|470|490|0|104041|1|52180*1;23572*1;40141*1|0",
+		"319389|Треснутый очищенный камень ночи|470|490|0|104042|1|52180*1;23572*1;40133*1|0",
+		"319390|Треснутый гравированный гессонит|470|490|0|104043|1|52181*1;23572*1;40143*1|0",
+		"319391|Треснутый идеально ограненный гессонит|470|490|0|104044|1|52181*1;23572*1;40162*1|0",
+		"319392|Треснутый застывший гессонит|470|490|0|104045|1|52181*1;23572*1;40159*1|0",
+		"319393|Треснутый покрытый письменами гессонит|470|490|0|104046|1|52181*1;23572*1;40142*1|0",
+		"319394|Треснутый смертоносный гессонит|470|490|0|104047|1|52181*1;23572*1;40147*1|0",
+		"319395|Треснутый могущественный гессонит|470|490|0|104048|1|52181*1;23572*1;40152*1|0",
+		"319396|Треснутый броский гессонит|470|490|0|104049|1|52181*1;23572*1;40146*1|0",
+		"319397|Треснутый гессонит проворства|470|490|0|104050|1|52181*1;23572*1;40150*1|0",
+		"319398|Треснутый тревожный гессонит|470|490|0|104051|1|52181*1;23572*1;40155*1|0",
+		"319399|Треснутый глянцевый гессонит|470|490|0|104052|1|52181*1;23572*1;40145*1|0",
+		"319400|Треснутый прозрачный гессонит|470|490|0|104053|1|52181*1;23572*1;40149*1|0",
+		"319401|Треснутый наделенный силой гессонит|470|490|0|104054|1|52181*1;23572*1;40158*1|0",
+		"319402|Треснутый надежный гессонит|470|490|0|104055|1|52181*1;23572*1;40154*1|0",
+		"319403|Треснутый нетронутый гессонит|470|490|0|104056|1|52181*1;23572*1;40157*1|0",
+		"319404|Треснутая ослепительная яшма|470|490|0|104057|1|52182*1;23572*1;40175*1|0",
+		"319405|Треснутая отверделая яшма|470|490|0|104058|1|52182*1;23572*1;40167*1|0",
+		"319406|Треснутая усиленная яшма|470|490|0|104059|1|52182*1;23572*1;40179*1|0",
+		"319407|Треснутая мощная яшма|470|490|0|104060|1|52182*1;23572*1;40169*1|0",
+		"319408|Треснутая замысловатая яшма|470|490|0|104061|1|52182*1;23572*1;40174*1|0",
+		"319409|Треснутая зазубренная яшма|470|490|0|104062|1|52182*1;23572*1;40165*1|0",
+		"319410|Треснутая лучистая яшма|470|490|0|104063|1|52182*1;23572*1;40177*1|0",
+		"319411|Треснутая смутная яшма|470|490|0|104064|1|52182*1;23572*1;40171*1|0",
+		"319412|Треснутая непрозрачная яшма|470|490|0|104065|1|52182*1;23572*1;40178*1|0",
+		"319413|Треснутая светозарная яшма|470|490|0|104066|1|52182*1;23572*1;40180*1|0",
+		"319414|Треснутая яшма провидца|470|490|0|104067|1|52182*1;23572*1;40170*1|0",
+		"319415|Треснутая раздробленная яшма|470|490|0|104068|1|52182*1;23572*1;40182*1|0",
+		"319416|Треснутая сияющая яшма|470|490|0|104069|1|52182*1;23572*1;40172*1|0",
+		"319417|Треснутая неизменная яшма|470|490|0|104070|1|52182*1;23572*1;40168*1|0",
+		"319418|Треснутая расколотая яшма|470|490|0|104071|1|52182*1;23572*1;40176*1|0",
+		"319419|Треснутая плотная яшма|470|490|0|104072|1|52182*1;23572*1;40181*1|0",
+		"319420|Треснутая вневременная яшма|470|490|0|104073|1|52182*1;23572*1;40164*1|0",
+		"319421|Треснутая померкшая яшма|470|490|0|104074|1|52182*1;23572*1;40173*1|0",
+		"319422|Треснутая насыщенная яшма|470|490|0|104075|1|52182*1;23572*1;40166*1|0",
+		"319423|Треснутый блистательный сердолик|470|490|0|104076|1|52177*1;23572*1;40116*1|0",
+		"319424|Треснутый растрескавшийся сердолик|470|490|0|104077|1|52177*1;23572*1;40117*1|0",
+		"319425|Треснутый яркий сердолик|470|490|0|104078|1|52177*1;23572*1;40114*1|0",
+		"319426|Треснутый блестящий зефирит|470|490|0|104079|1|52178*1;23572*1;40121*1|0",
+		"319427|Треснутый сверкающий алицит|470|490|0|104080|1|52179*1;23572*1;40123*1|0",
+		"319428|Треснутый матовый алицит|470|490|0|104081|1|52179*1;23572*1;40126*1|0",
+		"319429|Треснутый затвердевший гессонит|470|490|0|104082|1|52181*1;23572*1;40163*1|0",
+		"319430|Треснутый стойкий гессонит|470|490|0|104083|1|52181*1;23572*1;40160*1|0",
+		"319431|Треснутый мерцающий гессонит|470|490|0|104084|1|52181*1;23572*1;40161*1|0",
+		"319432|Треснутый сокрытый гессонит|470|490|0|104085|1|52181*1;23572*1;40153*1|0",
+		"319433|Треснутый гессонит защитника|470|490|0|104086|1|52181*1;23572*1;40144*1|0",
+		"319434|Треснутый блистающий гессонит|470|490|0|104087|1|52181*1;23572*1;40148*1|0",
+		"319435|Треснутый гибельный гессонит|470|490|0|104088|1|52181*1;23572*1;40156*1|0",
+		"319436|Треснутый светоносный гессонит|470|490|0|104089|1|52181*1;23572*1;40151*1|0",
+		"319437|Треснутый непрочный камень ночи|470|490|0|104090|1|52180*1;23572*1;40131*1|0",
+		"319438|Треснутый королевский камень ночи|470|490|0|104091|1|52180*1;23572*1;40134*1|0",
+		"319439|Треснутый сбалансированный камень ночи|470|490|0|104092|1|52180*1;23572*1;40136*1|0",
+		"319440|Треснутый таинственный камень ночи|470|490|0|104093|1|52180*1;23572*1;40135*1|0",
+		"319441|Треснутый заряженный камень ночи|470|490|0|104094|1|52180*1;23572*1;40137*1|0",
+		"319442|Треснутый монарший камень ночи|470|490|0|104095|1|52180*1;23572*1;40138*1|0",
+		"319443|Треснутый всевластный камень ночи|470|490|0|104096|1|52180*1;23572*1;40140*1|0",
+		"319444|Треснутый стойкий алицит|470|490|0|104097|1|52179*1;23572*1;60109*1|0",
+		"319445|Треснутый непоколебимый сердолик|470|490|0|104098|1|52177*1;23572*1;60110*1|0",
+		"319446|Треснутый гессонит варвара|470|490|0|104099|1|52181*1;23572*1;97600*1|0",
+		"319447|Треснутый грубый гессонит|470|490|0|104100|1|52181*1;23572*1;97601*1|0",
+		"319448|Треснутый округленный гессонит|470|490|0|104101|1|52181*1;23572*1;97602*1|0",
+		"319449|Треснутый гессонит фехтовальщика|470|490|0|104102|1|52181*1;23572*1;97603*1|0",
+		"319450|Треснутый гессонит авангарда|470|490|0|104103|1|52181*1;23572*1;97604*1|0",
+		"319451|Треснутый краеугольный гессонит|470|490|0|104104|1|52181*1;23572*1;97605*1|0",
+		"319452|Треснутый монументальный камень ночи|470|490|0|104105|1|52180*1;23572*1;97606*1|0",
+		"319453|Треснутая крепкая яшма|470|490|0|104106|1|52182*1;23572*1;97607*1|0",
+		"322024|Молниевый александрит|470|480|0|76509|1|76137*1|0",
+		"322038|Искаженный александрит|470|480|0|76523|1|76137*1|0",
+		"322043|Округленный тигровый опал|470|480|0|177891|1|76130*1|0",
+		"322049|Могущественный тигровый опал|470|480|0|76528|1|76130*1|0",
+		"322062|Тончайший тигровый опал|470|480|0|76541|1|76130*1|0",
+		"322073|Мстительный плутовской камень|470|480|0|76551|1|76135*1|0",
+		"322088|Ясный врайкульский гранат|470|480|0|76561|1|76136*1|0",
+		"322093|Прочный солнечный камень|470|480|0|76502|1|76134*1|0",
+		"322098|Мягкий солнечный камень|470|480|0|76567|1|76134*1|0",
+		"319581|Наследный камень императора|475|500|0|97830|1|37663*4;23447*20;52181*5;52180*5;23572*20;32428*2|0",
+		"319582|Ограненный камень хиджальских гор|475|500|0|97831|1|37663*4;23447*20;52178*5;52182*10;23572*20;32428*2|0",
+		"319583|Усиливающее слух кольцо преступника|475|500|0|97832|1|37663*4;23449*60;52179*5;52181*5;23572*20;32428*2|0",
+		"319584|Резонирующее кольцо гнева|475|500|0|97833|1|37663*4;23449*60;52177*5;52182*10;23572*20;32428*2|0",
+		"319585|Кольцо полуночного неба|475|500|0|97834|1|37663*4;23573*8;52178*5;52180*5;23572*20;32428*2|0",
+		"322025|Александрит сенсея|475|485|0|76510|1|76137*1|0",
+		"322039|Всевластный александрит|475|485|0|76524|1|76137*1|0",
+		"322044|Тигровый опал фехтовальщика|475|485|0|177892|1|76130*1|0",
+		"322050|Покрытый письменами тигровый опал|475|485|0|76529|1|76130*1|0",
+		"322063|Мастерский тигровый опал|475|485|0|76542|1|76130*1|0",
+		"322074|Гравированный плутовской камень|475|485|0|76552|1|76135*1|0",
+		"322026|Лучезарный александрит|480|490|0|76511|1|76137*1|0",
+		"322040|Неизменный александрит|480|490|0|76525|1|76137*1|0",
+		"322045|Тигровый опал авангарда|480|490|0|177893|1|76130*1|0",
+		"322051|Полированный тигровый опал|480|490|0|76530|1|76130*1|0",
+		"322064|Прозрачный тигровый опал|480|490|0|76543|1|76130*1|0",
+		"322075|Таинственный плутовской камень|480|490|0|76553|1|76135*1|0",
+		"322021|Плотный александрит|485|495|0|177888|1|76137*1|0",
+		"322027|Промерзший александрит|485|495|0|76512|1|76137*1|0",
+		"322036|Живой александрит|485|495|0|93706|1|76137*1|0",
+		"322046|Краеугольный тигровый опал|485|495|0|177894|1|76130*1|0",
+		"322052|Затвердевший тигровый опал|485|495|0|76531|1|76130*1|0",
+		"322065|Тонкий тигровый опал|485|495|0|76544|1|76130*1|0",
+		"322076|Очищенный плутовской камень|485|495|0|76554|1|76135*1|0",
+		"322019|Искрящийся лазурит|490|500|0|76505|1|76133*1|0",
+		"322028|Сбалансированный александрит|490|500|0|76513|1|76137*1|0",
+		"322053|Стойкий тигровый опал|490|500|0|76532|1|76130*1|0",
+		"322066|Неподатливый тигровый опал|490|500|0|76545|1|76130*1|0",
+		"322077|Изменчивый плутовской камень|490|500|0|76555|1|76135*1|0",
+		"322092|Растрескавшийся врайкульский гранат|490|500|0|76568|1|76136*1|0",
+		"322094|Сверкающий солнечный камень|490|500|0|76562|1|76134*1|0",
+		"322029|Насыщенный александрит|495|505|0|76514|1|76137*1|0",
+		"322054|Тигровый опал воителя|495|505|0|76533|1|76130*1|0",
+		"322067|Великолепный тигровый опал|495|505|0|76546|1|76130*1|0",
+		"322078|Плутовской камень стража|495|505|0|76556|1|76135*1|0",
+		"200000|Ослепительная яшма|500|510|0|150000|1|52182*1;40175*1|0",
+		"200001|Отверделая яшма|500|510|0|150001|1|52182*1;40167*1|0",
+		"200002|Усиленная яшма|500|510|0|150002|1|52182*1;40179*1|0",
+		"200003|Мощная яшма|500|510|0|150003|1|52182*1;40169*1|0",
+		"200004|Замысловатая яшма|500|510|0|150004|1|52182*1;40174*1|0",
+		"200005|Зазубренная яшма|500|510|0|150005|1|52182*1;40165*1|0",
+		"200006|Лучистая яшма|500|510|0|150006|1|52182*1;40177*1|0",
+		"200007|Смутная яшма|500|510|0|150007|1|52182*1;40171*1|0",
+		"200008|Непрозрачная яшма|500|510|0|150008|1|52182*1;40178*1|0",
+		"200009|Светозарная яшма|500|510|0|150009|1|52182*1;40180*1|0",
+		"200010|Яшма провидца|500|510|0|150010|1|52182*1;40170*1|0",
+		"200011|Раздробленная яшма|500|510|0|150011|1|52182*1;40182*1|0",
+		"200012|Сияющая яшма|500|510|0|150012|1|52182*1;40172*1|0",
+		"200013|Неизменная яшма|500|510|0|150013|1|52182*1;40168*1|0",
+		"200014|Расколотая яшма|500|510|0|150014|1|52182*1;40176*1|0",
+		"200015|Плотная яшма|500|510|0|150015|1|52182*1;40181*1|0",
+		"200016|Вневременная яшма|500|510|0|150016|1|52182*1;40164*1|0",
+		"200017|Померкшая яшма|500|510|0|150017|1|52182*1;40173*1|0",
+		"200018|Насыщенная яшма|500|510|0|150018|1|52182*1;40166*1|0",
+		"200019|Блистательный сердолик|500|510|0|150019|1|52177*1;40116*1|0",
+		"200020|Растрескавшийся сердолик|500|510|0|150020|1|52177*1;40117*1|0",
+		"200021|Яркий сердолик|500|510|0|150021|1|52177*1;40114*1|0",
+		"200022|Рельефный сердолик|500|510|0|150022|1|52177*1;40111*1|0",
+		"200023|Блестящий зефирит|500|510|0|150023|1|52178*1;40121*1|0",
+		"200024|Сверкающий алицит|500|510|0|150024|1|52179*1;40123*1|0",
+		"200025|Матовый алицит|500|510|0|150025|1|52179*1;40126*1|0",
+		"200026|Затвердевший гессонит|500|510|0|150026|1|52181*1;40163*1|0",
+		"200027|Стойкий гессонит|500|510|0|150027|1|52181*1;40160*1|0",
+		"200028|Мерцающий гессонит|500|510|0|150028|1|52181*1;40161*1|0",
+		"200029|Сокрытый гессонит|500|510|0|150029|1|52181*1;40153*1|0",
+		"200030|Гессонит защитника|500|510|0|150030|1|52181*1;40144*1|0",
+		"200031|Блистающий гессонит|500|510|0|150031|1|52181*1;40148*1|0",
+		"200032|Гибельный гессонит|500|510|0|150032|1|52181*1;40156*1|0",
+		"200033|Светоносный гессонит|500|510|0|150033|1|52181*1;40151*1|0",
+		"200034|Непрочный камень ночи|500|510|0|150034|1|52180*1;40131*1|0",
+		"200035|Королевский камень ночи|500|510|0|150035|1|52180*1;40134*1|0",
+		"200036|Сбалансированный камень ночи|500|510|0|150036|1|52180*1;40136*1|0",
+		"200037|Таинственный камень ночи|500|510|0|150037|1|52180*1;40135*1|0",
+		"200038|Заряженный камень ночи|500|510|0|150038|1|52180*1;40137*1|0",
+		"200039|Монарший камень ночи|500|510|0|150039|1|52180*1;40138*1|0",
+		"200040|Всевластный камень ночи|500|510|0|150040|1|52180*1;40140*1|0",
+		"260000|Неустанный мглистый алмаз|500|510|0|260000|1|52303*1|0",
+		"260001|Незыблемый мглистый алмаз|500|510|0|260001|1|52303*1|0",
+		"260002|Строгий мглистый алмаз|500|510|0|260002|1|52303*1|0",
+		"260003|Бездушный мглистый алмаз|500|510|0|260003|1|52303*1|0",
+		"260004|Жалкий мглистый алмаз|500|510|0|260004|1|52303*1|0",
+		"260005|Лучезарный мглистый алмаз|500|510|0|260005|1|52303*1|0",
+		"260006|Оживляющий мглистый алмаз|500|510|0|260006|1|52303*1|0",
+		"260007|Стремительный мглистый алмаз|500|510|0|260007|1|52303*1|0",
+		"260008|Загадочный мглистый алмаз|500|510|0|260008|1|52303*1|0",
+		"260009|Угасающий мглистый алмаз|500|510|0|260009|1|52303*1|0",
+		"260010|Разрушительный мглистый алмаз|500|510|0|260010|1|52303*1|0",
+		"260011|Хаотический мглистый алмаз|500|510|0|260011|1|52303*1|0",
+		"260012|Заостренный мглистый алмаз|500|510|0|260012|1|52303*1|0",
+		"260013|Живительный мглистый алмаз|500|510|0|260013|1|52303*1|0",
+		"260014|Лучащийся мглистый алмаз|500|510|0|260014|1|52303*1|0",
+		"260015|Нерушимый мглистый алмаз|500|510|0|260015|1|52303*1|0",
+		"260016|Вечный мглистый алмаз|500|510|0|260016|1|52303*1|0",
+		"260017|Могущественный мглистый алмаз|500|510|0|260017|1|52303*1|0",
+		"260018|Жестокий мглистый алмаз|500|510|0|260018|1|52303*1|0",
+		"260019|Громовой мглистый алмаз|500|510|0|260019|1|52303*1|0",
+		"260020|Провидческий мглистый алмаз|500|510|0|260020|1|52303*1|0",
+		"310817|Стойкий царский янтарь|500|510|0|60109|1|36922*1|0",
+		"310818|Непоколебимый багровый рубин|500|510|0|60110|1|36919*1|0",
+		"310819|Стойкий алицит|500|510|0|60111|1|60109*1;52179*1|0",
+		"310820|Непоколебимый сердолик|500|510|0|60112|1|60110*1;52177*1|0",
+		"310821|Сфера отрицания|500|510|0|60113|1|22459*1;23572*3|0",
+		"310872|Стойкое око дракона|500|510|0|149184|1|42225*1|0",
+		"310873|Непоколебимое око дракона|500|510|0|149185|1|42225*1|0",
+		"319043|Гессонит варвара|500|510|0|97616|1|52181*1;97600*1|0",
+		"319044|Грубый гессонит|500|510|0|97617|1|52181*1;97601*1|0",
+		"319045|Округленный гессонит|500|510|0|97618|1|52181*1;97602*1|0",
+		"319046|Гессонит фехтовальщика|500|510|0|97619|1|52181*1;97603*1|0",
+		"319047|Гессонит авангарда|500|510|0|97620|1|52181*1;97604*1|0",
+		"319048|Краеугольный гессонит|500|510|0|97621|1|52181*1;97605*1|0",
+		"319050|Монументальный камень ночи|500|510|0|97622|1|52180*1;97606*1|0",
+		"319052|Крепкая Яшма|500|510|0|97623|1|52182*1;97607*1|0",
+		"321993|Ожерелье пылкого ума|500|510|0|88354|1|52188*1;76135*3;76137*3;76136*3|0",
+		"321995|Изысканное кольцо|500|510|0|83793|1|52188*1;76133*3;76130*3;76134*3|0",
+		"322020|Цельный лазурит|500|510|0|76506|1|76133*1|0",
+		"322030|Померкший александрит|500|510|0|76515|1|76137*1|0",
+		"322055|Тигровый опал проворства|500|510|0|76534|1|76130*1|0",
+		"322068|Глянцевый тигровый опал|500|510|0|76547|1|76130*1|0",
+		"322070|Шершавый плутовской камень|500|510|0|177887|1|76135*1|0",
+		"322079|Вневременной плутовской камень|500|510|0|76557|1|76135*1|0",
+		"322089|Блистательный врайкульский гранат|500|510|0|76563|1|76136*1|0",
+		"322096|Широкий солнечный камень|500|510|0|177886|1|76134*1|0",
+		"322099|Мистический солнечный камень|500|510|0|76569|1|76134*1|0",
+		"73222|Рельефный сердолик|500|510|0|52081|1|52177*1;40111*1|0",
+		"73223|Изысканный сердолик|500|510|0|52082|1|52177*1;40112*1|0",
+		"73225|Рунический сердолик|500|510|0|52084|1|52177*1;40113*1|0",
+		"73226|Ясный сердолик|500|510|0|52085|1|52177*1;40118*1|0",
+		"73227|Цельный зефирит|500|510|0|52086|1|52178*1;40119*1|0",
+		"73228|Искрящийся зефирит|500|510|0|52087|1|52178*1;40120*1|0",
+		"73229|Грозовой зефирит|500|510|0|52088|1|52178*1;40122*1|0",
+		"73230|Прочный алицит|500|510|0|52089|1|52179*1;40125*1|0",
+		"73231|Изящный сердолик|500|510|0|52090|1|52177*1;40115*1|0",
+		"73232|Гладкий алицит|500|510|0|52091|1|52179*1;40124*1|0",
+		"73234|Мягкий алицит|500|510|0|52093|1|52179*1;40128*1|0",
+		"73239|Мистический алицит|500|510|0|52094|1|52179*1;40127*1|0",
+		"73240|Царственный камень ночи|500|510|0|52095|1|52180*1;40129*1|0",
+		"73241|Изменчивый камень ночи|500|510|0|52096|1|52180*1;40130*1|0",
+		"73242|Камень ночи защитника|500|510|0|52097|1|52180*1;40139*1|0",
+		"73243|Светящийся камень ночи|500|510|0|52098|1|52180*1;40132*1|0",
+		"73244|Камень ночи стража|500|510|0|52099|1|52180*1;40141*1|0",
+		"73245|Очищенный камень ночи|500|510|0|52100|1|52180*1;40133*1|0",
+		"73246|Гравированный гессонит|500|510|0|52101|1|52181*1;40143*1|0",
+		"73250|Идеально ограненный гессонит|500|510|0|52105|1|52181*1;40162*1|0",
+		"73258|Застывший гессонит|500|510|0|52106|1|52181*1;40159*1|0",
+		"73260|Покрытый письменами гессонит|500|510|0|52108|1|52181*1;40142*1|0",
+		"73262|Смертоносный гессонит|500|510|0|52109|1|52181*1;40147*1|0",
+		"73263|Могущественный гессонит|500|510|0|52110|1|52181*1;40152*1|0",
+		"73264|Броский гессонит|500|510|0|52111|1|52181*1;40146*1|0",
+		"73265|Гессонит проворства|500|510|0|52112|1|52181*1;40150*1|0",
+		"73266|Тревожный гессонит|500|510|0|52113|1|52181*1;40155*1|0",
+		"73267|Глянцевый гессонит|500|510|0|52114|1|52181*1;40145*1|0",
+		"73268|Прозрачный гессонит|500|510|0|52115|1|52181*1;40149*1|0",
+		"73269|Наделенный силой гессонит|500|510|0|52116|1|52181*1;40158*1|0",
+		"73270|Надежный гессонит|500|510|0|52117|1|52181*1;40154*1|0",
+		"73271|Нетронутый гессонит|500|510|0|52118|1|52181*1;40157*1|0",
+		"73276|Неизменная яшма|500|510|0|52123|1|52182*1;40168*1|0",
+		"322017|Блестящий лазурит|505|515|0|102397|1|76133*1|0",
+		"322031|Светозарный александрит|505|515|0|76517|1|76137*1|0",
+		"322056|Гибельный тигровый опал|505|515|0|76535|1|76130*1|0",
+		"322080|Плутовской камень защитника|505|515|0|76558|1|76135*1|0",
+		"322090|Рельефный врайкульский гранат|505|515|0|76564|1|76136*1|0",
+		"322095|Матовый солнечный камень|505|515|0|102399|1|76134*1|0",
+		"321991|Изначальный алмаз|510|520|0|76132|1|76133*10;76130*10;76134*10;76135*10;76137*10;76136*10|0",
+		"322032|Раздробленный александрит|510|520|0|76518|1|76137*1|0",
+		"322033|Усиленный александрит|510|520|0|76519|1|76137*1|0",
+		"322034|Зазубренный александрит|510|520|0|76520|1|76137*1|0",
+		"322057|Тревожный тигровый опал|510|520|0|76536|1|76130*1|0",
+		"322058|Броский тигровый опал|510|520|0|76537|1|76130*1|0",
+		"322059|Тигровый опал адепта|510|520|0|76538|1|76130*1|0",
+		"322069|Блистающий плутовской камень|510|520|0|76548|1|76135*1|0",
+		"322081|Царственный плутовской камень|510|520|0|76559|1|76135*1|0",
+		"322082|Крепкий плутовской камень|510|520|0|89675|1|76135*1|0",
+		"322083|Плутовской камень убийцы|510|520|0|89678|1|76135*1|0",
+		"322084|Рунический врайкульский гранат|510|520|0|102398|1|76136*1|0",
+		"322085|Яркий врайкульский гранат|510|520|0|102396|1|76136*1|0",
+		"322086|Непоколебимый врайкульский гранат|510|520|0|177885|1|76136*1|0",
+		"321994|Ожерелье пылкого ума|520|530|0|81567|1|52188*1;52193*15;52194*15;52190*15|0",
+		"321996|Изысканное кольцо|520|530|0|90904|1|52188*1;52191*15;52195*15;52192*15|0",
+		"322003|Стремительный изначальный алмаз|520|530|0|76887|1|76132*1|0",
+		"322004|Бездушный изначальный алмаз|520|530|0|76893|1|76132*1|0",
+		"322005|Лучезарный изначальный алмаз|520|530|0|76897|1|76132*1|0",
+		"322006|Угасающий изначальный алмаз|520|530|0|76879|1|76132*1|0",
+		"322007|Оживляющий изначальный алмаз|520|530|0|76888|1|76132*1|0",
+		"322008|Рокочущий изначальный алмаз|520|530|0|76886|1|76132*1|0",
+		"322009|Загадочный изначальный алмаз|520|530|0|76892|1|76132*1|0",
+		"322010|Вечный изначальный алмаз|520|530|0|76896|1|76132*1|0",
+		"322011|Звонкий изначальный алмаз|520|530|0|76884|1|76132*1|0",
+		"322012|Разрушительный изначальный алмаз|520|530|0|76890|1|76132*1|0",
+		"322013|Жалкий изначальный алмаз|520|530|0|76894|1|76132*1|0",
+		"322014|Горящий изначальный алмаз|520|530|0|76885|1|76132*1|0",
+		"322015|Могучий изначальный алмаз|520|530|0|76891|1|76132*1|0",
+		"322016|Неограненный изначальный алмаз|520|530|0|76895|1|76132*1|0",
+		"322100|Грозовое сердце реки|520|530|0|76637|1|76138*1|0",
+		"322101|Искрящееся сердце реки|520|530|0|76638|1|76138*1|0",
+		"322102|Цельное сердце реки|520|530|0|76639|1|76138*1|0",
+		"322103|Блестящее сердце реки|520|530|0|177304|1|76138*1|0",
+		"322104|Смутный самородный нефрит|520|530|0|76640|1|76139*1|0",
+		"322105|Прожигающий самородный нефрит|520|530|0|76641|1|76139*1|0",
+		"322106|Молниевый самородный нефрит|520|530|0|76642|1|76139*1|0",
+		"322107|Самородный нефрит сенсея|520|530|0|76643|1|76139*1|0",
+		"322108|Лучезарный самородный нефрит|520|530|0|76644|1|76139*1|0",
+		"322109|Промерзший самородный нефрит|520|530|0|76645|1|76139*1|0",
+		"322110|Сбалансированный самородный нефрит|520|530|0|76646|1|76139*1|0",
+		"322111|Насыщенный самородный нефрит|520|530|0|76647|1|76139*1|0",
+		"322112|Померкший самородный нефрит|520|530|0|76648|1|76139*1|0",
+		"322113|Светозарный самородный нефрит|520|530|0|76649|1|76139*1|0",
+		"322114|Раздробленный самородный нефрит|520|530|0|76650|1|76139*1|0",
+		"322115|Усиленный самородный нефрит|520|530|0|76651|1|76139*1|0",
+		"322116|Зазубренный самородный нефрит|520|530|0|76652|1|76139*1|0",
+		"322117|Монарший самородный нефрит|520|530|0|76653|1|76139*1|0",
+		"322118|Мощный самородный нефрит|520|530|0|76654|1|76139*1|0",
+		"322119|Искаженный самородный нефрит|520|530|0|76655|1|76139*1|0",
+		"322120|Всевластный самородный нефрит|520|530|0|76656|1|76139*1|0",
+		"322121|Неизменный самородный нефрит|520|530|0|76657|1|76139*1|0",
+		"322122|Живой самородный нефрит|520|530|0|93705|1|76139*1|0",
+		"322123|Плотный самородный нефрит|520|530|0|177898|1|76139*1|0",
+		"322124|Смертоносный закатный оникс|520|530|0|76658|1|76140*1|0",
+		"322125|Коварный закатный оникс|520|530|0|76659|1|76140*1|0",
+		"322126|Могущественный закатный оникс|520|530|0|76660|1|76140*1|0",
+		"322127|Покрытый письменами закатный оникс|520|530|0|76661|1|76140*1|0",
+		"322128|Полированный закатный оникс|520|530|0|76662|1|76140*1|0",
+		"322129|Затвердевший закатный оникс|520|530|0|76663|1|76140*1|0",
+		"322130|Стойкий закатный оникс|520|530|0|76664|1|76140*1|0",
+		"322131|Закатный оникс воителя|520|530|0|76665|1|76140*1|0",
+		"322132|Закатный оникс проворства|520|530|0|76666|1|76140*1|0",
+		"322133|Гибельный закатный оникс|520|530|0|76667|1|76140*1|0",
+		"322134|Тревожный закатный оникс|520|530|0|76668|1|76140*1|0",
+		"322135|Броский закатный оникс|520|530|0|76669|1|76140*1|0",
+		"322136|Закатный оникс адепта|520|530|0|76670|1|76140*1|0",
+		"322137|Острый закатный оникс|520|530|0|76671|1|76140*1|0",
+		"322138|Искусный закатный оникс|520|530|0|76672|1|76140*1|0",
+		"322139|Тончайший закатный оникс|520|530|0|76673|1|76140*1|0",
+		"322140|Мастерский закатный оникс|520|530|0|76674|1|76140*1|0",
+		"322141|Прозрачный закатный оникс|520|530|0|76675|1|76140*1|0",
+		"322142|Тонкий закатный оникс|520|530|0|76676|1|76140*1|0",
+		"322143|Неподатливый закатный оникс|520|530|0|76677|1|76140*1|0",
+		"322144|Великолепный закатный оникс|520|530|0|76678|1|76140*1|0",
+		"322145|Глянцевый закатный оникс|520|530|0|76679|1|76140*1|0",
+		"322146|Варварский закатный оникс|520|530|0|177899|1|76140*1|0",
+		"322147|Грубый закатный оникс|520|530|0|177900|1|76140*1|0",
+		"322148|Округленный закатный оникс|520|530|0|177901|1|76140*1|0",
+		"322149|Закатный оникс фехтовальщика|520|530|0|177902|1|76140*1|0",
+		"322150|Закатный оникс авангарда|520|530|0|177903|1|76140*1|0",
+		"322151|Краеугольный закатный оникс|520|530|0|177904|1|76140*1|0",
+		"322152|Блистающий императорский аметист|520|530|0|76680|1|76141*1|0",
+		"322153|Идеально ограненный императорский аметист|520|530|0|76681|1|76141*1|0",
+		"322154|Сокрытый императорский аметист|520|530|0|76682|1|76141*1|0",
+		"322155|Мстительный императорский аметист|520|530|0|76683|1|76141*1|0",
+		"322156|Гравированный императорский аметист|520|530|0|76684|1|76141*1|0",
+		"322157|Таинственный императорский аметист|520|530|0|76685|1|76141*1|0",
+		"322158|Очищенный императорский аметист|520|530|0|76686|1|76141*1|0",
+		"322159|Изменчивый императорский аметист|520|530|0|76687|1|76141*1|0",
+		"322160|Шершавый императорский аметист|520|530|0|177897|1|76141*1|0",
+		"322161|Императорский аметист стража|520|530|0|76688|1|76141*1|0",
+		"322162|Вневременной императорский аметист|520|530|0|76689|1|76141*1|0",
+		"322163|Императорский аметист защитника|520|530|0|76690|1|76141*1|0",
+		"322164|Царственный императорский аметист|520|530|0|76691|1|76141*1|0",
+		"322165|Крепкий императорский аметист|520|530|0|89674|1|76141*1|0",
+		"322166|Императорский аметист убийцы|520|530|0|89680|1|76141*1|0",
+		"322167|Рунический первозданный рубин|520|530|0|177305|1|76131*1|0",
+		"322168|Хрупкий первозданный рубин|520|530|0|76692|1|76131*1|0",
+		"322169|Ясный первозданный рубин|520|530|0|76693|1|76131*1|0",
+		"322170|Блистательный первозданный рубин|520|530|0|76695|1|76131*1|0",
+		"322171|Рельефный первозданный рубин|520|530|0|76696|1|76131*1|0",
+		"322172|Яркий первозданный рубин|520|530|0|177303|1|76131*1|0",
+		"322173|Непоколебимый первозданный рубин|520|530|0|177895|1|76131*1|0",
+		"322174|Изящный первозданный рубин|520|530|0|76698|1|76131*1|0",
+		"322175|Растрескавшийся первозданный рубин|520|530|0|76700|1|76131*1|0",
+		"322176|Прочный солнцесвет|520|530|0|76636|1|76142*1|0",
+		"322177|Сверкающий солнцесвет|520|530|0|76694|1|76142*1|0",
+		"322178|Гладкий солнцесвет|520|530|0|76697|1|76142*1|0",
+		"322179|Мягкий солнцесвет|520|530|0|76699|1|76142*1|0",
+		"322180|Мистический солнцесвет|520|530|0|76701|1|76142*1|0",
+		"322181|Матовый солнцесвет|520|530|0|177475|1|76142*1|0",
+		"322182|Широкий солнцесвет|520|530|0|177896|1|76142*1|0",
+		"321997|Ожерелье небесного мага|525|535|0|83805|1|52188*1;76132*1;76135*18;102351*1|0",
+		"321998|Подвеска с тигровым опалом|525|535|0|83806|1|52188*1;76132*1;76130*18;102351*1|0",
+		"321999|Мечта о Море|525|535|0|83802|1|52188*1;76132*1;76133*18;102351*1|0",
+		"322000|Кольцо оступившегося льва|525|535|0|83800|1|52188*1;76132*1;76134*18;102351*1|0",
+		"322001|Перстень повелителя|525|535|0|83799|1|52188*1;76132*1;76131*18;102351*1|0",
+		"322002|Сердце земли|525|535|0|83796|1|52188*1;76132*1;76137*18;102351*1|0",
+		"321992|Поводья кристаллического охотника|535|545|0|155940|1|52190*20;52191*20;52194*20;52195*20;76132*20;102351*1|0",
+	},
+	[773] = {
+		"52738|Бежевые чернила|15|30|1|37101|1|39151*1|0",
+		"45382|Свиток выносливости|35|45|1|1180|1|37101*1;39354*1|0",
+		"48114|Свиток интеллекта|35|45|1|955|1|37101*1;39354*1|0",
+		"48116|Свиток духа|35|45|1|1181|1|37101*1;39354*1|0",
+		"58472|Свиток ловкости|35|45|0|3012|1|37101*2;39354*1|0",
+		"58484|Свиток силы|35|45|0|954|1|37101*2;39354*1|0",
+		"52843|Чернила лунного сияния|45|75|0|39469|1|39151*2|0",
+		"48248|Свиток возврата|60|75|0|37118|1|39354*1;39469*1|0",
+		"50598|Свиток интеллекта II|75|85|0|2290|1|39774*1;39354*1|0",
+		"50605|Свиток духа II|75|85|0|1712|1|39774*1;39354*1|0",
+		"50612|Свиток выносливости II|75|85|0|1711|1|39774*1;39354*1|0",
+		"52739|Материал для свитка брони|75|100|0|38682|2|39469*1;39354*2|0",
+		"53462|Полуночные чернила|75|80|0|39774|1|39334*2|0",
+		"58289|Символ шипов|80|90|0|43332|1|39774*1;39354*1|0",
+		"58296|Символ дикой природы|80|90|0|43335|1|39774*1;39354*1|0",
+		"58298|Символ отпугивания зверя|80|90|0|43356|1|39774*1;39354*1|0",
+		"58299|Символ воскрешения питомца|80|90|0|43338|1|39774*1;39354*1|0",
+		"58300|Символ овладения силой|80|90|0|43354|1|39774*1;39354*1|0",
+		"58301|Символ лечения питомца|80|90|0|43350|1|39774*1;39354*1|0",
+		"58303|Символ чародейского интеллекта|80|90|0|43339|1|39774*1;39354*1|0",
+		"58306|Символ морозного доспеха|80|90|0|43359|1|39774*1;39354*1|0",
+		"58308|Символ замедленного падения|80|90|0|43364|1|39774*1;39354*1|0",
+		"58310|Символ пингвина|80|90|0|43361|1|39774*1;39354*1|0",
+		"58312|Символ благословения мудрости|80|90|0|43366|1|39774*1;39354*1|0",
+		"58313|Символ возложения рук|80|90|0|43367|1|39774*1;39354*1|0",
+		"58314|Символ благословения могущества|80|90|0|43340|1|39774*1;39354*1|0",
+		"58317|Символ растворения в тени|80|90|0|43342|1|39774*1;39354*1|0",
+		"58318|Символ стойкости|80|90|0|43371|1|39774*1;39354*1|0",
+		"58323|Символ огромной скорости|80|90|0|43379|1|39774*1;39354*1|0",
+		"58326|Символ обшаривания карманов|80|90|0|43343|1|39774*1;39354*1|0",
+		"58337|Символ похищения души|80|90|0|43390|1|39774*1;39354*1|0",
+		"58342|Символ боевого крика|80|90|0|43395|1|39774*1;39354*1|0",
+		"58343|Символ кровавой ярости|80|90|0|43396|1|39774*1;39354*1|0",
+		"58344|Символ рывка|80|90|0|43397|1|39774*1;39354*1|0",
+		"58346|Символ удара грома|80|90|0|43399|1|39774*1;39354*1|0",
+		"58485|Свиток силы II|80|90|0|2289|1|39774*1;39354*1|0",
+		"57703|Чернила охотника|85|95|0|43115|1|43103*1|0",
+		"58473|Свиток ловкости II|85|95|0|1477|1|39774*1;39354*1|0",
+		"56955|Символ омоложения|90|110|0|40913|1|39774*1;39354*1|0",
+		"56976|Символ кольца льда|90|110|0|42741|1|39774*1;39354*1|0",
+		"57004|Символ метки охотника|90|110|0|42907|1|39774*1;39354*1|0",
+		"57022|Символ духовного созвучия|90|110|0|41096|1|39774*1;39354*1|0",
+		"57114|Символ удара в спину|90|110|0|42956|1|39774*1;39354*1|0",
+		"57194|Символ слова силы: Щит|90|110|0|42408|1|39774*1;39354*1|0",
+		"56963|Символ гнева|95|115|0|40922|1|39774*1;39354*1|0",
+		"57162|Символ стремительного рывка|95|115|0|43413|1|39774*1;39354*1|0",
+		"57239|Символ огненного шока|95|115|0|41531|1|39774*1;39354*1|0",
+		"57259|Символ порчи|95|115|0|42455|1|39774*1;39354*1|0",
+		"57704|Чернила царя зверей|95|105|0|43116|1|39338*2|0",
+		"52840|Материал для свитка оружия|100|125|0|39349|2|39774*3;39354*2|0",
+		"56961|Символ трепки|100|120|0|40897|1|39774*1;39354*1|0",
+		"56978|Символ ледяного доспеха|100|120|0|42743|1|39774*1;39354*1|0",
+		"57009|Символ укуса змеи|100|120|0|42912|1|39774*1;39354*1|0",
+		"57027|Символ молота правосудия|100|120|0|41095|1|39774*1;39354*1|0",
+		"48121|Символ гнева деревьев|105|115|0|40924|1|43116*1;39354*1|0",
+		"56968|Символ чародейского взрыва|105|115|0|42734|1|43116*1;39354*1|0",
+		"56995|Символ чародейского выстрела|105|115|0|42898|1|43116*1;39354*1|0",
+		"57119|Символ ускользания|105|125|0|42960|1|39774*1;39354*1|0",
+		"57158|Символ удара героя|105|125|0|43418|1|39774*1;39354*1|0",
+		"57196|Символ ментального крика|105|125|0|42410|1|39774*1;39354*1|0",
+		"57246|Символ щита молний|105|125|0|41537|1|39774*1;39354*1|0",
+		"57266|Символ камня здоровья|105|125|0|42462|1|39774*1;39354*1|0",
+		"58286|Символ водного облика|105|115|0|43316|1|43116*1;39354*1|0",
+		"58288|Символ безграничного возрождения|105|115|0|43331|1|43116*1;39354*1|0",
+		"58305|Символ защиты от огня|105|115|0|43357|1|43116*1;39354*1|0",
+		"58311|Символ благословения королей|105|115|0|43365|1|43116*1;39354*1|0",
+		"58315|Символ чутья на нежить|105|115|0|43368|1|43116*1;39354*1|0",
+		"58320|Символ сковывания нежити|105|115|0|43373|1|43116*1;39354*1|0",
+		"58325|Символ взлома|105|115|0|43377|1|43116*1;39354*1|0",
+		"58332|Символ водного щита|105|115|0|43386|1|43116*1;39354*1|0",
+		"58336|Символ бесконечного дыхания|105|115|0|43389|1|43116*1;39354*1|0",
+		"58345|Символ дразнящего удара|105|115|0|43398|1|43116*1;39354*1|0",
+		"59326|Символ призрачного волка|105|115|0|43725|1|43116*1;39354*1|0",
+		"67600|Символ когтя|105|115|0|48720|1|39774*1;39354*1|0",
+		"57029|Символ Света небес|110|120|0|41106|1|43116*1;10648*1|0",
+		"57120|Символ потрошения|110|120|0|42961|1|43116*1;10648*1|0",
+		"57184|Символ ухода в тень|110|120|0|42398|1|43116*1;10648*1|0",
+		"57163|Символ кровопускания|115|125|0|43423|1|43116*1;10648*1|0",
+		"57238|Символ кольца огня|115|125|0|41530|1|43116*1;10648*1|0",
+		"57265|Символ канала здоровья|115|125|0|42461|1|43116*1;10648*1|0",
+		"56945|Символ целительного прикосновения|120|130|0|40914|1|43116*1;10648*1|0",
+		"56971|Символ чародейских стрел|120|130|0|42735|1|43116*1;10648*1|0",
+		"56997|Символ лечения|120|130|0|42900|1|43116*1;10648*1|0",
+		"48247|Карта таинства|125|150|0|0|1|39354*1;43115*1;39774*1|0",
+		"57030|Символ правосудия|125|135|0|41092|1|43116*1;10648*1|0",
+		"57121|Символ ослабления доспеха|125|135|0|42962|1|43116*1;10648*1|0",
+		"57186|Символ быстрого исцеления|125|135|0|42400|1|43116*1;10648*1|0",
+		"57706|Чернила утренней звезды|125|135|0|43117|1|43104*1|0",
+		"58565|Мистический том|125|150|0|43515|1|39354*10;43115*5;39774*2|0",
+		"61288|Исследование малого начертания|125|150|0|0|1|39469*1;39354*2|1",
+		"57157|Символ подрезанного сухожилия|130|140|0|43417|1|43116*1;10648*1|0",
+		"57240|Символ оружия языка пламени|130|140|0|41532|1|43116*1;10648*1|0",
+		"57262|Символ страха|130|140|0|42458|1|43116*1;10648*1|0",
+		"58307|Символ защиты от магии льда|130|140|0|43360|1|43116*1;10648*1|0",
+		"58324|Символ отвлечения|130|140|0|43376|1|43116*1;10648*1|0",
+		"58328|Символ исчезновения|130|140|0|43380|1|43116*1;10648*1|0",
+		"58331|Символ подводного дыхания|130|140|0|43344|1|43116*1;10648*1|0",
+		"58340|Символ Килрогга|130|140|0|43391|1|43116*1;10648*1|0",
+		"56951|Символ лунного огня|135|145|0|40923|1|43116*1;10648*1|0",
+		"56973|Символ скачка|135|145|0|42737|1|43116*1;10648*1|0",
+		"57005|Символ обжигающей ловушки|135|145|0|42908|1|43116*1;10648*1|0",
+		"57031|Символ божественности|140|150|0|41108|1|43116*1;10648*1|0",
+		"57123|Символ гарроты|140|150|0|42964|1|43116*1;10648*1|0",
+		"57188|Символ внутреннего огня|140|150|0|42402|1|43116*1;10648*1|0",
+		"57167|Символ раскола брони|145|155|0|43427|1|43116*1;10648*1|0",
+		"57245|Символ молнии|145|155|0|41536|1|43116*1;10648*1|0",
+		"57269|Символ беса|145|155|0|42465|1|43116*1;10648*1|0",
+		"57707|Чернила нефритового пламени|145|155|0|43118|1|39339*2|0",
+		"59475|Фолиант рассвета|150|175|0|43654|1|43117*5;10648*10;43116*2|0",
+		"59478|Фолиант выживания|150|175|0|43655|1|43117*5;10648*10;43116*2|0",
+		"59480|Странная карта|150|175|0|0|1|43117*2;10648*1;43116*1|0",
+		"56948|Символ роя насекомых|155|165|0|40919|1|43118*1;10648*1|0",
+		"57007|Символ залпа|155|165|0|42910|1|43118*1;10648*1|0",
+		"58287|Символ вызывающего рева|155|165|0|43334|1|43118*1;10648*1|0",
+		"58302|Символ ложной смерти|155|165|0|43351|1|43118*1;10648*1|0",
+		"58316|Символ мудрых|155|165|0|43369|1|43118*1;10648*1|0",
+		"58321|Символ защиты от темной магии|155|165|0|43372|1|43118*1;10648*1|0",
+		"58329|Символ астрального возвращения|155|165|0|43381|1|43118*1;10648*1|0",
+		"58330|Символ обновленной жизни|155|165|0|43385|1|43118*1;10648*1|0",
+		"58333|Символ хождения по воде|155|165|0|43388|1|43118*1;10648*1|0",
+		"58338|Символ проклятия изнеможения|155|165|0|43392|1|43118*1;10648*1|0",
+		"58339|Символ порабощения демона|155|165|0|43393|1|43118*1;10648*1|0",
+		"59315|Символ порыва|155|165|0|43674|1|43118*1;10648*1|0",
+		"50614|Свиток выносливости III|160|170|0|4422|2|43118*1;10648*2|0",
+		"56974|Символ прилива сил|160|170|0|42738|1|43118*1;10648*1|0",
+		"57032|Символ праведной защиты|160|170|0|41100|1|43118*1;10648*1|0",
+		"50606|Свиток духа III|165|175|0|4424|2|43118*1;10648*2|0",
+		"57125|Символ парализующего удара|165|175|0|42966|1|43118*1;10648*1|0",
+		"57197|Символ обновления|165|175|0|42411|1|43118*1;10648*1|0",
+		"50599|Свиток интеллекта III|170|180|0|4419|5|43118*1;10648*2|0",
+		"57249|Символ вскипания лавы|170|180|0|41540|1|43118*1;10648*1|0",
+		"57271|Символ стрелы Тьмы|170|180|0|42467|1|43118*1;10648*1|0",
+		"57708|Королевские чернила|170|180|0|43119|1|43105*1|0",
+		"56953|Символ возрождения|175|185|0|40909|1|43118*1;10648*1|0",
+		"57161|Символ превосходства|175|185|0|43422|1|43118*1;10648*1|0",
+		"58486|Свиток силы III|175|185|0|4426|5|43118*1;10648*2|0",
+		"56981|Символ стылой крови|180|190|0|42746|1|43118*1;10648*1|0",
+		"56994|Символ прицельного выстрела|180|190|0|42897|1|43118*1;10648*1|0",
+		"58319|Символ левитации|180|190|0|43370|1|43118*1;10648*1|0",
+		"58476|Свиток ловкости III|180|190|0|4425|5|43118*1;10648*2|0",
+		"57020|Символ очищения|185|195|0|41104|1|43118*1;10648*1|0",
+		"57200|Символ пытки разума|185|195|0|42415|1|43118*1;10648*1|0",
+		"57129|Символ ошеломления|190|200|0|42970|1|43118*1;10648*1|0",
+		"57241|Символ ледяного шока|190|200|0|41547|1|43118*1;10648*1|0",
+		"57165|Символ реванша|195|205|0|43424|1|43118*1;10648*1|0",
+		"57277|Символ демона Бездны|195|205|0|42473|1|43118*1;10648*1|0",
+		"57709|Астрономические чернила|195|205|0|43120|1|39340*2|0",
+		"59484|Фолиант королей|200|210|0|43656|1|43119*5;10648*10;43118*2|0",
+		"59486|Полная схема маршрутов эвакуации|200|210|0|43657|1|43119*5;10648*10;43118*2|0",
+		"59487|Карта тайной магии|200|210|0|0|1|43119*2;10648*1;43118*1|0",
+		"56956|Символ разрывания|205|215|0|40902|1|43120*1;10648*1|0",
+		"57000|Символ сдерживания|205|215|0|42903|1|43120*1;10648*1|0",
+		"58297|Символ стаи|205|215|0|43355|1|43120*1;10648*1|0",
+		"58327|Символ безопасного падения|205|215|0|43378|1|43120*1;10648*1|0",
+		"59387|Сертификат собственности|205|215|0|43850|1|43120*2;10648*1|0",
+		"50616|Свиток выносливости IV|210|220|0|10307|2|43120*1;39501*2|0",
+		"56982|Символ ожога|210|220|0|42747|1|43120*1;39501*1|0",
+		"57023|Символ освящения|210|220|0|41099|1|43120*1;39501*1|0",
+		"59499|Материал для свитка брони II|210|220|0|37602|2|43120*1;10648*2|0",
+		"50607|Свиток духа IV|215|225|0|10306|2|43120*1;39501*2|0",
+		"57131|Символ коварного удара|215|225|0|42972|1|43120*1;39501*1|0",
+		"57201|Символ кары|215|225|0|42416|1|43120*1;39501*1|0",
+		"60336|Свиток возврата II|215|225|0|44314|1|10648*1;43120*1|0",
+		"50600|Свиток интеллекта IV|220|230|0|10308|2|43120*1;39501*2|0",
+		"57242|Символ тотема исцеляющего потока|220|230|0|41533|1|43120*1;39501*1|0",
+		"57270|Символ жгучей боли|220|230|0|42466|1|43120*1;39501*1|0",
+		"57710|Огненные чернила|220|230|0|43121|1|43106*1|0",
+		"56959|Символ звездного огня|225|235|0|40916|1|43120*1;39501*1|0",
+		"57151|Символ вульгарных оскорблений|225|235|0|43420|1|43120*1;39501*1|0",
+		"58487|Свиток силы IV|225|235|0|10310|2|43120*1;39501*2|0",
+		"56979|Символ ледяной глыбы|230|240|0|42744|1|43120*1;39501*1|0",
+		"57001|Символ отрыва|230|240|0|42904|1|43120*1;39501*1|0",
+		"58478|Свиток ловкости IV|230|240|0|10309|2|43120*1;39501*2|0",
+		"57024|Символ удара воина Света|235|245|0|41098|1|43120*1;39501*1|0",
+		"57183|Символ рассеивания заклинаний|235|245|0|42397|1|43120*1;39501*1|0",
+		"57132|Символ мясорубки|240|250|0|42973|1|43120*1;39501*1|0",
+		"57244|Символ малой волны исцеления|240|250|0|41535|1|43120*1;39501*1|0",
+		"59489|Руководство по глотанию огня|240|250|0|43660|1|43121*5;39501*10;43120*2|0",
+		"59490|Книга звезд|240|250|0|43661|1|43121*5;43120*2;39501*10|0",
+		"59491|Карта тени|240|250|0|0|1|43121*2;39501*1;43120*1|0",
+		"57154|Символ рассечения|245|255|0|43414|1|43120*1;39501*1|0",
+		"57274|Символ камня души|245|255|0|42470|1|43120*1;39501*1|0",
+		"57711|Мерцающие чернила|245|255|0|43122|1|39341*2|0",
+		"59488|Материал для свитка оружия II|250|260|0|39350|2|43121*1;39501*2;43120*1|0",
+		"50617|Свиток выносливости V|255|265|0|27502|2|43122*1;39501*2|0",
+		"64258|Символ сезона дождей|255|270|0|45622|1|43122*1;39501*1|0",
+		"64259|Символ подавления боли|255|270|0|45760|1|43122*1;39501*1|0",
+		"64260|Символ расправы|255|270|0|45768|1|43122*1;39501*1|0",
+		"64261|Символ щита земли|255|270|0|45775|1|43122*1;39501*1|0",
+		"64262|Символ тотема гнева|255|270|0|45776|1|43122*1;39501*1|0",
+		"71101|Символ извечной воды|255|265|0|50045|1|43124*1;39502*1|0",
+		"50608|Свиток духа V|260|270|0|27501|2|43122*1;39501*2|0",
+		"50601|Свиток интеллекта V|265|275|0|27499|2|43122*1;39501*2|0",
+		"56957|Символ полосования|265|275|0|40901|1|43122*1;39501*1|0",
+		"57002|Символ замораживающей ловушки|265|275|0|42905|1|43122*1;39501*1|0",
+		"57025|Символ экзорцизма|270|280|0|41103|1|43122*1;39501*1|0",
+		"57210|Символ костяного щита|270|280|0|43536|1|43122*1;39501*1|0",
+		"58488|Свиток силы V|270|280|0|27503|2|43122*1;39501*2|0",
+		"57185|Символ защиты от страха|275|285|0|42399|1|43122*1;39501*1|0",
+		"57216|Символ ледяного удара|275|285|0|43543|1|43122*1;39501*1|0",
+		"58480|Свиток ловкости V|275|285|0|27498|2|43122*1;39501*2|0",
+		"57251|Символ хозяина вод|280|290|0|41541|1|43122*1;39501*1|0",
+		"57272|Символ ожога Тьмы|280|290|0|42468|1|43122*1;39501*1|0",
+		"64266|Символ черной смерти|280|295|0|45804|1|43122*1;39501*1|0",
+		"56985|Символ самоцвета маны|285|295|0|42750|1|43122*1;39501*1|0",
+		"57219|Символ ледяного прикосновения|285|295|0|43546|1|43122*1;39501*1|0",
+		"64267|Символ болезни|285|295|0|45805|1|43122*1;39501*1|0",
+		"57133|Символ спринта|290|300|0|42974|1|43122*1;39501*1|0",
+		"57156|Символ казни|290|300|0|43416|1|43122*1;39501*1|0",
+		"57213|Символ хватки смерти|290|300|0|43541|1|43122*1;39501*1|0",
+		"57712|Небесные чернила|290|300|0|43123|1|43107*1|0",
+		"59493|Фолиант грозовых оков|290|300|0|43663|1|43123*8;39501*1;43122*4|0",
+		"59494|Книга полета|290|300|0|43664|1|43123*8;39501*10;43122*4|0",
+		"59502|Карта Новолуния|290|300|0|0|1|43123*5;39501*1;43122*2|0",
+		"57713|Астральные чернила|295|305|0|43124|1|39342*2|0",
+		"50618|Свиток выносливости VI|300|310|0|33461|2|43122*1;39501*2|0",
+		"50609|Свиток духа VI|305|315|0|33460|2|43122*1;39501*2|0",
+		"57026|Символ вспышки Света|305|315|0|41105|1|43124*1;39501*1|0",
+		"57215|Символ объятий смерти|305|315|0|43539|1|43124*1;39501*1|0",
+		"57221|Символ удара чумы|305|315|0|43548|1|43124*1;39501*1|0",
+		"57228|Символ воскрешения мертвых|305|315|0|43673|1|43124*1;39501*1|0",
+		"57229|Символ взрыва трупа|305|315|0|43671|1|43124*1;39501*1|0",
+		"57230|Символ мора|305|315|0|43672|1|43124*1;39501*1|0",
+		"57236|Символ оружия жизни земли|305|315|0|41527|1|43124*1;39501*1|0",
+		"50602|Свиток интеллекта VI|310|320|0|33458|2|43124*1;39501*2|0",
+		"57122|Символ ложного выпада|310|320|0|42963|1|43124*1;39501*1|0",
+		"57226|Символ несокрушимой брони|310|320|0|43553|1|43124*1;39502*1|0",
+		"56952|Символ глубокой раны|315|325|0|40903|1|43124*1;39502*1|0",
+		"58489|Свиток силы VI|315|325|0|33462|2|43124*1;39501*2|0",
+		"59338|Символ захвата рун|315|325|0|43825|1|43124*1;39502*1|0",
+		"56991|Символ чародейской вспышки|320|330|0|44955|1|43124*1;39502*1|0",
+		"57008|Символ быстрой стрельбы|320|330|0|42911|1|43124*1;39502*1|0",
+		"57187|Символ кольца света|320|330|0|42401|1|43124*1;39502*1|0",
+		"57714|Чернила черного огня|320|330|0|43125|1|43108*1|0",
+		"58481|Свиток ловкости VI|320|330|0|33457|2|43124*1;39501*2|0",
+		"57168|Символ размашистого удара|325|335|0|43428|1|43124*1;39502*1|0",
+		"59339|Символ кровавого удара|325|335|0|43826|1|43124*1;39502*1|0",
+		"56984|Символ магического доспеха|330|340|0|42749|1|43124*1;39502*1|0",
+		"57209|Символ кровоотвода|330|340|0|43535|1|43124*1;39502*1|0",
+		"57217|Символ зимнего горна|330|340|0|43544|1|43124*1;39502*1|0",
+		"57275|Символ суккуба|330|340|0|42471|1|43124*1;39502*1|0",
+		"58347|Символ неоспоримой победы|330|340|0|43400|1|43124*1;39502*1|0",
+		"57224|Символ удара Плети|335|345|0|43551|1|43124*1;39502*1|0",
+		"57252|Символ оружия неистовства ветра|335|345|0|41542|1|43124*1;39502*1|0",
+		"56972|Символ мощи тайной магии|340|350|0|42736|1|43124*1;39502*1|0",
+		"57033|Символ печати повиновения|340|350|0|41094|1|43124*1;39502*1|0",
+		"59495|Фолиант адского огня|340|350|0|43666|1|43125*6;39502*10;43124*3|0",
+		"59496|Книга хитрых советов|340|350|0|43667|1|43125*6;39502*10;43124*3|0",
+		"57113|Символ внезапного удара|345|355|0|42955|1|43124*1;39502*1|0",
+		"57715|Чернила моря|345|355|0|43126|1|39343*2|0",
+		"59340|Символ удара смерти|345|355|0|43827|1|43124*1;39502*1|0",
+		"60337|Свиток возврата III|345|355|0|44315|1|43126*1;39502*1|0",
+		"57172|Символ вихря|350|360|0|43432|1|43124*1;39502*1|0",
+		"57227|Символ крови вампира|350|360|0|43554|1|43124*1;39502*1|0",
+		"59503|Старшая карта Новолуния|350|380|0|0|1|43125*3;39502*1;21886*3;43124*1|0",
+		"50619|Свиток выносливости VII|355|365|0|37093|2|43126*1;39502*2|0",
+		"56943|Символ неистового восстановления|355|365|0|40896|1|43124*1;39502*1|0",
+		"56965|Символ тайфуна|355|365|0|44922|1|39502*1;43126*1|0",
+		"56990|Символ взрывной волны|355|365|0|44920|1|39502*1;43126*1|0",
+		"57003|Символ ледяной ловушки|355|365|0|42906|1|43124*1;39502*1|0",
+		"57192|Символ Слова Тьмы: Боль|355|365|0|42406|1|43124*1;39502*1|0",
+		"57222|Символ вурдалака|355|365|0|43549|1|43124*1;39502*1|0",
+		"57253|Символ грома и молнии|355|365|0|44923|1|39502*1;43126*1|0",
+		"57257|Символ испепеления|355|365|0|42453|1|43124*1;39502*1|0",
+		"58322|Символ исчадия Тьмы|355|365|0|43374|1|43126*1;39502*1|0",
+		"58341|Символ душ|355|365|0|43394|1|43126*1;39502*1|0",
+		"59500|Материал для свитка брони III|355|385|0|43145|2|43126*1;39502*2|0",
+		"68166|Символ властности|355|365|0|49084|1|43126*1;39502*1|0",
+		"50610|Свиток духа VII|360|370|0|37097|2|43126*1;39502*2|0",
+		"50603|Свиток интеллекта VII|365|375|0|37091|2|43126*1;39502*2|0",
+		"57716|Чернила снегопада|370|380|0|43127|1|43109*2|0",
+		"58490|Свиток силы VII|370|380|0|43465|2|43126*1;39502*2|0",
+		"58482|Свиток ловкости VII|375|385|0|43463|2|43126*1;39502*2|0",
+		"64051|Книга ритуалов новолуния|375|400|0|0|1|43126*5;39502*10;35627*3|0",
+		"64053|Сумеречный фолиант|375|400|0|45849|1|43126*5;39502*10;35625*2|0",
+		"56980|Символ ледяного копья|380|390|0|42745|1|43126*1;39502*1|0",
+		"57006|Символ ястреба|380|390|0|42909|1|43126*1;39502*1|0",
+		"57036|Символ изгнания зла|380|390|0|41102|1|43126*1;39502*1|0",
+		"57198|Символ сдерживания Плети|380|390|0|42412|1|43126*1;39502*1|0",
+		"57225|Символ удушения|380|390|0|43552|1|43126*1;39502*1|0",
+		"57248|Символ удара бури|380|390|0|41539|1|43126*1;39502*1|0",
+		"62162|Символ фокусирования|380|390|0|44928|1|43126*1;39502*1|0",
+		"71015|Символ стремительного омоложения|380|385|0|50125|1|43126*1;39502*1|0",
+		"71102|Символ быстрого разложения|380|385|0|50077|1|43126*1;39502*1|0",
+		"56944|Символ рыка|390|405|0|40899|1|43126*1;39502*1|0",
+		"56946|Символ грозы|390|405|0|40920|1|43126*1;39502*1|0",
+		"56947|Символ озарения|390|405|0|40908|1|43126*1;39502*1|0",
+		"56949|Символ жизнецвета|390|405|0|40915|1|43126*1;39502*1|0",
+		"56950|Символ увечья|390|405|0|40900|1|43126*1;39502*1|0",
+		"56954|Символ восстановления|390|405|0|40912|1|43126*1;39502*1|0",
+		"56958|Символ звездопада|390|405|0|40921|1|43126*1;39502*1|0",
+		"56960|Символ быстрого восстановления|390|405|0|40906|1|43126*1;39502*1|0",
+		"56975|Символ огненного шара|390|405|0|42739|1|43126*1;39502*1|0",
+		"56977|Символ ледяной стрелы|390|405|0|42742|1|43126*1;39502*1|0",
+		"56983|Символ невидимости|390|405|0|42748|1|43126*1;39502*1|0",
+		"56986|Символ раскаленного доспеха|390|405|0|42751|1|43126*1;39502*1|0",
+		"56987|Символ превращения|390|405|0|42752|1|43126*1;39502*1|0",
+		"56988|Символ снятия проклятия|390|405|0|42753|1|43126*1;39502*1|0",
+		"56989|Символ элементаля воды|390|405|0|42754|1|43126*1;39502*1|0",
+		"56996|Символ духа зверя|390|405|0|42899|1|43126*1;39502*1|0",
+		"56998|Символ духа гадюки|390|405|0|42901|1|43126*1;39502*1|0",
+		"56999|Символ звериного гнева|390|405|0|42902|1|43126*1;39502*1|0",
+		"57010|Символ змеиной ловушки|390|405|0|42913|1|43126*1;39502*1|0",
+		"57011|Символ верного выстрела|390|405|0|42914|1|43126*1;39502*1|0",
+		"57012|Символ ауры меткого выстрела|390|405|0|42915|1|43126*1;39502*1|0",
+		"57013|Символ града стрел|390|405|0|42916|1|43126*1;39502*1|0",
+		"57014|Символ укуса виверны|390|405|0|42917|1|43126*1;39502*1|0",
+		"57019|Символ щита мстителя|390|405|0|41101|1|43126*1;39502*1|0",
+		"57021|Символ гнева карателя|390|405|0|41107|1|43126*1;39502*1|0",
+		"57028|Символ молота гнева|390|405|0|41097|1|43126*1;39502*1|0",
+		"57034|Символ печати Света|390|405|0|41110|1|43126*1;39502*1|0",
+		"57035|Символ печати мудрости|390|405|0|41109|1|43126*1;39502*1|0",
+		"57112|Символ выброса адреналина|390|405|0|42954|1|43126*1;39502*1|0",
+		"57115|Символ шквала клинков|390|405|0|42957|1|43126*1;39502*1|0",
+		"57116|Символ калечащего яда|390|405|0|42958|1|43126*1;39502*1|0",
+		"57117|Символ смертельного броска|390|405|0|42959|1|43126*1;39502*1|0",
+		"57124|Символ призрачного удара|390|405|0|42965|1|43126*1;39502*1|0",
+		"57126|Символ кровоизлияния|390|405|0|42967|1|43126*1;39502*1|0",
+		"57127|Символ подготовки|390|405|0|42968|1|43126*1;39502*1|0",
+		"57128|Символ рваной раны|390|405|0|42969|1|43126*1;39502*1|0",
+		"57130|Символ неутомимости|390|405|0|42971|1|43126*1;39502*1|0",
+		"57152|Символ блокирования|390|405|0|43425|1|43126*1;39502*1|0",
+		"57153|Символ кровожадности|390|405|0|43412|1|43126*1;39502*1|0",
+		"57155|Символ сокрушения|390|405|0|43415|1|43126*1;39502*1|0",
+		"57159|Символ вмешательства|390|405|0|43419|1|43126*1;39502*1|0",
+		"57160|Символ смертельного удара|390|405|0|43421|1|43126*1;39502*1|0",
+		"57164|Символ грохочущей мощи|390|405|0|43430|1|43126*1;39502*1|0",
+		"57166|Символ отчаянной защиты|390|405|0|43426|1|43126*1;39502*1|0",
+		"57169|Символ провокации|390|405|0|43429|1|43126*1;39502*1|0",
+		"57170|Символ победного ража|390|405|0|43431|1|43126*1;39502*1|0",
+		"57181|Символ круга исцеления|390|405|0|42396|1|43126*1;39502*1|0",
+		"57189|Символ колодца Света|390|405|0|42403|1|43126*1;39502*1|0",
+		"57190|Символ массового рассеивания|390|405|0|42404|1|43126*1;39502*1|0",
+		"57191|Символ контроля над разумом|390|405|0|42405|1|43126*1;39502*1|0",
+		"57193|Символ Тьмы|390|405|0|42407|1|43126*1;39502*1|0",
+		"57195|Символ молитвы исцеления|390|405|0|42409|1|43126*1;39502*1|0",
+		"57199|Символ слова Тьмы: Смерть|390|405|0|42414|1|43126*1;39502*1|0",
+		"57202|Символ духа воздаяния|390|405|0|42417|1|43126*1;39502*1|0",
+		"57207|Символ антимагического панциря|390|405|0|43533|1|43126*1;39502*1|0",
+		"57208|Символ удара в сердце|390|405|0|43534|1|43126*1;39502*1|0",
+		"57211|Символ ледяных оков|390|405|0|43537|1|43126*1;39502*1|0",
+		"57212|Символ темной власти|390|405|0|43538|1|43126*1;39502*1|0",
+		"57214|Символ смерти и разложения|390|405|0|43542|1|43126*1;39502*1|0",
+		"57218|Символ незыблемости льда|390|405|0|43545|1|43126*1;39502*1|0",
+		"57220|Символ уничтожения|390|405|0|43547|1|43126*1;39502*1|0",
+		"57223|Символ рунического удара|390|405|0|43550|1|43126*1;39502*1|0",
+		"57232|Символ цепного исцеления|390|405|0|41517|1|43126*1;39502*1|0",
+		"57233|Символ цепной молнии|390|405|0|41518|1|43126*1;39502*1|0",
+		"57234|Символ лавы|390|400|0|41524|1|43126*1;39502*1|0",
+		"57235|Символ шока|390|405|0|41526|1|43126*1;39502*1|0",
+		"57237|Символ тотема элементаля огня|390|405|0|41529|1|43126*1;39502*1|0",
+		"57243|Символ волны исцеления|390|405|0|41534|1|43126*1;39502*1|0",
+		"57247|Символ тотема прилива маны|390|405|0|41538|1|43126*1;39502*1|0",
+		"57250|Символ покорения стихий|390|405|0|41552|1|43126*1;39502*1|0",
+		"57258|Символ поджигания|390|405|0|42454|1|43126*1;39502*1|0",
+		"57260|Символ проклятия агонии|390|405|0|42456|1|43126*1;39502*1|0",
+		"57261|Символ лика смерти|390|405|0|42457|1|43126*1;39502*1|0",
+		"57263|Символ стража Скверны|390|405|0|42459|1|43126*1;39502*1|0",
+		"57264|Символ охотника Скверны|390|405|0|42460|1|43126*1;39502*1|0",
+		"57267|Символ воя ужаса|390|405|0|42463|1|43126*1;39502*1|0",
+		"57268|Символ жертвенного огня|390|405|0|42464|1|43126*1;39502*1|0",
+		"57273|Символ вытягивания жизни|390|405|0|42469|1|43126*1;39502*1|0",
+		"57276|Символ нестабильного колдовства|390|405|0|42472|1|43126*1;39502*1|0",
+		"57719|Символ огненного взрыва|390|405|0|42740|1|43126*1;39502*1|0",
+		"59559|Символ священного гнева|390|405|0|43867|1|43126*1;39502*1|0",
+		"59560|Символ печати праведности|390|405|0|43868|1|43126*1;39502*1|0",
+		"59561|Символ печати отмщения|390|405|0|43869|1|43126*1;39502*1|0",
+		"61677|Символ ледяного огня|390|405|0|44684|1|43126*1;39502*1|0",
+		"61117|Мастерское начертание секиры|395|405|0|0|1|43127*1|0",
+		"61118|Мастерское начертание скалы|395|405|0|0|1|43127*1|0",
+		"61119|Мастерское начертание вершины|395|405|0|0|1|43127*1|0",
+		"61120|Мастерское начертание бури|395|405|0|0|1|43127*1|0",
+		"50620|Свиток выносливости VIII|405|415|0|37094|2|43126*1;39502*2|0",
+		"59501|Материал для свитка оружия III|405|415|0|43146|2|43126*3;39502*2|0",
+		"50611|Свиток духа VIII|410|420|0|37098|2|43126*1;39502*2|0",
+		"50604|Свиток интеллекта VIII|415|425|0|37092|2|43126*1;39502*2|0",
+		"58491|Свиток силы VIII|420|430|0|43466|2|43126*1;39502*2|0",
+		"58483|Свиток ловкости VIII|425|435|0|43464|2|43126*1;39502*2|0",
+		"59497|Фолиант в железном переплете|425|450|0|38322|1|43127*5;39502*10;43102*1;43126*2|0",
+		"59498|Лики Судьбы|425|450|0|44210|1|43127*5;39502*10;43102*1;43126*2|0",
+		"61177|Исследование нордскольского начертания|425|450|0|0|1|43126*3;43127*1;39502*5|1",
+		"69385|Рунический свиток стойкости|425|460|0|49632|5|43127*1;39502*5|0",
+		"302093|Великое начертание журавлиного крыла|430|460|0|87559|1|43127*10;43125*10;43126*20;39502*20|0",
+		"302094|Великое начертание клыка тигра|430|460|0|83006|1|43127*10;43125*10;43126*20;39502*20|0",
+		"302095|Великое начертание когтя тигра|430|460|0|83007|1|43127*10;43125*10;43126*20;39502*20|0",
+		"302096|Великое начертание рога быка|430|460|0|87560|1|43127*10;43125*10;43126*20;39502*20|0",
+		"64246|Символ удара ящера|430|440|0|45735|1|39774*1;39354*1|0",
+		"64247|Символ тотема каменного когтя|430|440|0|45778|1|39774*1;39354*1|0",
+		"64248|Символ жизнеотвода|430|440|0|45785|1|39774*1;39354*1|0",
+		"64249|Символ дезориентирующего выстрела|430|440|0|45734|1|43116*1;39354*1|0",
+		"64250|Символ связки души|430|440|0|45789|1|43116*1;39354*1|0",
+		"64251|Символ спасения|430|440|0|45747|1|43116*1;10648*1|0",
+		"64252|Символ глухой обороны|430|440|0|45797|1|43116*1;10648*1|0",
+		"64253|Символ взрывной ловушки|430|440|0|45733|1|43118*1;10648*1|0",
+		"64254|Символ шока небес|430|440|0|45746|1|43120*1;10648*1|0",
+		"64255|Символ бдительности|430|440|0|45793|1|43120*1;10648*1|0",
+		"64256|Символ дубовой кожи|430|440|0|45623|1|43120*1;39501*1|0",
+		"64257|Символ ледяной преграды|430|440|0|45740|1|43120*1;39501*1|0",
+		"64268|Символ берсерка|430|440|0|45601|1|43124*1;39502*1|0",
+		"64270|Символ буйного роста|430|440|0|45602|1|43124*1;39502*1|0",
+		"64271|Символ выстрела химеры|430|440|0|45625|1|43124*1;39502*1|0",
+		"64273|Символ разрывного выстрела|430|440|0|45731|1|43124*1;39502*1|0",
+		"64274|Символ глубокой заморозки|430|440|0|45736|1|43124*1;39502*1|0",
+		"64275|Символ живой бомбы|430|440|0|45737|1|43124*1;39502*1|0",
+		"64276|Символ чародейского обстрела|430|440|0|45738|1|43124*1;39502*1|0",
+		"64277|Символ частицы Света|430|440|0|45741|1|43124*1;39502*1|0",
+		"64278|Символ молота праведника|430|440|0|45742|1|43124*1;39502*1|0",
+		"64279|Символ божественной бури|430|440|0|45743|1|43124*1;39502*1|0",
+		"64280|Символ слияния с Тьмой|430|440|0|45753|1|43124*1;39502*1|0",
+		"64281|Символ оберегающего духа|430|440|0|45755|1|43124*1;39502*1|0",
+		"64282|Символ исповеди|430|440|0|45756|1|43124*1;39502*1|0",
+		"64283|Символ гимна надежды|430|440|0|45758|1|43124*1;39502*1|0",
+		"64284|Символ жажды убийства|430|440|0|45761|1|43124*1;39502*1|0",
+		"64285|Символ череды убийств|430|440|0|45762|1|43124*1;39502*1|0",
+		"64286|Символ танца теней|430|440|0|45764|1|43124*1;39502*1|0",
+		"64287|Символ грома|430|440|0|45770|1|43124*1;39502*1|0",
+		"64288|Символ духа дикого волка|430|440|0|45771|1|43124*1;39502*1|0",
+		"64289|Символ быстрины|430|440|0|45772|1|43124*1;39502*1|0",
+		"64291|Символ блуждающего духа|430|440|0|45779|1|43124*1;39502*1|0",
+		"64294|Символ стрелы Хаоса|430|440|0|45781|1|43124*1;39502*1|0",
+		"64295|Символ вихря клинков|430|440|0|45790|1|43124*1;39502*1|0",
+		"64296|Символ ударной волны|430|440|0|45792|1|43124*1;39502*1|0",
+		"64297|Символ танцующего рунического оружия|430|440|0|45799|1|43124*1;39502*1|0",
+		"64298|Символ ненасытной стужи|430|440|0|45800|1|43124*1;39502*1|0",
+		"64299|Символ нечестивой порчи|430|440|0|45803|1|43124*1;39502*1|0",
+		"64300|Символ воющего ветра|430|440|0|45806|1|43124*1;39502*1|0",
+		"64302|Символ отражения заклинания|430|440|0|45795|1|43124*1;39502*1|0",
+		"64303|Символ плаща Теней|430|440|0|45769|1|43124*1;39502*1|0",
+		"64304|Символ убийственного выстрела|430|440|0|45732|1|43126*1;39502*1|0",
+		"64305|Символ святой клятвы|430|440|0|45745|1|43126*1;39502*1|0",
+		"64307|Символ дикого рева|430|440|0|45604|1|43126*1;39502*1|0",
+		"64308|Символ щита праведности|430|440|0|45744|1|43126*1;39502*1|0",
+		"64309|Символ иссушения разума|430|440|0|45757|1|43126*1;39502*1|0",
+		"64310|Символ маленьких хитростей|430|440|0|45767|1|43126*1;39502*1|0",
+		"64311|Символ пламени Тьмы|430|440|0|45783|1|43126*1;39502*1|0",
+		"64312|Символ безудержного восстановления|430|440|0|45794|1|43126*1;39502*1|0",
+		"64313|Символ покровительства природы|430|440|0|45603|1|43126*1;39502*1|0",
+		"64314|Символ зеркального изображения|430|440|0|45739|1|43126*1;39502*1|0",
+		"64315|Символ веера клинков|430|440|0|45766|1|43126*1;39502*1|0",
+		"64316|Символ сглаза|430|440|0|45777|1|43126*1;39502*1|0",
+		"64317|Символ демонического круга|430|440|0|45782|1|43126*1;39502*1|0",
+		"64318|Символ метаморфозы|430|440|0|45780|1|43124*1;39502*1|0",
+		"65245|Символ инстинкта выживания|430|440|0|46372|1|43126*1;39354*1|0",
+		"59504|Карта Новолуния: Север|450|475|0|0|1|39502*1;43127*6;35625*3;43126*3|0",
+		"371616|Мрачно-коричневые чернила|460|470|0|61978|1|61979*2|0",
+		"371639|Символ уменьшения питомца|465|475|0|43383|1|177848*1;61978*11|0",
+		"371646|Символ гальки|465|475|0|177436|1|177848*1;61978*11|0",
+		"315379|Свиток ловкости IX|470|490|0|154164|2|43126*3;39502*6|0",
+		"315380|Свиток интеллекта IX|470|490|0|154165|2|43126*3;39502*6|0",
+		"315381|Свиток духа IX|470|490|0|154166|2|43126*3;39502*6|0",
+		"315382|Свиток выносливости IX|470|490|0|154167|2|43126*3;39502*6|0",
+		"315383|Свиток силы IX|470|490|0|154168|2|43126*3;39502*6|0",
+		"371641|Символ столпа света|470|480|0|177426|1|177848*1;61978*11|0",
+		"371644|Символ окоченевшего панциря|470|480|0|177430|1|177848*1;61978*11|0",
+		"371636|Символ призрачного растворения|475|485|0|177437|1|177848*1;61978*11|0",
+		"371647|Символ мерцающего пламени|475|485|0|177431|1|177848*1;61978*11|0",
+		"371637|Символ щедрого угощения|480|490|0|177306|1|177848*1;61978*11|0",
+		"371633|Символ огненного рывка|485|495|0|177435|1|177848*1;61978*11|0",
+		"371634|Символ пылающей ярости|485|495|0|80588|1|177848*1;61978*11|0",
+		"371638|Символ десертного угощения|490|500|0|177438|1|177848*1;61978*11|0",
+		"371661|Свиток поганища|490|500|0|177434|1|177848*1;61978*5|0",
+		"371617|Чернила Преисподней|495|505|0|61981|1|61980*2|0",
+		"371629|Фельярдский свиток скорости|500|510|0|102375|1|177848*2;61979*9|1",
+		"371630|Фельярдский свиток исцеления|500|510|0|102376|1|177848*2;61979*9|1",
+		"371631|Фельярдский свиток защиты|500|510|0|102377|1|177848*2;61979*9|1",
+		"371632|Фельярдский свиток возвращения|500|510|0|102378|1|177848*2;61979*9|1",
+		"371642|Символ выгорания|500|510|0|177432|1|177848*1;61978*11|0",
+		"371643|Символ нокаута|500|510|0|177428|1|177848*1;61978*11|0",
+		"371626|Воодушевление Торкелля|505|515|0|177857|1|177848*1;61979*4|0",
+		"371627|Воодушевление Торфина|505|515|0|177858|1|177848*1;61979*4|0",
+		"371628|Воодушевление Аскеладда|505|515|0|177859|1|177848*1;61979*4|0",
+		"371645|Символ кровавого панциря|505|515|0|177433|1|177848*1;61978*11|0",
+		"371662|Свиток абиссала|505|515|0|177429|1|177848*1;61978*5|0",
+		"306094|Книга крови|510|520|0|62231|1|43127*20;39502*50;43102*10;43126*15;41334*5|0",
+		"306095|Книга молитв|510|520|0|62233|1|43127*20;39502*50;43102*10;43126*15;41266*5|0",
+		"318454|Контракт с Эльдранилом|510|520|0|320409|1|39502*1;61981*3;52193*1|0",
+		"318455|Контракт с Гилнеасом|510|520|0|320410|1|39502*1;61981*3;52194*1|0",
+		"318456|Контракт с Изгнанниками Вайш'ира|510|520|0|320411|1|39502*1;61981*3;52191*1|0",
+		"318457|Контракт с Картеля Трюмных Вод|510|520|0|320412|1|39502*1;61981*3;52190*1|0",
+		"318458|Контракт с Орденом Красного Журавля|510|520|0|320413|1|39502*1;61981*3;52192*1|0",
+		"318459|Контракт с Абимайскими искателями|510|520|0|320415|1|39502*1;61981*3;52195*1|0",
+		"318460|Контракт с Орденом Белого Тигра|510|520|0|320414|1|39502*1;61981*3;52192*1|0",
+		"318461|Контракт с Артелем Барханного Ветра|510|520|0|320416|1|39502*1;61981*3;52195*1|0",
+		"371618|Свиток силы атаки|510|520|0|177439|1|177848*4;61981*2;61978*2|0",
+		"371619|Свиток урона|510|520|0|177440|1|177848*4;61981*2;61978*2|0",
+		"371620|Свиток снижения урона|510|520|0|177441|1|177848*4;61981*2;61978*2|0",
+		"371621|Свиток скорости|510|520|0|177442|1|177848*4;61981*2;61978*2|0",
+		"371622|Свиток эффективности лечения|510|520|0|177443|1|177848*4;61981*2;61978*2|0",
+		"371623|Свиток критического удара|510|520|0|177444|1|177848*4;61981*2;61978*2|0",
+		"371624|Свиток критического удара заклинаний|510|520|0|177445|1|177848*4;61981*2;61978*2|0",
+		"371625|Свиток всех характеристик|510|520|0|177446|1|177848*4;61981*2;61978*2|0",
+		"371640|Символ карманной коробки|510|520|0|177425|1|177848*1;61978*11|0",
+		"371650|Символ чародейской гениальности|510|520|0|177944|1|177848*1;61978*11|0",
+		"371651|Символ ритуала Рока|510|520|0|177945|1|177848*1;61978*11|0",
+		"371652|Символ молитвы духа|510|520|0|177946|1|177848*1;61978*11|0",
+		"371653|Символ молитвы защиты от темной магии|510|520|0|177947|1|177848*1;61978*11|0",
+		"371654|Символ молитвы стойкости|510|520|0|177948|1|177848*1;61978*11|0",
+		"371655|Символ дара дикой природы|510|520|0|177949|1|177848*1;61978*11|0",
+		"371656|Символ божественного вмешательства|510|520|0|177950|1|177848*1;61978*11|0",
+		"371657|Символ великого благословения|510|520|0|177954|1|177848*1;61978*11|0",
+		"371658|Символ перерождения|510|520|0|177955|1|177848*1;61978*11|0",
+		"371659|Символ подводного дыхания|510|520|0|177956|1|177848*1;61978*11|0",
+		"371660|Символ воскрешения мертвых|510|520|0|177957|1|177848*1;61978*11|0",
+		"371663|Покрытый шипами посох|510|520|0|87562|1|79740*1;61978*20;52327*10;52326*1;67319*1|0",
+		"371664|Рунический посох|510|520|0|87566|1|79740*1;61978*15;52329*20;63322*5|0",
+		"305998|Символ пира для воронов|515|525|0|105147|1|43127*3;39502*1|0",
+		"305999|Символ громового удара|515|525|0|105146|1|43127*3;39502*1|0",
+		"306000|Символ крылатого отмщения|515|525|0|105133|1|43127*3;39502*1|0",
+		"306001|Символ увеличения питомца|515|525|0|105128|1|43127*3;39502*1|0",
+		"306002|Свиток грызунов|515|525|0|105129|1|43127*3;39502*1|0",
+		"306003|Символ маскировки|515|525|0|105137|1|43127*3;39502*1|0",
+		"306004|Символ черепов|515|525|0|105138|1|43127*3;39502*1|0",
+		"306005|Символ всеполгощающей тьмы|515|525|0|105134|1|43127*3;39502*1|0",
+		"306007|Символ ангелов|515|525|0|105136|1|43127*3;39502*1|0",
+		"306010|Символ тления|515|525|0|105130|1|43127*3;39502*1|0",
+		"306011|Свиток высвобожденного элементаля|515|525|0|105131|1|43127*3;39502*1|0",
+		"306012|Символ переполняющей мощи|515|525|0|105132|1|43127*3;39502*1|0",
+		"306013|Свиток стража гнева|515|525|0|105141|1|43127*3;39502*1|0",
+		"306014|Свиток шиварры|515|525|0|105142|1|43127*3;39502*1|0",
+		"306015|Свиток повелителя Бездны|515|525|0|105143|1|43127*3;39502*1|0",
+		"306016|Свиток наблюдателя|515|525|0|105144|1|43127*3;39502*1|0",
+		"306017|Свиток беса скверны|515|525|0|105145|1|43127*3;39502*1|0",
+		"306020|Символ звездной пыли|515|525|0|105153|1|43127*3;39502*1|0",
+		"306021|Свиток упыря|515|525|0|105148|1|43127*3;39502*1|0",
+		"306022|Символ мясника|515|525|0|105149|1|43127*3;39502*1|0",
+		"306023|Символ смертельной стужи|515|525|0|105150|1|43127*3;39502*1|0",
+		"371635|Символ неистового восстановления кошмара|515|525|0|177427|1|177848*1;61978*11|0",
+		"371648|Символ дикого гриба|515|525|0|105152|1|177848*1;61978*11|0",
+		"371649|Символ пути леса|515|525|0|105151|1|177848*1;61978*6;61981*9|0",
+		"305996|Таинственная карта удачи|520|530|0|60838|1|43126*5;39502*5|1",
+		"371665|Руководство по исследованию подземелий|525|535|0|62234|1|177848*10;61981*15;52195*6;58480*1;102351*1|0",
+		"371666|Божественный спутник|525|535|0|62235|1|177848*10;61981*12;52329*30;58480*1;102351*1|0",
+		"371667|Ключ к иным мирам|525|535|0|87565|1|79740*1;61981*15;52328*10;63323*5;58480*1;102351*1|0",
+		"371668|Инкрустированный серебром посох|525|535|0|87561|1|79740*1;61981*10;52326*24;52329*28;63341*3;58480*1;102351*1|0",
+		"371669|Поводья акварельного лиса|535|545|0|155963|1|61978*50;61981*45;177848*10;102351*1|0",
+	},
+	[129] = {
+		"3275|Льняные бинты|30|60|1|1251|1|2589*1|0",
+		"3276|Плотные льняные бинты|50|100|0|2581|1|2589*2|0",
+		"3277|Шерстяные бинты|80|150|0|3530|1|2592*1|0",
+		"7934|Противоядие|80|150|0|6452|3|1475*1|0",
+		"3278|Плотные шерстяные бинты|115|185|0|3531|1|2592*2|0",
+		"7935|Сильное противоядие|130|200|0|6453|3|1288*1|0",
+		"7928|Шелковые бинты|150|210|0|6450|1|4306*1|0",
+		"7929|Плотные шелковые бинты|180|240|0|6451|1|4306*2|0",
+		"10840|Бинты из магической ткани|210|270|0|8544|1|4338*1|0",
+		"10841|Плотные бинты из магической ткани|240|300|0|8545|1|4338*2|0",
+		"18629|Бинты из рунической ткани|260|320|0|14529|1|14047*1|0",
+		"18630|Плотные бинты из рунической ткани|290|350|0|14530|1|14047*2|0",
+		"23787|Мощное противоядие|300|360|0|19440|1|19441*1|0",
+		"27032|Бинты из ткани Пустоты|330|365|0|21990|1|21877*1|0",
+		"27033|Плотные бинты из ткани Пустоты|360|375|0|21991|1|21877*2|0",
+		"45545|Бинты из ледяной ткани|375|410|0|34721|1|33470*1|0",
+		"45546|Плотные бинты из ледяной ткани|390|470|0|34722|1|33470*2|0",
+		"317843|Бинты из ледяной ткани Пустоты|400|480|0|64369|1|33470*2;21877*2|0",
+		"316191|Бинты из ветрошерсти|460|495|0|72985|1|72988*1|0",
+		"316192|Плотные бинты из ветрошерсти|495|515|0|72986|1|72988*2|0",
+		"306111|Противоядие Седой Лапы|515|525|0|177849|1|177847*1;52329*2;81214*1|0",
+		"306112|Масло из улетной рыбы|515|525|0|177850|1|177847*1;52325*2;102359*1|0",
+		"321739|Бальзам с глазом огра|515|525|0|177851|1|177847*1;52327*2;67319*1|0",
+		"321740|Концентрат энергии Кришадалиса|515|525|0|177852|1|177847*1;52326*2;177860*1|0",
+	},
+}
