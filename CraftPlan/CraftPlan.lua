@@ -223,20 +223,29 @@ local function AddUsesToTooltip(tip)
 			local e
 			if known then
 				local kind = (y and KindAt(y, g, rank)) or known.kind
-				e = { name = recName, kind = kind, order = KIND_ORDER[kind] or 5, y = y or 0 }
+				e = { name = recName, kind = kind, order = KIND_ORDER[kind] or 5, y = y or 0, g = g, rank = rank }
 			elseif not (p and p.scanned) then
 				-- окно профессии ещё не открывали: изученность неизвестна, показываем цвет по навыку
 				if y then
 					local kind = KindAt(y, g, rank)
-					e = { name = recName, kind = kind, order = (KIND_ORDER[kind] or 5) + 10, y = y, unsure = true }
+					e = { name = recName, kind = kind, order = (KIND_ORDER[kind] or 5) + 10, y = y, g = g, rank = rank, unsure = true }
 				end
-			elseif not g or rank < g then
-				e = { name = recName, red = true, order = 20, y = y or 0 }
+			else
+				-- не изучен: каким он будет при вашем навыке (серый — навыка не даст)
+				local kind = y and KindAt(y, g, rank)
+				e = { name = recName, red = true, kind = kind, order = (kind == "trivial") and 30 or 20, y = y or 0, g = g, rank = rank }
 			end
 			if e then
 				byProf[profName] = byProf[profName] or {}
 				table.insert(byProf[profName], e)
 			end
+		end
+	end
+	-- материал не актуален: все рецепты с ним уже серые (цвет известен у каждого)
+	local useful = false
+	for _, list in pairs(byProf) do
+		for _, e in ipairs(list) do
+			if e.kind ~= "trivial" then useful = true end
 		end
 	end
 	local first = true
@@ -246,23 +255,42 @@ local function AddUsesToTooltip(tip)
 			if a.y ~= b.y then return a.y < b.y end
 			return a.name < b.name
 		end)
-		if first then tip:AddLine("CraftPlan — пригодится:", 0.4, 0.8, 1) first = false end
+		if first then
+			if useful then tip:AddLine("CraftPlan — пригодится:", 0.4, 0.8, 1)
+			else tip:AddLine("CraftPlan — материал не актуален: ни один рецепт с ним навыка уже не даст", 0.6, 0.6, 0.6, true) end
+			first = false
+		end
 		local p = DB().profs[profName]
 		tip:AddLine(profName .. " (" .. ranks[profName] .. ")" ..
 			((p and p.scanned) and "" or " — откройте окно профессии, чтобы отметить изученные"), 1, 0.82, 0, true)
 		for k = 1, math.min(#list, TIP_PER_PROF) do
 			local e = list[k]
+			local c = COLOR[e.kind] or COLOR.trivial
+			local color = e.kind and ((COLOR_NAME[e.kind] or e.kind) .. (e.kind == "trivial" and " — навыка не даст" or "")) or ""
+			-- сколько ещё навыка даст рецепт: оранжевым — точно (до жёлтого порога), дальше — с шансом (до серого)
+			if e.g and e.kind ~= "trivial" and e.y > 0 then
+				local sure = math.max(0, e.y - e.rank)
+				local chance = e.g - math.max(e.rank, e.y)
+				local parts = {}
+				if sure > 0 then parts[#parts + 1] = "+" .. sure .. " точно" end
+				if chance > 0 then parts[#parts + 1] = "+" .. chance .. " с шансом" end
+				if #parts > 0 then color = color .. " (" .. table.concat(parts, ", ") .. ")" end
+			end
 			if e.red then
-				tip:AddDoubleLine("  " .. e.name, "не изучен" .. (e.y > 0 and (", оранж. до " .. e.y) or ""),
-					1, 0.2, 0.2, 0.8, 0.4, 0.4)
+				tip:AddDoubleLine("  " .. e.name, "не изучен" .. (color ~= "" and (", " .. color) or ""),
+					1, 0.2, 0.2, c[1], c[2], c[3])
+				local src = e.kind ~= "trivial" and CraftPlan.RecipeSourceText and CraftPlan.RecipeSourceText(profName, e.name)
+				if src then tip:AddLine("      " .. src, 0.6, 0.75, 0.9, true) end
 			else
-				local c = COLOR[e.kind] or COLOR.trivial
-				tip:AddDoubleLine("  " .. e.name, COLOR_NAME[e.kind] or "", c[1], c[2], c[3], c[1], c[2], c[3])
+				tip:AddDoubleLine("  " .. e.name, color, c[1], c[2], c[3], c[1], c[2], c[3])
 			end
 		end
 		if #list > TIP_PER_PROF then
 			tip:AddLine("  и ещё " .. (#list - TIP_PER_PROF), 0.6, 0.6, 0.6)
 		end
+	end
+	if not first and useful and CraftPlan.RecipeVendorHint and CraftPlan.RecipeVendorHint(itemID) then
+		tip:AddLine("Ctrl+щелчок — путь TomTom к торговцу рецептом", 0.5, 0.5, 0.5)
 	end
 	if not first then tip:Show() end
 end
@@ -4693,6 +4721,135 @@ local function Update()
 	end
 end
 CraftPlan.UpdateRecipeVendors = Update
+
+-- Подсказка к материалу: где выучить ещё не изученный рецепт — у учителя (с какого навыка и за
+-- сколько, если окно учителя открывали) или рецепт-предмет: у каких торговцев вашей фракции и с
+-- какого навыка. Торговцы и навык запоминаются по предмету на сессию
+local byName, vendorCache, reqTip, reqMiss = nil, {}, nil, {}
+local function VendorsOf(item)
+	if vendorCache[item] then return vendorCache[item] end
+	local Townsfolk = QuestieLoader and QuestieLoader:ImportModule("Townsfolk")
+	local QuestieDB = QuestieLoader and QuestieLoader:ImportModule("QuestieDB")
+	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
+	local list = {}
+	local ok, set = false, nil
+	if Townsfolk and Townsfolk.PopulateVendors then ok, set = pcall(Townsfolk.PopulateVendors, Townsfolk, { item }, {}) end
+	local faction = (UnitFactionGroup("player") == "Horde") and "H" or "A"
+	for npc in pairs(ok and set or {}) do
+		local f = QuestieDB.QueryNPCSingle(npc, "friendlyToFaction")
+		if f and f:find(faction, 1, true) then
+			local zone, area1, spot
+			for area, pts in pairs(QuestieDB.QueryNPCSingle(npc, "spawns") or {}) do
+				zone = TrackerUtils and TrackerUtils.GetZoneNameByID and TrackerUtils:GetZoneNameByID(area)
+				area1, spot = area, pts[1]
+				break
+			end
+			local name = QuestieDB.QueryNPCSingle(npc, "name") or "?"
+			list[#list + 1] = { text = name .. (zone and (" (" .. zone .. ")") or ""), name = name, area = area1, spot = spot }
+		end
+	end
+	table.sort(list, function(a, b) return a.text < b.text end)
+	vendorCache[item] = list
+	return list
+end
+-- С какого навыка учится рецепт-предмет: «Требуется: Кулинария (125)» в его подсказке
+local function BookReq(item, prof)
+	local db = DB()
+	db.bookReq = db.bookReq or {}
+	if db.bookReq[item] or reqMiss[item] then return db.bookReq[item] end
+	reqMiss[item] = GetItemInfo(item) ~= nil -- нет в кэше игры — спросим ещё раз, когда придёт
+	reqTip = reqTip or CreateFrame("GameTooltip", "CraftPlanRecipeSrcTip", UIParent, "GameTooltipTemplate")
+	reqTip:SetOwner(UIParent, "ANCHOR_NONE")
+	reqTip:SetHyperlink("item:" .. item)
+	for i = 2, reqTip:NumLines() do
+		local fs = _G["CraftPlanRecipeSrcTipTextLeft" .. i]
+		local text = fs and fs:GetText()
+		local n = text and text:find(prof, 1, true) and tonumber(text:match("%((%d+)%)"))
+		if n then db.bookReq[item] = n break end
+	end
+	reqTip:Hide()
+	return db.bookReq[item]
+end
+function CraftPlan.RecipeSourceText(prof, name)
+	local learn = DB().learn and DB().learn[SKILL_ID[prof]]
+	local t = learn and learn[name]
+	if t then
+		return "у учителя профессии, с навыка " .. t.req .. (t.cost > 0 and (", " .. Money(t.cost)) or "")
+	end
+	if recipes and not byName then
+		byName = {}
+		for _, r in ipairs(recipes) do byName[r.prof .. "|" .. Norm(r.name)] = r end
+	end
+	local r = byName and byName[prof .. "|" .. Norm(name)]
+	if r then
+		local req = BookReq(r.item, prof)
+		local itemName = GetItemInfo(r.item) or "рецепт"
+		local vendors = VendorsOf(r.item)
+		local from = req and (", с навыка " .. req) or ""
+		if #vendors == 0 then
+			return itemName .. from .. " — у торговцев вашей фракции не продаётся (добыча, квест или репутация)"
+		end
+		local shown = {}
+		for i = 1, math.min(2, #vendors) do shown[i] = vendors[i].text end
+		return itemName .. from .. " — продаёт: " .. table.concat(shown, ", ") .. (#vendors > 2 and (" и ещё " .. (#vendors - 2)) or "")
+	end
+	if learn then return "у учителя нет (возможно, рецепт с добычи или квеста)" end
+	if not recipes then return nil end -- база Questie ещё перебирается
+	return "скорее всего у учителя — откройте его окно, чтобы узнать с какого навыка"
+end
+
+-- Ctrl+щелчок по материалу (сумки, ссылка в чате; Alt+щелчок в Linux Mint забирает оконный менеджер): путь TomTom к торговцу рецептом, для которого
+-- нужен этот материал и который вы ещё не изучили. Сначала торговец в вашей зоне
+local SKILL_OF = {}
+for prof, id in pairs(SKILL_ID) do SKILL_OF[id] = prof end
+local function WantedRecipeItems(itemID)
+	local uses = CraftPlanReagents and CraftPlanReagents[itemID]
+	local list, db = {}, DB()
+	if not (uses and recipes) then return list end
+	if not byName then CraftPlan.RecipeSourceText("", "") end -- построить byName
+	for i = 1, #uses, 2 do
+		local prof, recName = SKILL_OF[uses[i]], uses[i + 1]
+		local r = prof and RankOf(prof) and byName[prof .. "|" .. Norm(recName)]
+		local p = r and db.profs[prof]
+		local known = false
+		for _, rec in ipairs(p and p.scanned and p.recipes or {}) do
+			if rec.name == recName then known = true break end
+		end
+		-- серый при вашем навыке — навыка не даст, путь к нему не нужен
+		local y, g = Thresholds(prof or "", recName)
+		local grey = r and y and g and RankOf(prof) >= g
+		if r and not known and not grey then list[#list + 1] = r end
+	end
+	return list
+end
+CraftPlan.RecipeVendorHint = function(itemID) return #WantedRecipeItems(itemID) > 0 end
+local function WaypointToVendor(link)
+	local itemID = tonumber(link:match("item:(%d+)"))
+	if not itemID then return end
+	local here
+	local ZoneDB = QuestieLoader and QuestieLoader:ImportModule("ZoneDB")
+	local ui = QuestieCompat and QuestieCompat.C_Map and QuestieCompat.C_Map.GetBestMapForUnit("player")
+	if ZoneDB and ui then here = ZoneDB:GetAreaIdByUiMapId(ui) end
+	local best, bestR
+	for _, r in ipairs(WantedRecipeItems(itemID)) do
+		for _, v in ipairs(VendorsOf(r.item)) do
+			if v.area and v.spot and (not best or (v.area == here and best.area ~= here)) then best, bestR = v, r end
+		end
+	end
+	if not best then return end
+	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
+	if not (TomTom and TrackerUtils and TrackerUtils.SetTomTomTarget) then
+		Print("нужны TomTom и Questie, чтобы поставить путь.")
+		return
+	end
+	local title = best.name .. " — " .. (GetItemInfo(bestR.item) or bestR.name)
+	TrackerUtils:SetTomTomTarget(title, best.area, best.spot[1], best.spot[2])
+	Print("путь TomTom: " .. best.text .. ", рецепт " .. (GetItemInfo(bestR.item) or bestR.name) .. ".")
+end
+hooksecurefunc("HandleModifiedItemClick", function(link)
+	-- материалы не надеваются, поэтому Ctrl+щелчок (примерка) им ничего не делает
+	if link and IsControlKeyDown() and not IsShiftKeyDown() and not IsAltKeyDown() then pcall(WaypointToVendor, link) end
+end)
 
 -- Перебор базы Questie: имена «Префикс: рецепт», которые есть в таблице порогов
 local function StartScan()

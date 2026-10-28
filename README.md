@@ -63,6 +63,10 @@ Saved variables: `ProcAlertDB`.
 Adds a "remove fog of war" checkbox under the world map — reveals areas you haven't explored yet.
 Same via `/mapplus fog`. Saved variables: `MapPlusDB`.
 
+Button "Путь к ближайшей полётке" next to it (or `/mapplus fly`): sets a TomTom arrow to the nearest flight master of your faction on the current continent (Questie database, straight-line distance). Needs Questie and TomTom.
+
+Checkbox "Полётки на карте": flight master icons of your faction on the world map — green = discovered, red = not discovered, gray = unknown (open a flight map on that continent once; known nodes are remembered on `TAXIMAP_OPENED` and matched by position within 150 yards). Hover — details, click — TomTom arrow.
+
 ## Third-party addons
 
 Kept in the repository as is (possibly with local tweaks):

@@ -20,7 +20,6 @@ local PROCS = {
 	{ id = 7384,  stances = { BATTLE }, buff = 60503 },            -- Превосходство; эффект «Вкус крови» (Taste for Blood)
 	{ id = 5308,  stances = { BATTLE, BERSERKER }, buff = 52437, sound = true, soundBuff = true }, -- Казнь; эффект «Внезапная смерть» (Sudden Death)
 	{ id = 6572,  stances = { DEFENSIVE } },                       -- Реванш (Revenge): после блока, парирования или уклонения
-	{ id = 34428, stances = { BATTLE, BERSERKER }, buff = 32216 }, -- Победный раж: после убийства, бесплатный удар (на Sirus без лечения); отсчёт эффекта «Победа»
 	-- sound — звук при появлении, даже если общий звук выключен (/pa alert); soundBuff — только при этом эффекте
 	{ id = 1464,  buff = 46916, buffOnly = true, sound = true },   -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
 	{ id = 23922, buff = 50227, buffOnly = true },                 -- Мощный удар щитом бесплатно; эффект «Щит и меч» (Sword and Board)
