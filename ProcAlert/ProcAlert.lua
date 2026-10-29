@@ -22,14 +22,15 @@ local PROCS = {
 	{ id = 6572,  stances = { DEFENSIVE } },                       -- Реванш (Revenge): после блока, парирования или уклонения
 	-- sound — звук при появлении, даже если общий звук выключен (/pa alert); soundBuff — только при этом эффекте
 	{ id = 1464,  buff = 46916, buffOnly = true, sound = true },   -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
-	{ id = 23922, buff = 50227, buffOnly = true },                 -- Мощный удар щитом бесплатно; эффект «Щит и меч» (Sword and Board)
+	{ id = 23922, buff = 50227, cond = "ShieldSlamProc" },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
+	                                                               -- а в оборонительной — всегда, когда готов (раньше Смертельного удара)
+	{ id = 12294, stances = { DEFENSIVE }, cond = "MortalDef" },   -- Смертельный удар в оборонительной: Реванша нет, Мощному удару щитом
+	                                                               -- до готовности больше SLAM_WAIT с, ярости хватает
 	-- cond — имя условия из CONDS (ниже); anyTarget — показывать и без враждебной цели;
 	-- alts — показать первую готовую из списка (иконка меняется)
 	{ id = 18499, anyTarget = true, cond = "Feared" },             -- Ярость берсерка: на вас страх, ошеломление и т. п.
 	{ id = 355, alts = { 355, 694, 1161 }, stances = { DEFENSIVE }, cond = "NotOnMe" }, -- Провокация / Дразнящий удар / Вызывающий крик: цель бьёт не вас
 	{ id = 2687, cond = "ExecNeedsRage" },                          -- Кровавая ярость: на Казнь не хватает ярости
-	{ id = 772, stances = { BATTLE, DEFENSIVE }, cond = "RendExpiring", myDebuff = true }, -- Кровопускание: ваше на цели кончается (меньше REND_REFRESH с), с отсчётом;
-	-- с талантом «Вкус крови» — и когда его нет на цели: от него срабатывает Превосходство
 }
 
 -- Обычные удары в порядке показа. skipDebuff — не показывать, если ваш дебафф с этим
@@ -44,15 +45,15 @@ local KICKS = {
 }
 
 local REGULAR = {
-	{ id = 12294 },                                         -- Смертельный удар (Mortal Strike)
+	{ id = 12294, stances = { BATTLE, BERSERKER } },        -- Смертельный удар (Mortal Strike): в оборонительной — в «Срабатываниях»
 	{ id = 23881 },                                         -- Кровожадность (Bloodthirst)
 	{ id = 23922 },                                         -- Мощный удар щитом (Shield Slam)
 	{ id = 1680,  stances = { BERSERKER } },                -- Вихрь (Whirlwind)
-	{ id = 1464 },                                          -- Мощный удар (Slam)
+	{ id = 1464,  stances = { BATTLE, BERSERKER } },        -- Мощный удар (Slam): не в оборонительной (мгновенный по «Мощный удар!» — в «Срабатываниях» везде)
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
 	{ id = 845 },                                           -- Рассекающий удар (Cleave)
-	{ id = 6343,  stances = { DEFENSIVE }, skipDebuff = true },            -- Удар грома (Thunder Clap): только в оборонительной
-	{ id = 772,   stances = { BATTLE, DEFENSIVE }, skipDebuff = true, saveExec = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (за 2 с до конца — в «Срабатываниях»)
+	{ id = 6343,  stances = { DEFENSIVE }, cond = "Crowd" },               -- Удар грома (Thunder Clap): только в оборонительной, как Рассекающий — от CLEAVE_ENEMIES врагов рядом
+	{ id = 772,   stances = { BATTLE, DEFENSIVE }, skipDebuff = true, saveExec = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели
 	{ id = 20252, stances = { BERSERKER } },                -- Перехват (Intercept)
 	{ id = 7386, alts = { 20243, 7386 }, stances = { DEFENSIVE }, cond = "NeedSunder", sunder = true, longFight = true }, -- Сокрушение / Раскол брони: только в оборонительной; на цели меньше 5 или скоро спадёт
 	{ id = 6673, alts = { "shout" }, anyTarget = true, cond = "NoShout", saveExec = true }, -- Боевой / Командирский крик: на вас нет ни одного
@@ -69,6 +70,7 @@ local DUMP_SPELLS = { [78] = true, [845] = true }
 local EXECUTE_PCT = 20
 local BOTH_RAGE = 60 -- от стольких — Превосходство и Казнь показываются вместе
 local SAVE_PCT = 10
+local SLAM_WAIT = 2 -- Мощному удару щитом осталось меньше стольких секунд — Смертельный в оборонительной не показываем
 local RESERVE_SPELLS = {
 	{ id = 12294 },                                -- Смертельный удар
 	{ id = 23881 },                                -- Кровожадность
@@ -85,7 +87,7 @@ local FEAR_SPELLS = { 5782, 5484, 8122, 5246, 6358, 10326, 1513, 6770, 1776, 200
 local SUNDER_REFRESH = 5 -- за сколько секунд до конца Раскола брони напоминать
 local REND_FORGOT = 3     -- в бою с целью столько секунд нет вашего Кровопускания — его значок мигает
 local RendAlert           -- задаётся ниже (нужна анимации значков)
-local REND_REFRESH = 3   -- за сколько секунд до конца Кровопускания показывать его в «Срабатываниях»
+local REND_REFRESH = 3   -- за сколько секунд до конца Кровопускания его значок у мобов справа мигает
 local REND_RESERVE = 3   -- за сколько секунд до конца Кровопускания держать на него ярость (запас Удара героя)
 local LOW_LEVEL_DIFF = 5  -- цель ниже вас на столько уровней (обычная) — бой короткий: без Кровопускания,
                           -- Раскола брони и без копления на Казнь
@@ -540,6 +542,11 @@ local function MyBuff(spellID)
 	end
 end
 
+-- Благословение могущества (обычное или великое): с ним Боевой крик не применяется
+local function MightBlessed()
+	return MyBuff(19740) or MyBuff(25782)
+end
+
 local function PlayerRage()
 	return UnitPower and UnitPower("player", 1) or UnitMana("player")
 end
@@ -646,21 +653,33 @@ local function ExecAdvice()
 	return (dmg * ppd * KILL_MARGIN >= left) and "kill" or "weak"
 end
 
--- Изучен ли талант «Вкус крови» (Превосходство от Кровопускания); проверяем раз в 5 с
-local tfbName, tfbAt, tfbHas = GetSpellInfo(60503), 0, false
-local function HasTasteForBlood()
-	if GetTime() - tfbAt < 5 then return tfbHas end
-	tfbAt, tfbHas = GetTime(), false
-	for tab = 1, (GetNumTalentTabs() or 0) do
-		for i = 1, (GetNumTalents(tab) or 0) do
-			local name, _, _, _, rank = GetTalentInfo(tab, i)
-			if name == tfbName and (rank or 0) > 0 then tfbHas = true return true end
-		end
-	end
-	return false
-end
-
 local CONDS = {
+	ShieldSlamProc = function()
+		if MyBuff(50227) then return true end
+		if CurrentStance() ~= DEFENSIVE then return false end
+		local ss = Known(23922)
+		return ss and not CooldownOf(ss) and true or false
+	end,
+	MortalDef = function()
+		local ms = Known(12294)
+		if not ms or CooldownOf(ms) then return false end
+		local cost = RageCost(ms)
+		if cost and PlayerRage() < cost then return false end
+		local rev = Known(6572) -- Реванш доступен — сначала он
+		if rev and not CooldownOf(rev) and IsUsableSpell(rev) then return false end
+		local ss = Known(23922)
+		if ss then
+			local usable, noMana = IsUsableSpell(ss) -- без щита Мощный удар щитом не применить
+			if usable or noMana then
+				local start, duration = CooldownOf(ss)
+				if not start or start + duration - GetTime() <= SLAM_WAIT then return false end
+			end
+		end
+		return true
+	end,
+	Crowd = function()
+		return MeleeEnemies() >= CLEAVE_ENEMIES
+	end,
 	Feared = function()
 		if not fearNames then
 			fearNames = {}
@@ -688,20 +707,6 @@ local CONDS = {
 		if not (UnitIsPlayer("target") and UnitCanAttack("player", "target")) then return false end
 		return not GetUnitSpeed or (GetUnitSpeed("target") or 0) > 0
 	end,
-	RendExpiring = function()
-		local rend = Known(772)
-		if not rend then return false end
-		local has, left = HasMyDebuff(rend)
-		if not has then
-			if not HasTasteForBlood() then return false end -- без таланта — просто в «Ударах»
-		elseif not (left and left < REND_REFRESH) then
-			return false
-		end
-		-- под 30% у сильной цели ярость копим на Казнь
-		local saving = TargetPct() <= EXECUTE_PCT + SAVE_PCT and StanceAllows({ BATTLE, BERSERKER })
-			and Known(5308) and not LowTarget()
-		return not saving
-	end,
 	ExecNeedsRage = function()
 		local ex = Known(5308)
 		if not (ex and HasEnemyTarget()) then return false end
@@ -711,7 +716,10 @@ local CONDS = {
 	end,
 	NoShout = function()
 		if not (UnitAffectingCombat("player") or HasEnemyTarget()) then return false end
-		return not (MyBuff(6673) or MyBuff(469))
+		if MyBuff(469) then return false end
+		-- под благословением могущества нужен только Командирский крик
+		if MightBlessed() then return Known(469) and true or false end
+		return not MyBuff(6673)
 	end,
 }
 
@@ -765,12 +773,16 @@ end
 
 -- Какую способность показать для записи: без alts — саму; с alts — первую изученную и
 -- готовую (без перезарядки и применимую), иначе первую изученную. "shout" — крик,
--- которым вы пользовались последним (по умолчанию Боевой)
+-- которым вы пользовались последним (по умолчанию Боевой); под благословением могущества — Командирский
 local function Resolve(e)
 	if not e.alts then return Known(e.id) end
 	local list = e.alts
 	if list[1] == "shout" then
-		list = (ProcAlertDB and ProcAlertDB.shout == 469) and { 469, 6673 } or { 6673, 469 }
+		if MightBlessed() then
+			list = { 469 }
+		else
+			list = (ProcAlertDB and ProcAlertDB.shout == 469) and { 469, 6673 } or { 6673, 469 }
+		end
 	end
 	local firstName, firstTex
 	for _, id in ipairs(list) do
