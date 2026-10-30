@@ -24,13 +24,19 @@ local PROCS = {
 	{ id = 1464,  buff = 46916, buffOnly = true, sound = true },   -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
 	{ id = 23922, buff = 50227, cond = "ShieldSlamProc" },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
 	                                                               -- а в оборонительной — всегда, когда готов (раньше Смертельного удара)
-	{ id = 12294, stances = { DEFENSIVE }, cond = "MortalDef" },   -- Смертельный удар в оборонительной: Реванша нет, Мощному удару щитом
-	                                                               -- до готовности больше SLAM_WAIT с, ярости хватает
+	{ id = 772,   stances = { BATTLE }, cond = "RendProc" },       -- Кровопускание в боевой: всегда, когда его нет на цели
+	{ id = 12294, cond = "MortalProc" },                           -- Смертельный удар: в берсерка — когда готов; в боевой — то же, но если нужно
+	                                                               -- Кровопускание, то только при ярости на оба; в оборонительной — Реванша нет,
+	                                                               -- Мощному удару щитом до готовности больше SLAM_WAIT с, ярости хватает
+	{ id = 1680,  stances = { BERSERKER }, cond = "WhirlwindReady" }, -- Вихрь (Whirlwind): когда готов
+	-- imba — «ИМБА»: первыми в ряду, золотая пульсирующая рамка
+	{ id = 2565,  stances = { DEFENSIVE }, cond = "ShieldBlockProc", imba = true }, -- Блок щитом: цель бьёт вас, готов, ещё не висит (нужен щит)
+	{ id = 20230, stances = { BATTLE }, cond = "RetaliationProc", imba = true },    -- Возмездие (Retaliation): то же в боевой
+	{ id = 1719,  stances = { BERSERKER }, cond = "RecklessProc", imba = true },    -- Безрассудство (Recklessness): в бою, готово, ещё не висит
 	-- cond — имя условия из CONDS (ниже); anyTarget — показывать и без враждебной цели;
 	-- alts — показать первую готовую из списка (иконка меняется)
 	{ id = 18499, anyTarget = true, cond = "Feared" },             -- Ярость берсерка: на вас страх, ошеломление и т. п.
 	{ id = 355, alts = { 355, 694, 1161 }, stances = { DEFENSIVE }, cond = "NotOnMe" }, -- Провокация / Дразнящий удар / Вызывающий крик: цель бьёт не вас
-	{ id = 2687, cond = "ExecNeedsRage" },                          -- Кровавая ярость: на Казнь не хватает ярости
 }
 
 -- Обычные удары в порядке показа. skipDebuff — не показывать, если ваш дебафф с этим
@@ -45,15 +51,14 @@ local KICKS = {
 }
 
 local REGULAR = {
-	{ id = 12294, stances = { BATTLE, BERSERKER } },        -- Смертельный удар (Mortal Strike): в оборонительной — в «Срабатываниях»
+	-- Смертельный удар и Вихрь — в «Срабатываниях»
 	{ id = 23881 },                                         -- Кровожадность (Bloodthirst)
 	{ id = 23922 },                                         -- Мощный удар щитом (Shield Slam)
-	{ id = 1680,  stances = { BERSERKER } },                -- Вихрь (Whirlwind)
 	{ id = 1464,  stances = { BATTLE, BERSERKER } },        -- Мощный удар (Slam): не в оборонительной (мгновенный по «Мощный удар!» — в «Срабатываниях» везде)
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
 	{ id = 845 },                                           -- Рассекающий удар (Cleave)
 	{ id = 6343,  stances = { DEFENSIVE }, cond = "Crowd" },               -- Удар грома (Thunder Clap): только в оборонительной, как Рассекающий — от CLEAVE_ENEMIES врагов рядом
-	{ id = 772,   stances = { BATTLE, DEFENSIVE }, skipDebuff = true, saveExec = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели
+	{ id = 772,   stances = { DEFENSIVE }, skipDebuff = true, saveExec = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»)
 	{ id = 20252, stances = { BERSERKER } },                -- Перехват (Intercept)
 	{ id = 7386, alts = { 20243, 7386 }, stances = { DEFENSIVE }, cond = "NeedSunder", sunder = true, longFight = true }, -- Сокрушение / Раскол брони: только в оборонительной; на цели меньше 5 или скоро спадёт
 	{ id = 6673, alts = { "shout" }, anyTarget = true, cond = "NoShout", saveExec = true }, -- Боевой / Командирский крик: на вас нет ни одного
@@ -68,7 +73,6 @@ local DUMP_SPELLS = { [78] = true, [845] = true }
 -- Копить ярость на Казнь: когда у цели здоровья не больше EXECUTE_PCT + SAVE_PCT процентов,
 -- Удар героя и Рассекающий удар не показываются (в стойках, где есть Казнь)
 local EXECUTE_PCT = 20
-local BOTH_RAGE = 60 -- от стольких — Превосходство и Казнь показываются вместе
 local SAVE_PCT = 10
 local SLAM_WAIT = 2 -- Мощному удару щитом осталось меньше стольких секунд — Смертельный в оборонительной не показываем
 local RESERVE_SPELLS = {
@@ -127,9 +131,8 @@ local DEF_X, DEF_Y = -220, 0 -- центр колонки; по высоте е�
 -- под ней Рывок и Перехват: готов ли, хватает ли ярости
 local RUSH_SPELLS = {
 	{ id = 100 },   -- Рывок (Charge): боевая стойка вне боя; с талантом «Вестник войны» — в любой и в бою
-	{ id = 20252, bloodrage = true }, -- Перехват (Intercept): стойка берсерка; справа — Кровавая ярость, если ярости мало
+	{ id = 20252 },  -- Перехват (Intercept): стойка берсерка
 }
-local BLOODRAGE = 2687     -- Кровавая ярость (Bloodrage)
 local RUSH_SIZE = 48
 local STANCE_SIZE = 36
 local RUSH_GAP = 10        -- расстояние между иконками по вертикали
@@ -272,12 +275,28 @@ local function CreateItem(row)
 	f.queued:SetPoint("TOPLEFT", f.icon, "TOPLEFT", 0, 0)
 	f.queued:SetPoint("BOTTOMRIGHT", f.icon, "BOTTOMRIGHT", 0, 0)
 	f.queued:Hide()
+	-- «ИМБА» — золотая рамка вокруг иконки, пульсирует
+	f.glow = over:CreateTexture(nil, "OVERLAY")
+	f.glow:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+	f.glow:SetBlendMode("ADD")
+	f.glow:SetVertexColor(1, 0.8, 0.2)
+	f.glow:SetWidth(row.size * 1.9)
+	f.glow:SetHeight(row.size * 1.9)
+	f.glow:SetPoint("CENTER", f, "CENTER", 0, 0)
+	f.glow:Hide()
 	return f
 end
 
 local function Layout(row)
 	if row.ordered then
 		table.sort(row.items, function(a, b) return (regularOrder[a.spellID] or 0) < (regularOrder[b.spellID] or 0) end)
+	else -- «ИМБА» — первыми, остальные в порядке появления
+		local imba, rest = {}, {}
+		for _, f in ipairs(row.items) do
+			if f.imba then imba[#imba + 1] = f else rest[#rest + 1] = f end
+		end
+		for _, f in ipairs(rest) do imba[#imba + 1] = f end
+		row.items = imba
 	end
 	local gap, total = GetGap(), 0
 	for i, f in ipairs(row.items) do
@@ -311,6 +330,8 @@ local function AddItem(row, spellID, name, texture, pop)
 	f.timer:SetText("")
 	f.rage:SetText("")
 	f.badge:Hide()
+	f.imba = nil
+	f.glow:Hide()
 	f.icon:SetAlpha(1)
 	f.expiresAt = nil
 	f:SetAlpha(0)
@@ -368,6 +389,12 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 			end
 			f.icon:SetWidth(size)
 			f.icon:SetHeight(size)
+			if f.imba then
+				f.glow:SetAlpha(0.5 + 0.5 * math.abs(math.sin(now * 4)))
+				f.glow:Show()
+			else
+				f.glow:Hide()
+			end
 			if DUMP_SPELLS[f.spellID] and f.spellName and IsCurrentSpell(f.spellName) then
 				f.queued:Show()
 			else
@@ -660,11 +687,30 @@ local CONDS = {
 		local ss = Known(23922)
 		return ss and not CooldownOf(ss) and true or false
 	end,
-	MortalDef = function()
+	WhirlwindReady = function()
+		local ww = Known(1680)
+		return ww and not CooldownOf(ww) and true or false
+	end,
+	RendProc = function()
+		local rend = Known(772)
+		return rend and not HasMyDebuff(rend) and true or false
+	end,
+	MortalProc = function()
 		local ms = Known(12294)
 		if not ms or CooldownOf(ms) then return false end
 		local cost = RageCost(ms)
-		if cost and PlayerRage() < cost then return false end
+		if cost and PlayerRage() < cost then return false end -- в любой стойке: только когда ярости хватает
+		local stance = CurrentStance()
+		if stance == BATTLE then
+			-- Кровопускание нужно: Смертельный — только если ярости хватает на оба
+			-- (то же условие, что RendProc: CONDS внутри своей же таблицы ещё не виден)
+			local rend = Known(772)
+			if rend and not HasMyDebuff(rend) then
+				return PlayerRage() >= (RageCost(ms) or 0) + (RageCost(rend) or 0)
+			end
+			return true
+		end
+		if stance ~= DEFENSIVE then return true end
 		local rev = Known(6572) -- Реванш доступен — сначала он
 		if rev and not CooldownOf(rev) and IsUsableSpell(rev) then return false end
 		local ss = Known(23922)
@@ -695,6 +741,21 @@ local CONDS = {
 		end
 		return false
 	end,
+	ShieldBlockProc = function()
+		local sb = Known(2565)
+		if not sb or CooldownOf(sb) or MyBuff(2565) then return false end
+		return UnitAffectingCombat("player") and UnitExists("targettarget") and UnitIsUnit("targettarget", "player") and true or false
+	end,
+	RecklessProc = function()
+		local r = Known(1719)
+		if not r or CooldownOf(r) or MyBuff(1719) then return false end
+		return UnitAffectingCombat("player") and true or false
+	end,
+	RetaliationProc = function()
+		local r = Known(20230)
+		if not r or CooldownOf(r) or MyBuff(20230) then return false end
+		return UnitAffectingCombat("player") and UnitExists("targettarget") and UnitIsUnit("targettarget", "player") and true or false
+	end,
 	NotOnMe = function()
 		return InGroup() and UnitAffectingCombat("target") and UnitExists("targettarget")
 			and not UnitIsUnit("targettarget", "player") and UnitIsFriend("player", "targettarget")
@@ -706,13 +767,6 @@ local CONDS = {
 	PvPRunner = function()
 		if not (UnitIsPlayer("target") and UnitCanAttack("player", "target")) then return false end
 		return not GetUnitSpeed or (GetUnitSpeed("target") or 0) > 0
-	end,
-	ExecNeedsRage = function()
-		local ex = Known(5308)
-		if not (ex and HasEnemyTarget()) then return false end
-		local usable, noMana = IsUsableSpell(ex)
-		local cost = RageCost(ex)
-		return (noMana or (usable and cost and PlayerRage() < cost)) and true or false
 	end,
 	NoShout = function()
 		if not (UnitAffectingCombat("player") or HasEnemyTarget()) then return false end
@@ -940,9 +994,8 @@ local function UpdateRush()
 	local known = {}
 	for _, r in ipairs(RUSH_SPELLS) do
 		local name, texture = Known(r.id)
-		if name then known[#known + 1] = { name = name, texture = texture, bloodrage = r.bloodrage } end
+		if name then known[#known + 1] = { name = name, texture = texture } end
 	end
-	local showBlood -- рамка, справа от которой показать Кровавую ярость
 	rushFrame.height = STANCE_SIZE + #known * (RUSH_SIZE + RUSH_GAP)
 	local y = rushFrame.height / 2
 
@@ -962,7 +1015,7 @@ local function UpdateRush()
 		f.icon:SetTexture(k.texture)
 		SetItemCooldown(f, CooldownOf(k.name))
 		local state = RushState(k.name)
-		if test then state = k.bloodrage and "rage" or nil end
+		if test then state = nil end
 		local cdStart, cdDur = CooldownOf(k.name)
 		local cdLeft = cdStart and (cdStart + cdDur - GetTime())
 		f.cdText:SetText(cdLeft and cdLeft > 0 and (cdLeft >= 60 and (math.ceil(cdLeft / 60) .. "м") or tostring(math.ceil(cdLeft))) or "")
@@ -977,33 +1030,12 @@ local function UpdateRush()
 			f.icon:SetVertexColor(1, 1, 1)
 			f:SetAlpha(1)
 		end
-		if k.bloodrage and state == "rage" then showBlood = f end
 		f:ClearAllPoints()
 		f:SetPoint("CENTER", rushFrame, "CENTER", 0, y - RUSH_SIZE / 2)
 		f:Show()
 		y = y - RUSH_SIZE - RUSH_GAP
 	end
 	for i = #known + 2, #rushItems do rushItems[i]:Hide() end
-
-	-- Кровавая ярость справа от Перехвата: только когда ярости не хватает, а она готова
-	local bloodName, bloodTex = Known(BLOODRAGE)
-	if not rushFrame.blood then
-		local b = CreateFrame("Frame", nil, rushFrame)
-		b:SetWidth(RUSH_SIZE)
-		b:SetHeight(RUSH_SIZE)
-		b.icon = b:CreateTexture(nil, "ARTWORK")
-		b.icon:SetAllPoints(b)
-		rushFrame.blood = b
-	end
-	local b = rushFrame.blood
-	if showBlood and bloodName and (test or (not CooldownOf(bloodName) and IsUsableSpell(bloodName))) then
-		b.icon:SetTexture(bloodTex)
-		b:ClearAllPoints()
-		b:SetPoint("LEFT", showBlood, "RIGHT", RUSH_GAP, 0)
-		b:Show()
-	else
-		b:Hide()
-	end
 end
 
 -- Левый столбик: «Сближение» сверху, защитные снизу; вместе — по центру экрана по высоте,
@@ -1309,23 +1341,8 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 	UpdateRush()
 	PlaceLeftColumn()
 
-	-- Превосходство и Казнь горят вместе: показываем одно. От «Внезапной смерти» — Казнь
-	-- (эффект может спасть), иначе — Превосходство (окно короткое); второе появится, когда первое применят.
-	-- При ярости от BOTH_RAGE хватает на оба — показываем оба
-	local suppress, execWeak = {}, false
-	-- Казнь по оценке: добьёт и обычный удар — не показываем; не добьёт — бледная
-	if enemy and Known(5308) then
-		local advice = ExecAdvice()
-		if advice == "skip" then suppress[5308] = true end
-		execWeak = advice == "weak"
-	end
-	local opName, exName = Known(7384), Known(5308)
-	if enemy and opName and exName and StanceAllows({ BATTLE }) then
-		local opReady, exReady = ProcState(opName), ProcState(exName)
-		if opReady and exReady and PlayerRage() < BOTH_RAGE then
-			if MyBuff(52437) then suppress[7384] = true else suppress[5308] = true end
-		end
-	end
+	-- Казнь и Превосходство показываются по своим срабатываниям, оба сразу (яркие или синеватые — по ярости)
+	local suppress = {}
 
 	for _, p in ipairs(PROCS) do
 		local spellID = p.id
@@ -1346,11 +1363,15 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 					PlaySound("RaidWarning")
 				end
 				f = f or AddItem(procRow, spellID, name, texture, true)
+				if f.imba ~= p.imba then
+					f.imba = p.imba
+					Layout(procRow)
+				end
 				f.icon:SetTexture(texture) -- у записей с alts иконка может смениться
 				f.spellName = name
 				f.removing = false
 				f.noMana = noMana
-				f.blocked = (spellID == 5308 and execWeak and not noMana) or false
+				f.blocked = false
 				f.rage:SetText(noMana and RageText(name) or "")
 				f.buffExpires = hasBuff and buffExpires or nil
 				if p.myDebuff then -- отсчёт: сколько осталось вашему эффекту на цели
@@ -1568,10 +1589,13 @@ SlashCmdList["PROCALERT"] = function(msg)
 	elseif msg == "rush" then
 		ProcAlertDB.rush = not RushEnabled()
 		Print("стойка, Рывок и Перехват слева при враждебной цели: " .. onoff(ProcAlertDB.rush) .. ".")
+	elseif msg == "stance" then
+		ProcAlertDB.stanceLine = ProcAlertDB.stanceLine == false
+		Print("значок стойки слева от срабатываний: " .. onoff(ProcAlertDB.stanceLine) .. ".")
 	elseif msg == "test" then
 		Test()
 	else
-		Print("/pa test — пример; /pa normal — ряд обычных ударов (" .. onoff(RegularEnabled()) .. "); /pa def — защитные (" .. onoff(DefEnabled()) .. "); /pa rush — стойка, Рывок и Перехват (" .. onoff(RushEnabled()) .. "); /pa enemies — список врагов справа (" .. onoff(ProcAlertDB.enemies ~= false) .. "); /pa hs <число> или auto — ярость для Удара героя; /pa alert — звук важных срабатываний (" .. onoff(AlertEnabled()) .. "); /pa rage — полоска ярости (" .. onoff(RageBarEnabled()) .. "); /pa keys — клавиши ("
+		Print("/pa test — пример; /pa normal — ряд обычных ударов (" .. onoff(RegularEnabled()) .. "); /pa def — защитные (" .. onoff(DefEnabled()) .. "); /pa rush — стойка, Рывок и Перехват (" .. onoff(RushEnabled()) .. "); /pa enemies — список врагов справа (" .. onoff(ProcAlertDB.enemies ~= false) .. "); /pa stance — значок стойки (" .. onoff(ProcAlertDB.stanceLine ~= false) .. "); /pa hs <число> или auto — ярость для Удара героя; /pa alert — звук важных срабатываний (" .. onoff(AlertEnabled()) .. "); /pa rage — полоска ярости (" .. onoff(RageBarEnabled()) .. "); /pa keys — клавиши ("
 			.. onoff(KeysEnabled()) .. "); /pa sound — звук (" .. onoff(SoundEnabled()) .. "); /pa gap <число> — расстояние (" .. GetGap() .. ").")
 	end
 end
@@ -1603,7 +1627,8 @@ local PRIORITY = {
 	[GetSpellInfo(7386) or "?"] = 2,  -- Раскол брони
 }
 local ROUND = "Interface\\CharacterFrame\\TempPortraitAlphaMask" -- белый круг
-local REND = GetSpellInfo(772) or "?" -- Кровопускание: у мобов справа, когда кончается, — крупнее и мигает
+-- Кровопускание и Подрезать сухожилия: у мобов справа, когда кончаются, — крупнее и мигают
+local ENDING_ALERT = { [GetSpellInfo(772) or "?"] = true, [GetSpellInfo(1715) or "?"] = true }
 local REND_BIG = 46
 local UNKNOWN_FACE = "Interface\\Icons\\INV_Misc_QuestionMark" -- портрет ещё не видели
 local TIMEOUT = 8            -- столько секунд без ударов — враг пропадает (если нет ваших ослаблений)
@@ -1917,11 +1942,11 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 			if sa ~= sb then return sa > sb end
 			return a < b
 		end)
-		-- Кровопускание кончается (меньше REND_REFRESH с) — значок мигает; у мобов справа ещё и крупнее
+		-- Кровопускание / Подрезать сухожилия кончается (меньше REND_REFRESH с) — значок мигает; у мобов справа ещё и крупнее
 		-- (у цели размер не меняем: значки в одну линию со срабатываниями)
 		local function Ending(name)
 			local d = e.debuffs[name]
-			return name == REND and d.expires and (d.expires - now) < REND_REFRESH
+			return ENDING_ALERT[name] and d.expires and (d.expires - now) < REND_REFRESH
 		end
 		-- у цели значки размером со срабатывания и с тем же промежутком
 		local base = vertical and PROC_SIZE or ICON
@@ -2030,5 +2055,61 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 	for i = MAX_ROWS + 1, #list do -- не влезли в список — их портреты не показываем
 		if list[i].face then list[i].face:Hide() end
 	end
+end)
+end)()
+
+----------------------------------------------------------------------------------------------
+-- Слева от срабатываний: значок текущей стойки.
+-- Рамка мигает красным, если стойка и щит не сходятся: в оборонительной нет щита или щит в боевой / берсерка
+;(function()
+local SIZE = PROC_SIZE -- как у срабатываний
+local RIGHT_X = -120 -- правый край значка от центра ряда срабатываний (цель с ослаблениями — справа, на 130)
+
+local function NewIcon(x)
+	local f = CreateFrame("Frame", nil, anchor)
+	f:SetWidth(SIZE)
+	f:SetHeight(SIZE)
+	f:SetPoint("RIGHT", anchor, "CENTER", x, 0)
+	f.border = f:CreateTexture(nil, "BACKGROUND") -- рамка: чёрная, при несовпадении — красная
+	f.border:SetPoint("TOPLEFT", f, "TOPLEFT", -2, 2)
+	f.border:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 2, -2)
+	f.border:SetTexture(0, 0, 0)
+	f.icon = f:CreateTexture(nil, "ARTWORK")
+	f.icon:SetAllPoints(f)
+	f.icon:SetTexCoord(0.07, 0.93, 0.07, 0.93)
+	f:Hide()
+	return f
+end
+local stanceIcon = NewIcon(RIGHT_X)
+
+local function HasShield()
+	local link = GetInventoryItemLink("player", 17)
+	return link and select(9, GetItemInfo(link)) == "INVTYPE_SHIELD"
+end
+
+local elapsedSum, wrong = 0, false
+local holder = CreateFrame("Frame", nil, anchor)
+holder:SetScript("OnUpdate", function(_, elapsed)
+	if wrong then -- мигание рамки, как у кончающихся ослаблений
+		local a = 0.35 + 0.65 * math.abs(math.sin(GetTime() * 6))
+		stanceIcon.border:SetTexture(a, 0.1 * a, 0.1 * a)
+	end
+	elapsedSum = elapsedSum + elapsed
+	if elapsedSum < 0.2 then return end
+	elapsedSum = 0
+	local stance = CurrentStance()
+	local form = GetShapeshiftForm()
+	local stanceTex = form and form > 0 and GetShapeshiftFormInfo(form)
+	if (ProcAlertDB and ProcAlertDB.stanceLine == false) or not stance or not stanceTex or UnitIsDeadOrGhost("player") then
+		stanceIcon:Hide()
+		wrong = false
+		return
+	end
+	wrong = (stance == DEFENSIVE) ~= (HasShield() and true or false)
+	if not wrong then
+		stanceIcon.border:SetTexture(0, 0, 0)
+	end
+	stanceIcon.icon:SetTexture(stanceTex)
+	stanceIcon:Show()
 end)
 end)()
