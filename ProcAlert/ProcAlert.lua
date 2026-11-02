@@ -20,22 +20,21 @@ local PROCS = {
 	{ id = 7384,  stances = { BATTLE }, buff = 60503 },            -- Превосходство; эффект «Вкус крови» (Taste for Blood)
 	{ id = 5308,  stances = { BATTLE, BERSERKER }, buff = 52437, sound = true, soundBuff = true }, -- Казнь; эффект «Внезапная смерть» (Sudden Death)
 	{ id = 6572,  stances = { DEFENSIVE } },                       -- Реванш (Revenge): после блока, парирования или уклонения
+	-- needShield — без щита показывать со значком щита (первое нажатие макроса наденет сет)
 	-- sound — звук при появлении, даже если общий звук выключен (/pa alert); soundBuff — только при этом эффекте
-	{ id = 1464,  buff = 46916, buffOnly = true, sound = true },   -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
-	{ id = 23922, buff = 50227, cond = "ShieldSlamProc" },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
+	{ id = 1464,  buff = 46916, buffOnly = true },                 -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
+	{ id = 23922, buff = 50227, cond = "ShieldSlamProc", needShield = true },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
 	                                                               -- а в оборонительной — всегда, когда готов (раньше Смертельного удара)
 	{ id = 772,   stances = { BATTLE }, cond = "RendProc" },       -- Кровопускание в боевой: всегда, когда его нет на цели
 	{ id = 12294, cond = "MortalProc" },                           -- Смертельный удар: в берсерка — когда готов; в боевой — то же, но если нужно
 	                                                               -- Кровопускание, то только при ярости на оба; в оборонительной — Реванша нет,
 	                                                               -- Мощному удару щитом до готовности больше SLAM_WAIT с, ярости хватает
 	{ id = 1680,  stances = { BERSERKER }, cond = "WhirlwindReady" }, -- Вихрь (Whirlwind): когда готов
-	-- imba — «ИМБА»: первыми в ряду, золотая пульсирующая рамка
-	{ id = 2565,  stances = { DEFENSIVE }, cond = "ShieldBlockProc", imba = true }, -- Блок щитом: цель бьёт вас, готов, ещё не висит (нужен щит)
-	{ id = 20230, stances = { BATTLE }, cond = "RetaliationProc", imba = true },    -- Возмездие (Retaliation): то же в боевой
-	{ id = 1719,  stances = { BERSERKER }, cond = "RecklessProc", imba = true },    -- Безрассудство (Recklessness): в бою, готово, ещё не висит
+	{ id = 6343,  stances = { BATTLE, DEFENSIVE }, cond = "PackThunder" }, -- Удар грома: рядом от 3 врагов, на цели его нет (ничьего)
+	{ id = 1160,  cond = "PackDemo" },                             -- Деморализующий крик: рядом от 3 врагов, на цели его нет (ничьего)
 	-- cond — имя условия из CONDS (ниже); anyTarget — показывать и без враждебной цели;
 	-- alts — показать первую готовую из списка (иконка меняется)
-	{ id = 18499, anyTarget = true, cond = "Feared" },             -- Ярость берсерка: на вас страх, ошеломление и т. п.
+	{ id = 18499, anyTarget = true, cond = "Feared", sound = true, glow = "Feared" }, -- Ярость берсерка: на вас страх и т. п. (золотая рамка и звук)
 	{ id = 355, alts = { 355, 694, 1161 }, stances = { DEFENSIVE }, cond = "NotOnMe" }, -- Провокация / Дразнящий удар / Вызывающий крик: цель бьёт не вас
 }
 
@@ -45,16 +44,23 @@ local PROCS = {
 -- которое можно сбить. reflect — только если заклинание летит в вас.
 local KICKS = {
 	{ id = 6552,  stances = { BERSERKER } },                       -- Зуботычина (Pummel)
-	{ id = 72,    stances = { BATTLE, DEFENSIVE } },               -- Удар щитом (Shield Bash), нужен щит
+	{ id = 72,    stances = { BATTLE, DEFENSIVE }, needShield = true }, -- Удар щитом (Shield Bash), нужен щит
 	{ id = 12809 },                                                -- Оглушающий удар (Concussion Blow), талант Защиты
-	{ id = 23920, stances = { BATTLE, DEFENSIVE }, reflect = true }, -- Отражение заклинания (Spell Reflection), нужен щит
+	{ id = 23920, stances = { BATTLE, DEFENSIVE }, reflect = true, needShield = true, anyStance = true }, -- Отражение заклинания (Spell Reflection), нужен щит;
+	                                                               -- в стойке берсерка — со значком Оборонительной стойки
 }
 
 local REGULAR = {
+	-- imba — «ИМБА»: всегда первыми в ряду, золотая пульсирующая рамка
+	{ id = 871,   cond = "ShieldWallProc", imba = true, needShield = true, anyStance = true }, -- Глухая оборона: здоровья < 40% (от 3 врагов < 60%); в любой стойке — макрос встанет в «деф»
+	{ id = 2565,  stances = { DEFENSIVE }, cond = "ShieldBlockProc", imba = true, needShield = true }, -- Блок щитом: цель бьёт вас, готов, ещё не висит (нужен щит)
+	{ id = 20230, stances = { BATTLE }, cond = "RetaliationProc", imba = true },    -- Возмездие (Retaliation): в бою рядом от CLEAVE_ENEMIES врагов
+	{ id = 1719,  stances = { BERSERKER }, cond = "RecklessProc", imba = true },    -- Безрассудство (Recklessness): в бою, готово, ещё не висит
+	{ id = 12328, stances = { BATTLE, BERSERKER }, cond = "SweepProc", imba = "SweepCombo" }, -- Размашистые удары: от 2 врагов; золотые — связка с Вихрем клинков
+	{ id = 46924, stances = { BATTLE, BERSERKER }, cond = "BladestormProc", imba = "SweepActive" }, -- Вихрь клинков (талант): от 2 врагов, в группе от 3; золотой — висят Размашистые удары / Безрассудство
 	-- Смертельный удар и Вихрь — в «Срабатываниях»
 	{ id = 23881 },                                         -- Кровожадность (Bloodthirst)
 	{ id = 23922 },                                         -- Мощный удар щитом (Shield Slam)
-	{ id = 1464,  stances = { BATTLE, BERSERKER } },        -- Мощный удар (Slam): не в оборонительной (мгновенный по «Мощный удар!» — в «Срабатываниях» везде)
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
 	{ id = 845 },                                           -- Рассекающий удар (Cleave)
 	{ id = 6343,  stances = { DEFENSIVE }, cond = "Crowd" },               -- Удар грома (Thunder Clap): только в оборонительной, как Рассекающий — от CLEAVE_ENEMIES врагов рядом
@@ -96,12 +102,14 @@ local REND_RESERVE = 3   -- за сколько секунд до конца К�
 local LOW_LEVEL_DIFF = 5  -- цель ниже вас на столько уровней (обычная) — бой короткий: без Кровопускания,
                           -- Раскола брони и без копления на Казнь
 local KILL_MARGIN = 0.9   -- оценку «Казнь добьёт» берём с запасом (урон x 0.9)
+local SHIELD_TEX = "Interface\\Icons\\INV_Shield_06" -- значок в углу: нужен щит
 local OVERFLOW_RAGE = 90  -- от стольких ярости Удар героя / Рассекающий пульсируют: ярость скоро пропадёт
 local CLEAVE_ENEMIES = 2  -- от стольких врагов в ближнем бою — Рассекающий вместо Удара героя
 
 local CHECK_INTERVAL = 0.1 -- как часто проверять доступность, сек
 local PROC_SIZE = 52       -- размер иконок сработавших способностей
 local REGULAR_SIZE = 36    -- размер иконок обычных ударов
+local IMBA_SIZE = 52       -- размер иконок «ИМБА» (в ряду обычных ударов — крупнее остальных)
 local KICK_SIZE = 60       -- размер иконок прерываний
 local KICK_Y = 125         -- высота ряда прерываний над нижним рядом
 local ROW_SPACING = 14     -- расстояние между рядами по вертикали
@@ -180,7 +188,7 @@ local anchor = CreateFrame("Frame", "ProcAlertFrame", UIParent)
 anchor:SetWidth(1)
 anchor:SetHeight(1)
 anchor:SetPoint("CENTER", UIParent, "CENTER", 0, 160)
-anchor:SetFrameStrata("HIGH")
+anchor:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 
 ----------------------------------------------------------------------------------------------
 -- Клавиша, назначенная на ячейку панели команд со способностью
@@ -287,26 +295,28 @@ local function CreateItem(row)
 	return f
 end
 
+local function ItemSize(row, f)
+	return f.imba and math.max(row.size, IMBA_SIZE) or row.size
+end
+
 local function Layout(row)
 	if row.ordered then
 		table.sort(row.items, function(a, b) return (regularOrder[a.spellID] or 0) < (regularOrder[b.spellID] or 0) end)
-	else -- «ИМБА» — первыми, остальные в порядке появления
-		local imba, rest = {}, {}
-		for _, f in ipairs(row.items) do
-			if f.imba then imba[#imba + 1] = f else rest[#rest + 1] = f end
-		end
-		for _, f in ipairs(rest) do imba[#imba + 1] = f end
-		row.items = imba
 	end
-	local gap, total = GetGap(), 0
+	local gap, total, maxSize = GetGap(), 0, row.size
 	for i, f in ipairs(row.items) do
-		total = total + row.size + (i > 1 and gap or 0)
+		local size = ItemSize(row, f)
+		total = total + size + (i > 1 and gap or 0)
+		if not f.removing and size > maxSize then maxSize = size end
 	end
+	row.width = total -- по ней цель справа и значок стойки слева отодвигаются от ряда
+	row.maxSize = maxSize -- по нему ряд обычных ударов поднимается над срабатываниями
 	local x = -total / 2
 	for _, f in ipairs(row.items) do
-		f.targetX = x + row.size / 2
+		local size = ItemSize(row, f)
+		f.targetX = x + size / 2
 		if not f.x then f.x = f.targetX end -- новая иконка сразу на своём месте
-		x = x + row.size + gap
+		x = x + size + gap
 	end
 end
 
@@ -370,7 +380,7 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 	-- обычные удары поднимаются над сработавшими, если те есть
 	procRow.targetY = 0
 	kickRow.targetY = KICK_Y
-	regularRow.targetY = HasVisible(procRow) and (PROC_SIZE / 2 + ROW_SPACING + REGULAR_SIZE / 2) or 0
+	regularRow.targetY = HasVisible(procRow) and (PROC_SIZE / 2 + ROW_SPACING + (regularRow.maxSize or REGULAR_SIZE) / 2) or 0
 
 	for _, row in ipairs(rows) do
 		row.y = row.y + (row.targetY - row.y) * k
@@ -382,14 +392,19 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 			f:ClearAllPoints()
 			f:SetPoint("CENTER", anchor, "CENTER", f.x, row.y)
 
-			local size = row.size
+			local base = ItemSize(row, f)
+			local size = base
 			local age = now - f.bornAt
 			if f.pop and age < POP_TIME then
-				size = row.size * (POP_SCALE - (POP_SCALE - 1) * (age / POP_TIME))
+				size = base * (POP_SCALE - (POP_SCALE - 1) * (age / POP_TIME))
 			end
+			f:SetWidth(base)
+			f:SetHeight(base)
 			f.icon:SetWidth(size)
 			f.icon:SetHeight(size)
 			if f.imba then
+				f.glow:SetWidth(base * 1.9)
+				f.glow:SetHeight(base * 1.9)
 				f.glow:SetAlpha(0.5 + 0.5 * math.abs(math.sin(now * 4)))
 				f.glow:Show()
 			else
@@ -670,14 +685,10 @@ end
 
 -- Что делать с Казнью сейчас: "skip" — добьёт и обычный удар, "kill" — Казнь добьёт,
 -- "weak" — не добьёт, nil — данных нет
-local function ExecAdvice()
-	local ppd = PctPerDamage()
-	if not ppd then return nil end
-	local left = TargetPct()
-	if swingAvg and swingAvg * ppd * KILL_MARGIN >= left then return "skip" end
-	local dmg = ExecDamage(PlayerRage())
-	if not dmg then return nil end
-	return (dmg * ppd * KILL_MARGIN >= left) and "kill" or "weak"
+-- Щита нет: способности со щитом (needShield) показываем со значком щита — макрос сначала наденет сет
+local function NoShield()
+	local link = GetInventoryItemLink("player", 17)
+	return not (link and select(9, GetItemInfo(link)) == "INVTYPE_SHIELD")
 end
 
 local CONDS = {
@@ -741,20 +752,53 @@ local CONDS = {
 		end
 		return false
 	end,
+	ShieldWallProc = function()
+		local sw = Known(871)
+		if not sw or CooldownOf(sw) or MyBuff(871) or not UnitAffectingCombat("player") then return false end
+		local max = UnitHealthMax("player")
+		if not max or max <= 0 or UnitIsDeadOrGhost("player") then return false end
+		local hp = UnitHealth("player") / max
+		return hp < 0.4 or (hp < 0.6 and MeleeEnemies() >= 3)
+	end,
 	ShieldBlockProc = function()
 		local sb = Known(2565)
 		if not sb or CooldownOf(sb) or MyBuff(2565) then return false end
 		return UnitAffectingCombat("player") and UnitExists("targettarget") and UnitIsUnit("targettarget", "player") and true or false
 	end,
+	PackThunder = function()
+		local tc = Known(6343)
+		return tc and not CooldownOf(tc) and MeleeEnemies() >= 3 and not UnitDebuff("target", tc) and true or false
+	end,
+	PackDemo = function()
+		local ds = Known(1160)
+		return ds and MeleeEnemies() >= 3 and not UnitDebuff("target", ds) and true or false
+	end,
 	RecklessProc = function()
 		local r = Known(1719)
-		if not r or CooldownOf(r) or MyBuff(1719) then return false end
-		return UnitAffectingCombat("player") and true or false
+		if not r or CooldownOf(r) or MyBuff(1719) or not UnitAffectingCombat("player") then return false end
+		local c = UnitClassification("target") -- элитка / босс — весь бой
+		if c == "worldboss" or c == "elite" or c == "rareelite" then return true end
+		local exec = Known(5308) -- иначе только в фазе Казни и при ярости на неё
+		return exec and TargetPct() <= EXECUTE_PCT and PlayerRage() >= (RageCost(exec) or 0) and true or false
 	end,
+	-- связка от 2 врагов (в группе от 3): сначала Размашистые удары (если ярости на оба), затем Вихрь клинков
+	SweepCombo = function() -- Known: талант не выбран — заклинания нет в книге
+		local ss, bs = Known(12328), Known(46924)
+		if not ss or not bs or CurrentStance() == DEFENSIVE then return false end
+		if CooldownOf(ss) or CooldownOf(bs) or MyBuff(12328) then return false end
+		if not UnitAffectingCombat("player") or MeleeEnemies() < (InGroup() and 3 or CLEAVE_ENEMIES) then return false end
+		return PlayerRage() >= (RageCost(ss) or 0) + (RageCost(bs) or 0)
+	end,
+	BladestormProc = function() -- пока предлагаются Размашистые удары — Вихрь не показываем
+		local r = Known(46924)
+		if not r or CooldownOf(r) or MyBuff(46924) then return false end
+		return UnitAffectingCombat("player") and MeleeEnemies() >= (InGroup() and 3 or CLEAVE_ENEMIES)
+	end,
+	SweepActive = function() return (MyBuff(12328) or MyBuff(1719)) and true or false end, -- висят Размашистые удары или Безрассудство
 	RetaliationProc = function()
 		local r = Known(20230)
 		if not r or CooldownOf(r) or MyBuff(20230) then return false end
-		return UnitAffectingCombat("player") and UnitExists("targettarget") and UnitIsUnit("targettarget", "player") and true or false
+		return UnitAffectingCombat("player") and MeleeEnemies() >= CLEAVE_ENEMIES
 	end,
 	NotOnMe = function()
 		return InGroup() and UnitAffectingCombat("target") and UnitExists("targettarget")
@@ -776,6 +820,24 @@ local CONDS = {
 		return not MyBuff(6673)
 	end,
 }
+do -- Вихрь клинков ждёт, пока предлагаются Размашистые удары (внутри конструктора CONDS ещё не виден)
+	local base = CONDS.BladestormProc
+	-- тройная связка в стойке берсерка: Безрассудство (элитка / фаза Казни) → Размашистые удары → Вихрь клинков;
+	-- пока предлагается Безрассудство, Размашистые удары и Вихрь клинков ждут
+	local function RecklessFirst()
+		return CurrentStance() == BERSERKER and base() and CONDS.RecklessProc()
+	end
+	CONDS.BladestormProc = function() return base() and not CONDS.SweepCombo() and not RecklessFirst() end
+	-- Размашистые удары: связка с Вихрем или сами по себе от 2 врагов, когда Вихрь не предлагается
+	CONDS.SweepProc = function()
+		if RecklessFirst() then return false end
+		if CONDS.SweepCombo() then return true end
+		local ss = Known(12328)
+		if not ss or CooldownOf(ss) or MyBuff(12328) then return false end
+		if not UnitAffectingCombat("player") or MeleeEnemies() < CLEAVE_ENEMIES then return false end
+		return not CONDS.BladestormProc()
+	end
+end
 
 -- Сколько ярости нужно, чтобы показать удар-«сброс» name
 local function DumpRage(name)
@@ -809,7 +871,7 @@ local function RegularReady(name, r)
 		if PlayerRage() < DumpRage(name) then return false end
 		if saving then return false end
 	end
-	if not IsUsableSpell(name) then return false end -- не хватает ярости
+	if not IsUsableSpell(name) and not (r.needShield and NoShield()) and not r.anyStance then return false end -- не хватает ярости
 	if CooldownOf(name) then return false end
 	if IsSpellInRange(name, "target") == 0 then return false end
 	if r.skipDebuff then
@@ -858,7 +920,7 @@ local defFrame = CreateFrame("Frame", "ProcAlertDefFrame", UIParent)
 defFrame:SetWidth(1)
 defFrame:SetHeight(1)
 defFrame:SetPoint("CENTER", UIParent, "CENTER", DEF_X, DEF_Y)
-defFrame:SetFrameStrata("HIGH")
+defFrame:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 defFrame:SetAlpha(0)
 defFrame.targetAlpha = 0
 local defItems = {}
@@ -939,7 +1001,7 @@ local rushFrame = CreateFrame("Frame", "ProcAlertRushFrame", UIParent)
 rushFrame:SetWidth(1)
 rushFrame:SetHeight(1)
 rushFrame:SetPoint("CENTER", UIParent, "CENTER", RUSH_X, RUSH_Y)
-rushFrame:SetFrameStrata("HIGH")
+rushFrame:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 rushFrame:SetAlpha(0)
 rushFrame.targetAlpha = 0
 rushFrame:SetScript("OnUpdate", defFrame:GetScript("OnUpdate"))
@@ -1222,7 +1284,7 @@ do
 	f:SetScript("OnEvent", Place)
 	if UIParent_ManageFramePositions then hooksecurefunc("UIParent_ManageFramePositions", Place) end
 end
-rageBar:SetFrameStrata("HIGH")
+rageBar:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 rageBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
 rageBar:SetStatusBarColor(0.85, 0.1, 0.1)
 rageBar:SetMinMaxValues(0, 100)
@@ -1256,12 +1318,14 @@ rageBar:SetScript("OnUpdate", function(self, elapsed)
 	local edge = math.max(8, RAGE_W * math.min(rage, max) / max)
 	self.text:ClearAllPoints()
 	self.text:SetPoint("BOTTOM", self, "TOPLEFT", edge, 1)
-	-- почти полная — полоска пульсирует (ярость скоро начнёт пропадать)
+	-- почти полная — полоска мигает красный ↔ жёлтый (ярость скоро начнёт пропадать)
 	if rage >= OVERFLOW_RAGE then
-		local k = 0.6 + 0.4 * math.abs(math.sin(GetTime() * 6))
-		self:SetStatusBarColor(1 * k, 0.25 * k, 0.1 * k)
+		local k = math.abs(math.sin(GetTime() * 5))
+		self:SetStatusBarColor(0.85 + 0.15 * k, 0.1 + 0.8 * k, 0.1 + 0.1 * k)
+		self.text:SetTextColor(1, 1, 1 - k)
 	else
 		self:SetStatusBarColor(0.85, 0.1, 0.1)
+		self.text:SetTextColor(1, 1, 1)
 	end
 	local heroic = Known(78)
 	local need = heroic and DumpRage(heroic)
@@ -1284,7 +1348,7 @@ local swingBar = CreateFrame("StatusBar", "ProcAlertSwingBar", UIParent)
 swingBar:SetWidth(RAGE_W)
 swingBar:SetHeight(4)
 swingBar:SetPoint("TOP", rageBar, "BOTTOM", 0, -14) -- под числом порога
-swingBar:SetFrameStrata("HIGH")
+swingBar:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 swingBar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
 swingBar:SetMinMaxValues(0, 1)
 swingBar:SetAlpha(0)
@@ -1348,31 +1412,31 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 		local spellID = p.id
 		local name, texture = Resolve(p)
 		if name then
-			local ready, noMana = false, false
+			local ready, noMana, shieldOnly = false, false, false
 			local hasBuff, buffExpires
 			if p.buff then hasBuff, buffExpires = MyBuff(p.buff) end
 			if (enemy or p.anyTarget) and StanceAllows(p.stances) and (hasBuff or not p.buffOnly)
 				and (not p.cond or CONDS[p.cond]()) and not suppress[spellID] then
 				ready, noMana = ProcState(name)
+				if not ready and p.needShield and NoShield() then ready, noMana, shieldOnly = true, false, true end
 			end
 			local f = procRow.bySpell[spellID]
 			if f and f.expiresAt then
 				-- иконка из /pa test: не трогаем
 			elseif ready then
-				if not f and p.sound and (hasBuff or not p.soundBuff) and AlertEnabled() and not SoundEnabled() then
+				if not f and p.sound and (hasBuff or not p.soundBuff) and (not p.soundCond or CONDS[p.soundCond]())
+					and AlertEnabled() and not SoundEnabled() then
 					PlaySound("RaidWarning")
 				end
 				f = f or AddItem(procRow, spellID, name, texture, true)
-				if f.imba ~= p.imba then
-					f.imba = p.imba
-					Layout(procRow)
-				end
 				f.icon:SetTexture(texture) -- у записей с alts иконка может смениться
 				f.spellName = name
 				f.removing = false
 				f.noMana = noMana
 				f.blocked = false
+				f.imba = p.glow and CONDS[p.glow]() or nil -- золотая пульсирующая рамка
 				f.rage:SetText(noMana and RageText(name) or "")
+				if shieldOnly then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.buffExpires = hasBuff and buffExpires or nil
 				if p.myDebuff then -- отсчёт: сколько осталось вашему эффекту на цели
 					local has, left = HasMyDebuff(name)
@@ -1428,7 +1492,8 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 	for _, kk in ipairs(KICKS) do
 		local name, texture = Known(kk.id)
 		if name then
-			local ready = castUnit and StanceAllows(kk.stances)
+			local wrongStance = not StanceAllows(kk.stances)
+			local ready = castUnit and (kk.anyStance or not wrongStance)
 				and (not kk.reflect or UnitIsUnit(castUnit .. "target", "player"))
 			local f = kickRow.bySpell[kk.id]
 			if f and f.expiresAt then
@@ -1442,7 +1507,12 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				f.noMana = noMana and true or false
 				f.rage:SetText(noMana and RageText(name) or "")
 				-- серая: нельзя применить (нет щита) или цель далеко
-				f.blocked = not (usable or noMana) or (not kk.reflect and IsSpellInRange(name, castUnit) == 0)
+				local shieldOnly = kk.needShield and NoShield()
+				local stanceOnly = kk.anyStance and wrongStance
+				f.blocked = (not (usable or noMana) and not shieldOnly and not stanceOnly)
+					or (not kk.reflect and IsSpellInRange(name, castUnit) == 0)
+				if stanceOnly then f.badge:SetTexture(select(3, GetSpellInfo(STANCE_SPELLS[DEFENSIVE]))) f.badge:Show()
+				elseif shieldOnly then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.buffExpires = castEnds -- отсчёт: сколько осталось до конца заклинания врага
 				SetItemCooldown(f, AnyCooldownOf(name))
 			elseif f then
@@ -1461,6 +1531,9 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				-- иконка из /pa test: не трогаем
 			elseif ready then
 				f = f or AddItem(regularRow, r.id, name, texture, false)
+				local imba = r.imba == true or (type(r.imba) == "string" and CONDS[r.imba]()) or nil
+				if imba ~= f.imba then f.imba = imba Layout(regularRow) end -- «ИМБА» крупнее — ряд перестраивается
+				if r.needShield and NoShield() then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.icon:SetTexture(texture)
 				f.spellName = name
 				if r.sunder then -- стаки «3/5» и время до конца Раскола брони
@@ -1610,7 +1683,8 @@ end
 local X, Y = 240, 90         -- левый верхний угол столбика остальных врагов от центра экрана
 -- строка вашей цели: справа от «Срабатываний», на их высоте — перед глазами и не на головах мобов.
 -- Место постоянное (не ездит, когда срабатываний становится больше или меньше)
-local TARGET_X = 130         -- левый край от центра ряда срабатываний
+local TARGET_X = 130         -- левый край от центра ряда срабатываний; при широком ряде — правее него
+local SIDE_MARGIN = 20       -- столько от края ряда срабатываний до цели справа и до значка стойки слева
 local TARGET_Y = PROC_SIZE / 2 -- верх строки: значки ослаблений — на одной линии со срабатываниями, их размера
 local MAX_ROWS = 6
 local ROW_H = 50
@@ -1757,7 +1831,7 @@ local frame = CreateFrame("Frame", "ProcAlertEnemies", UIParent)
 frame:SetWidth(FACE + 6 + 6 * (ICON + 2))
 frame:SetHeight(MAX_ROWS * ROW_H)
 frame:SetPoint("TOPLEFT", UIParent, "CENTER", X, Y)
-frame:SetFrameStrata("HIGH")
+frame:SetFrameStrata("LOW") -- под окнами игры (карта, персонаж и т. п.)
 
 local rows = {}
 local function Row(i)
@@ -2046,7 +2120,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 	local width = Draw(tr, targetEntry, true)
 	if width then
 		tr:ClearAllPoints()
-		tr:SetPoint("TOPLEFT", anchor, "CENTER", TARGET_X, TARGET_Y)
+		tr:SetPoint("TOPLEFT", anchor, "CENTER", math.max(TARGET_X, (procRow.width or 0) / 2 + SIDE_MARGIN), TARGET_Y)
 	end
 	for i = 1, MAX_ROWS do
 		local e = list[i]
@@ -2062,7 +2136,7 @@ end)()
 -- Слева от срабатываний: значок текущей стойки.
 -- Рамка мигает красным, если стойка и щит не сходятся: в оборонительной нет щита или щит в боевой / берсерка
 ;(function()
-local SIZE = PROC_SIZE -- как у срабатываний
+local SIZE = 40
 local RIGHT_X = -120 -- правый край значка от центра ряда срабатываний (цель с ослаблениями — справа, на 130)
 
 local function NewIcon(x)
@@ -2110,6 +2184,27 @@ holder:SetScript("OnUpdate", function(_, elapsed)
 		stanceIcon.border:SetTexture(0, 0, 0)
 	end
 	stanceIcon.icon:SetTexture(stanceTex)
+	stanceIcon:ClearAllPoints() -- широкий ряд срабатываний — значок левее, чтобы не налезал
+	stanceIcon:SetPoint("RIGHT", anchor, "CENTER", math.min(RIGHT_X, -(procRow.width or 0) / 2 - 20), 0)
 	stanceIcon:Show()
+end)
+end)()
+
+----------------------------------------------------------------------------------------------
+-- Ярость сгорает: в бою ярость дошла до OVERFLOW_RAGE — один звук (/pa alert); снова — после спада на 10
+;(function()
+local warned, t = false, 0
+local f = CreateFrame("Frame")
+f:SetScript("OnUpdate", function(_, elapsed)
+	t = t + elapsed
+	if t < 0.2 then return end
+	t = 0
+	local rage = PlayerRage()
+	if not UnitAffectingCombat("player") or rage < OVERFLOW_RAGE - 10 then
+		warned = false
+	elseif rage >= OVERFLOW_RAGE and not warned then
+		warned = true
+		if AlertEnabled() then PlaySound("RaidWarning") end
+	end
 end)
 end)()
