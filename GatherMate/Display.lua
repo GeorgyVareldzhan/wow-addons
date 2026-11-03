@@ -567,11 +567,17 @@ function Display:addMiniPin(pin, refresh)
 		end
 	end
 	-- finally show and SetPoint the pin
-	if db.nodeRange or alpha >= 1 then
+	if dist_2 <= 30*30 then -- patched: ближе 30 ярдов значок прячется, остаётся жёлтая точка «Поиска минералов»
+		pin:Hide()
+	elseif db.nodeRange or alpha >= 1 then
 		pin:Show()
 		pin:ClearAllPoints()
 		pin:SetPoint("CENTER", Minimap, "CENTER", diffX * minimapWidth, -diffY * minimapHeight)
-		pin:SetAlpha(alpha * (nodeLocked(pin.nodeType, pin.nodeID) and 0.8 or 0.4)) -- patched: minimap alpha 0.4, red rings 0.8 (orig: alpha)
+		-- patched: вдали 0.4 (красные кольца 0.8), ближе к 30 ярдам плавно до 1 (orig: alpha)
+		local base = nodeLocked(pin.nodeType, pin.nodeID) and 0.8 or 0.4
+		local k = (mapRadius - dist_2^0.5) / max(mapRadius - 30, 1)
+		if k < 0 then k = 0 elseif k > 1 then k = 1 end
+		pin:SetAlpha(alpha * (base + (1 - base) * k))
 	else
 		pin:Hide()
 	end

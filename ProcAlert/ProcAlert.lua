@@ -2174,7 +2174,8 @@ holder:SetScript("OnUpdate", function(_, elapsed)
 	local stance = CurrentStance()
 	local form = GetShapeshiftForm()
 	local stanceTex = form and form > 0 and GetShapeshiftFormInfo(form)
-	if (ProcAlertDB and ProcAlertDB.stanceLine == false) or not stance or not stanceTex or UnitIsDeadOrGhost("player") then
+	if (ProcAlertDB and ProcAlertDB.stanceLine == false) or not stance or not stanceTex or UnitIsDeadOrGhost("player")
+		or not (UnitAffectingCombat("player") or HasEnemyTarget()) then -- только в бою или с враждебной целью
 		stanceIcon:Hide()
 		wrong = false
 		return
