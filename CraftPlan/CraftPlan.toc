@@ -2,11 +2,10 @@
 ## Title: CraftPlan
 ## Notes: Что скрафтить из сумок прямо сейчас, чтобы поднять профессии как можно выше; где добыть предмет (Questie)
 ## Notes-ruRU: Что скрафтить из сумок прямо сейчас, чтобы поднять профессии как можно выше; где добыть предмет (Questie)
-## Version: 0.11.67
+## Version: 0.12.14
 ## X-Sirus-Category: 15
 ## SavedVariables: WhereToGetDB
 ## SavedVariablesPerCharacter: CraftPlanDB
 ## OptionalDeps: Questie-335
 
-Goal.lua
 CraftPlan.lua
