@@ -308,14 +308,10 @@ local function AddUsesToTooltip(tip)
 			local e = list[k]
 			local c = COLOR[e.kind] or COLOR.trivial
 			local color = e.kind and ((COLOR_NAME[e.kind] or e.kind) .. (e.kind == "trivial" and " — навыка не даст" or "")) or ""
-			-- сколько ещё навыка даст рецепт: оранжевым — точно (до жёлтого порога), дальше — с шансом (до серого)
+			-- сколько ещё навыка точно даст рецепт: оранжевые создания до жёлтого порога
 			if e.g and e.kind ~= "trivial" and e.y > 0 then
 				local sure = math.max(0, e.y - e.rank)
-				local chance = e.g - math.max(e.rank, e.y)
-				local parts = {}
-				if sure > 0 then parts[#parts + 1] = "+" .. sure .. " точно" end
-				if chance > 0 then parts[#parts + 1] = "+" .. chance .. " с шансом" end
-				if #parts > 0 then color = color .. " (" .. table.concat(parts, ", ") .. ")" end
+				if sure > 0 then color = color .. " (+" .. sure .. " точно)" end
 			end
 			if e.red then
 				tip:AddDoubleLine("  " .. e.name, "не изучен" .. (color ~= "" and (", " .. color) or ""),
@@ -526,7 +522,7 @@ end
 -- Навык растёт по ходу плана: оранжевое создание даёт ровно +1, на пороге рецепт желтеет.
 -- Жёлтые и зелёные рецепты дают навык только с шансом — по умолчанию план их не берёт.
 local function BuildPlan()
-	-- своя цель (раздел «Маршрут прокачки», db.goal) — план только для неё
+	-- стеки (раздел «Маршрут прокачки», db.goal) — план только для них
 	CraftPlan.goalMode = nil
 	if CraftPlan.GoalPlan and CraftPlan.GoalActive() then return CraftPlan.GoalPlan() end
 	local db = DB()
@@ -937,7 +933,7 @@ mapButton:SetScript("OnEnter", function(self)
 	local progress = CraftPlan.routeProgress
 	if progress and progress[1] then
 		GameTooltip:AddLine(" ")
-		GameTooltip:AddLine((CraftPlan.GoalActive and CraftPlan.GoalActive()) and "Собрано материалов на все стеки своей цели (сумки и банк):"
+		GameTooltip:AddLine((CraftPlan.GoalActive and CraftPlan.GoalActive()) and "Собрано материалов на все стеки (сумки и банк):"
 			or "Собрано материалов на маршрут до потолка вашего уровня (сумки и банк):", 1, 0.82, 0)
 		for _, t in ipairs(progress) do
 			GameTooltip:AddDoubleLine(t[1], math.floor(t[2] / (t[2] + t[3]) * 100) .. "%  (не хватает " .. t[3] .. " шт.)", 1, 1, 1, 1, 1, 1)
@@ -2426,7 +2422,7 @@ local function BuildGraph(settings)
 		for _, r in ipairs(rec.reagents) do needed[CP.ReagentKey(r)] = true end
 	end
 	-- Схема: рецепты, которые дают навык (не серые) и на которые хватает материалов (с цепочкой).
-	-- Рецепты своей цели видны всегда — хватает материалов или нет, серые и из выключенной профессии.
+	-- Рецепты стеков видны всегда — хватает материалов или нет, серые и из выключенной профессии.
 	local goalSet = CP.GoalScannedSet and CP.GoalScannedSet() or {}
 	for rec in pairs(goalSet) do
 		if #rec.reagents > 0 then
@@ -3221,7 +3217,7 @@ function CP.FocusItem(key, name)
 	local node = currentNodes[key]
 	if not node then
 		SetFocus(nil)
-		Print("«" .. (name or "?") .. "» не попал на схему: на него не хватает материалов, рецепт серый или профессия выключена. Добавьте рецепт в свою цель — тогда он виден всегда.")
+		Print("«" .. (name or "?") .. "» не попал на схему: на него не хватает материалов, рецепт серый или профессия выключена. Добавьте рецепт в стек — тогда он виден всегда.")
 		return
 	end
 	SetFocus(node)
@@ -4670,7 +4666,7 @@ local function WantedRecipeItems(itemID)
 	return list
 end
 CraftPlan.RecipeVendorHint = function(itemID) return #WantedRecipeItems(itemID) > 0 end
--- Своя цель: путь TomTom к торговцу рецептом-предметом (сначала в вашей зоне). true — разобрались здесь
+-- Стеки: путь TomTom к торговцу рецептом-предметом (сначала в вашей зоне). true — разобрались здесь
 -- (путь поставлен или сказали, что не продаётся); false — рецепт у учителя или неизвестно (ищет вызывающий)
 function CraftPlan.RecipeWaypoint(prof, name)
 	local learn = DB().learn and DB().learn[SKILL_ID[prof]]
@@ -4730,17 +4726,17 @@ hooksecurefunc("HandleModifiedItemClick", function(link)
 	-- материалы не надеваются, поэтому Ctrl+щелчок (примерка) им ничего не делает
 	if link and IsControlKeyDown() and not IsShiftKeyDown() and not IsAltKeyDown() then pcall(WaypointToVendor, link) end
 end)
--- Своя цель из окон игры: «- N +» в строках рецептов окна профессии и учителя, у торговца — значок «+»
+-- Стеки из окон игры: «- N +» в строках рецептов окна профессии и учителя, у торговца — значок «+»
 -- на рецептах-предметах. Ctrl+Shift+щелчок не годится: в Linux Mint это переключение раскладки
 do
 	local function Tip(self)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:AddLine("CraftPlan — своя цель")
+		GameTooltip:AddLine("CraftPlan — стек")
 		GameTooltip:AddLine(self.tipText, 1, 1, 1, true)
 		GameTooltip:Show()
 	end
 	local function Add(prof, name, delta)
-		if CraftPlan.GoalAddName then CraftPlan.GoalAddName(prof, name, delta) else Print("своя цель ещё не готова.") end
+		if CraftPlan.GoalAddName then CraftPlan.GoalAddName(prof, name, delta) else Print("стеки ещё не готовы.") end
 	end
 	local function Step() return IsShiftKeyDown() and 10 or 1 end
 	local function MiniBtn(parent, tex, tipText)
@@ -4755,7 +4751,7 @@ do
 		return b
 	end
 	-- «- N +» прямо в строке списка рецептов (окно профессии, учитель), видно при наведении на строку.
-	-- «+» — добавить в цель / ещё, «-» — меньше (до нуля — убрать), Shift — на 10; N — сколько в цели.
+	-- «+» — в стек на правке / ещё, «-» — меньше (до нуля — убрать), Shift — на 10; N — сколько в стеке.
 	-- info(id) → название или nil (заголовок)
 	local function RowPlus(prefix, count, prof, info)
 		for i = 1, count do
@@ -4767,11 +4763,11 @@ do
 				box:SetPoint("RIGHT", row, "RIGHT", -2, 0)
 				box:SetFrameLevel(row:GetFrameLevel() + 3)
 				box:Hide()
-				local plus = MiniBtn(box, "Plus", "Добавить в цель / ещё 1 (Shift — 10).")
+				local plus = MiniBtn(box, "Plus", "В стек на правке / ещё 1 (Shift — 10).")
 				plus:SetPoint("RIGHT", box, "RIGHT", 0, 0)
 				local num = box:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 				num:SetPoint("RIGHT", plus, "LEFT", -2, 0)
-				local minus = MiniBtn(box, "Minus", "Меньше на 1 (Shift — 10); до нуля — убрать из цели.")
+				local minus = MiniBtn(box, "Minus", "Меньше на 1 (Shift — 10); до нуля — убрать из стека.")
 				minus:SetPoint("RIGHT", num, "LEFT", -2, 0)
 				local function Name()
 					local id = row:GetID()
@@ -4845,7 +4841,7 @@ do
 					b:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
 					b:SetPushedTexture("Interface\\Buttons\\UI-PlusButton-Down")
 					b:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight")
-					b.tipText = "Добавить этот рецепт в цель (изучен он или нет)."
+					b.tipText = "Добавить рецепт в стек на правке."
 					b:SetScript("OnEnter", Tip)
 					b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 					b:SetScript("OnClick", function()
@@ -5771,7 +5767,7 @@ local function LearnInfo(prof, c, ctx)
 end
 
 local function SegTimes(s)
-	if s.chance then return "~" .. math.ceil(s.expected - 0.001) .. " раз" end
+	if s.chance then return "около " .. math.ceil(s.expected - 0.001) .. " раз" end
 	return s.times .. " раз"
 end
 
@@ -6336,33 +6332,39 @@ local function DrawTotals(total, totalOrder, ctx, y, W)
 end
 
 ----------------------------------------------------------------------------------------------
--- Своя цель (db.goal): рецепты любых профессий с числом созданий и добавки к любому материалу.
--- Пока цель есть, план (полоса, «План», схема), маршрут и процент считаются для неё; пустая — как раньше.
--- db.goal = { list = { { sk = навык, name = рецепт, n = раз } }, add = { [предмет] = сверх расчёта },
---   stacks = { { list, add, full, time } } } — list/add — текущий стек (собираю сейчас), stacks — сохранённые
---   стеки: собраны и ждут создания. Их материалы зарезервированы: текущий стек их не видит.
+-- Стеки (db.goal): наборы рецептов любых профессий с числом созданий и материалов, которые собираются и создаются вместе.
+-- Пока есть хоть один стек, план (полоса, «План», схема) и процент считаются для них; нет — обычная прокачка.
+--   db.goal = { stacks = { { list = { { sk, name, n } }, add = { [предмет] = штук }, full, time } }, edit = номер стека на правке }.
+--   Материалы стеков резервируются по порядку навыка: каждый стек видит только свой запас.
 do
 local fakeRecs = {} -- рецепты, которых нет в окне профессии: в формате скана, по одному на заклинание
 local AP = {} -- стеки и окно «Все рецепты» (поля-функции, чтобы не тратить локальные)
 local function GoalDB()
 	local db = DB()
 	db.goal = db.goal or {}
-	db.goal.list = db.goal.list or {}
-	db.goal.add = db.goal.add or {}
-	db.goal.stacks = db.goal.stacks or {}
-	return db.goal
+	local g = db.goal
+	g.stacks = g.stacks or {}
+	-- до 0.12.15 был «текущий стек» (list/add) — становится обычным стеком
+	if g.list or g.add then
+		local has = g.add and next(g.add)
+		for _, e in ipairs(g.list or {}) do if e.n > 0 then has = true end end
+		if has then g.stacks[#g.stacks + 1] = { list = g.list or {}, add = g.add or {}, time = time() } end
+		g.list, g.add = nil, nil
+	end
+	if g.edit and not g.stacks[g.edit] then g.edit = nil end
+	return g
 end
--- Что редактируется (рецепты, добавки, «Все рецепты», поиск, «+» у учителя и торговца): сохранённый стек,
--- открытый на правку значком на плитке (ui.stackEdit = номер), иначе текущий стек
+-- Стек на правке (g.edit — номер; «Создать стек» или «Редактировать»): сюда добавляют «Все рецепты»,
+-- поиск, «+» у учителя/торговца и Shift+щелчок по предмету. Нет — nil
 local function Target()
 	local g = GoalDB()
-	local f = ui and ui.stackEdit
-	local st = type(f) == "number" and g.stacks[f]
-	if st then
-		st.list, st.add = st.list or {}, st.add or {}
-		return st.list, st.add, st
-	end
-	return g.list, g.add, nil
+	local st = g.edit and g.stacks[g.edit]
+	if not st then return nil end
+	st.list, st.add = st.list or {}, st.add or {}
+	return st.list, st.add, st
+end
+function AP.NoTarget()
+	Print("сначала «Создать стек» или «Редактировать» у стека (вкладка «План»).")
 end
 local function ListActive(list, add)
 	if add and next(add) then return true end
@@ -6371,7 +6373,6 @@ local function ListActive(list, add)
 	end
 	return false
 end
-AP.ListActive = ListActive
 -- С какого навыка учится рецепт: по учителю (db.learn), иначе по рецепту-предмету («Требуется: … (N)»
 -- в подсказке, BookReq). Нет данных — nil
 local bookOf, bookN = nil, -1
@@ -6391,7 +6392,6 @@ end
 function CraftPlan.GoalActive()
 	local g = DB().goal
 	if not g then return false end
-	if ListActive(g.list, g.add) then return true end
 	for _, st in ipairs(g.stacks or {}) do
 		if ListActive(st.list, st.add) then return true end
 	end
@@ -6408,13 +6408,11 @@ local function ScannedRec(prof, name)
 		if rec.name == name then return rec end
 	end
 end
--- для «Схемы»: изученные рецепты своей цели (n > 0) — они видны всегда, хватает материалов или нет
+-- для «Схемы»: изученные рецепты всех стеков (n > 0) — они видны всегда, хватает материалов или нет
 function CraftPlan.GoalScannedSet()
 	local set, g = {}, DB().goal
-	local lists = { g and g.list }
-	for _, st in ipairs(g and g.stacks or {}) do lists[#lists + 1] = st.list end
-	for _, list in ipairs(lists) do
-		for _, e in ipairs(list) do
+	for _, st in ipairs(g and g.stacks or {}) do
+		for _, e in ipairs(st.list or {}) do
 			local rec = e.n > 0 and SKILL_NAME[e.sk] and ScannedRec(SKILL_NAME[e.sk], e.name)
 			if rec then set[rec] = true end
 		end
@@ -6462,10 +6460,10 @@ end
 -- Дерево цели: nodes[предмет] = { gross — нужно всего (с добавкой), stock — из сумок и банка,
 -- made — создать, short — не хватает, extra — ваша добавка, depth }; order — порядок обхода (для отступов);
 -- crafts — что создавать (рецепт, раз, глубина — сначала самое глубокое)
--- Сначала сохранённые стеки (по порядку навыка) забирают свой запас — каждый в своё дерево (t.stacks[номер]),
--- потом текущий стек — из того, что осталось. all = true — всё в одно дерево (для плана: создать всё)
--- pick = { [номер] = true, cur = true } — в возвращаемое дерево только отмеченные стеки (остальные лишь резервируют запас)
-local function Tree(only, all, pick) -- only — номер цели текущего стека: дерево только для неё (добавки — только к её материалам)
+-- Стеки по порядку навыка забирают запас сумок и банка — каждый в своё дерево (t.stacks[номер]).
+-- all = true — всё в одно дерево (план: создать всё); pick = { [номер] = true } — в возвращаемое дерево
+-- только отмеченные стеки (остальные лишь резервируют свой запас). Первый аргумент не используется
+local function Tree(_, all, pick)
 	local g = GoalDB()
 	local ctx = Compute().ctx
 	local function NewT() return { nodes = {}, order = {}, crafts = {}, craftOrder = {}, goals = {}, ctx = ctx, down = {}, up = {} } end
@@ -6524,18 +6522,18 @@ local function Tree(only, all, pick) -- only — номер цели текущ�
 			if guess then n.guess = true end
 		end
 	end
-	local function AddList(list, add, key, one)
+	local function AddList(list, add, key)
 		for i, e in ipairs(list) do
 			local rec = FindRec(e.sk, e.name)
 			local prof = SKILL_NAME[e.sk]
-			if rec and prof and (not one or i == one) then
+			if rec and prof then
 				t.goals[#t.goals + 1] = { e = e, i = i, rec = rec, prof = prof }
 				if e.n > 0 then Craft(rec, prof, e.n, 0, nil, { goal = true }, key .. i) end
 			end
 		end
 		-- ваши добавки: сверх того, что нужно рецептам (или отдельный материал)
 		for id, x in pairs(add or {}) do
-			if x > 0 and (not one or t.nodes[id]) then
+			if x > 0 then
 				local n = t.nodes[id]
 				Need(id, x, n and n.depth or 1)
 				t.nodes[id].extra = t.nodes[id].extra + x
@@ -6550,8 +6548,6 @@ local function Tree(only, all, pick) -- only — номер цели текущ�
 		AddList(st.list or {}, st.add, "s" .. si .. "g")
 		if t ~= main then saved[si] = t end
 	end
-	t = (all or not pick or pick.cur) and main or NewT()
-	AddList(g.list, g.add, "g", only)
 	main.stacks = saved
 	return main
 end
@@ -6561,7 +6557,7 @@ CraftPlan.GoalStackOrder = function() return AP.StackOrder() end
 -- План для цели: «Сейчас» — что создать из имеющегося (снизу вверх: слитки, потом изделие),
 -- «Дальше» (cont) — остальные создания и чего не хватает. Формат — как у BuildPlan
 function CraftPlan.GoalPlan()
-	local t = Tree(nil, true) -- у наковальни создаётся всё: сохранённые стеки и текущий
+	local t = Tree(nil, true) -- у наковальни создаётся всё: все стеки
 	local db = DB()
 	local list = {}
 	for _, key in ipairs(t.craftOrder) do list[#list + 1] = t.crafts[key] end
@@ -6604,13 +6600,13 @@ function CraftPlan.GoalPlan()
 		end
 	end
 	-- добавки к сырью: чтобы торговец (кнопка «Купить») и подсказки знали о них
-	local raw = { name = "Своя цель: добавки", reagents = {} }
+	local raw = { name = "Стеки: материалы", reagents = {} }
 	for id, n in pairs(t.nodes) do
 		if n.extra > 0 and n.made == 0 then
 			raw.reagents[#raw.reagents + 1] = { id = id, name = ItemName(id), icon = GetItemIcon(id), count = n.extra }
 		end
 	end
-	if raw.reagents[1] then cont[#cont + 1] = { goal = true, extraRaw = true, prof = "Своя цель", rec = raw, times = 1 } end
+	if raw.reagents[1] then cont[#cont + 1] = { goal = true, extraRaw = true, prof = "Стеки", rec = raw, times = 1 } end
 	CraftPlan.goalMode = true
 	return plan, total, chance, cont
 end
@@ -6626,7 +6622,7 @@ end
 
 local function Step() return IsShiftKeyDown() and 10 or 1 end
 
--- Создали рецепт из цели — его число уменьшается на 1, на нуле рецепт уходит из цели.
+-- Создали рецепт из стека — его число уменьшается на 1; стек, где всё создано, удаляется (кроме открытого на правку).
 -- UNIT_SPELLCAST_SUCCEEDED (3.3.5): unit, название заклинания; название рецепта = название заклинания
 local craftWatch = CreateFrame("Frame")
 craftWatch:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
@@ -6639,28 +6635,19 @@ craftWatch:SetScript("OnEvent", function(_, event, unit, spell)
 		for _, e in ipairs(st.list or {}) do
 			if e.name == spell and e.n > 0 then
 				e.n = e.n - 1
-				if not ListActive(st.list) then
-					table.remove(g.stacks, si)
-					if ui then ui.stackSel, ui.stackEdit = nil, nil end -- номера стеков сдвинулись
-					Print("стек создан целиком (последний рецепт: " .. spell .. ").")
+				if not ListActive(st.list) and g.edit ~= si then
+					AP.RemoveStack(si)
+					Print("стек создан целиком.")
 				end
 				Changed()
 				return
 			end
 		end
 	end
-	for i, e in ipairs(g.list) do
-		if e.name == spell and e.n > 0 then
-			e.n = e.n - 1
-			-- на нуле рецепт остаётся бледным («выполнено»): убрать — [x], снова — [+]
-			if e.n <= 0 then Print("цель выполнена: " .. spell .. ".") end
-			Changed()
-			return
-		end
-	end
 end)
 local function AddGoal(sk, name)
 	local list = Target()
+	if not list then AP.NoTarget() return false end
 	for _, e in ipairs(list) do
 		if e.sk == sk and e.name == name then
 			e.n = e.n + 1
@@ -6668,6 +6655,7 @@ local function AddGoal(sk, name)
 		end
 	end
 	list[#list + 1] = { sk = sk, name = name, n = 1 }
+	return true
 end
 
 -- Поиск рецептов по названию во всех профессиях: сначала ваши профессии, изученные, короткие названия
@@ -6694,7 +6682,7 @@ local function Matches(q)
 	return res
 end
 
--- Shift+щелчок по предмету или рецепту, пока курсор в поле: рецепт — в цель, иначе материал +1
+-- Shift+щелчок по предмету или рецепту, пока курсор в поле: рецепт — в стек, иначе материал +1
 local function AddLink(link)
 	local spell = tonumber(link:match("enchant:(%d+)") or link:match("spell:(%d+)") or "")
 	local item = tonumber(link:match("item:(%d+)") or "")
@@ -6722,19 +6710,17 @@ local function AddLink(link)
 		end
 	end
 	if best then
-		AddGoal(best.sk, best.rec.name)
-		Print("в цель: " .. best.rec.name .. " (" .. SKILL_NAME[best.sk] .. ").")
+		if not AddGoal(best.sk, best.rec.name) then return end
+		Print("в стек: " .. best.rec.name .. ".")
 	elseif item then
-		local _, add = Target()
-		add[item] = (add[item] or 0) + 1
-		Print("в цель: " .. ItemName(item) .. " +1 (рецепта на него нет — материал).")
+		if not AP.AddMat(item, 1) then return end
 	else
 		return
 	end
 	Changed()
 end
 
--- Кнопки «+ в цель» у окна профессии, учителя и торговца (раздел «Торговцы рецептами»): рецепт по названию.
+-- Кнопки «+» у окна профессии, учителя и торговца (раздел «Торговцы рецептами»): рецепт по названию.
 -- prof — название профессии (нет или не профессия — ищем во всех, сначала ваши и изученные)
 local function FindByName(prof, name)
 	local valid = false
@@ -6754,16 +6740,17 @@ local function FindByName(prof, name)
 	end
 	return best
 end
--- delta — на сколько изменить (нет — +1); до нуля и меньше — рецепт убирается из цели
+-- delta — на сколько изменить (нет — +1); до нуля и меньше — рецепт убирается из стека
 CraftPlan.GoalAddName = function(prof, name, delta)
 	if not name then return end
 	delta = delta or 1
 	local best = FindByName(prof, name)
 	if not best then
-		Print("«" .. name .. "» нет в данных рецептов CraftPlan — в цель не добавить.")
+		Print("«" .. name .. "» нет в данных рецептов CraftPlan — в стек не добавить.")
 		return
 	end
 	local list, found = Target(), nil
+	if not list then AP.NoTarget() return end
 	for k, e in ipairs(list) do
 		if e.sk == best.sk and e.name == best.rec.name then found = k end
 	end
@@ -6772,27 +6759,55 @@ CraftPlan.GoalAddName = function(prof, name, delta)
 		e.n = e.n + delta
 		if e.n <= 0 then
 			table.remove(list, found)
-			if ui then ui.goalFocus = nil end
-			Print("из цели убрано: " .. best.rec.name .. ".")
-		else
-			Print("в цели: " .. best.rec.name .. " — " .. e.n .. " раз.")
 		end
 	elseif delta > 0 then
 		list[#list + 1] = { sk = best.sk, name = best.rec.name, n = delta }
-		Print("в цель: " .. best.rec.name .. " (" .. SKILL_NAME[best.sk] .. ") — " .. delta .. " раз.")
 	else
 		return
 	end
 	Changed()
 end
--- Сколько раз рецепт стоит в цели (0 — нет)
+-- Сколько раз рецепт стоит в стеке на правке (0 — нет)
 CraftPlan.GoalCount = function(prof, name)
 	local best = FindByName(prof, name)
 	if not best then return 0 end
-	for _, e in ipairs((Target())) do
+	for _, e in ipairs(Target() or {}) do
 		if e.sk == best.sk and e.name == best.rec.name then return e.n end
 	end
 	return 0
+end
+
+-- Материал в стек на правке (+n): Shift+щелчок по предмету, ссылка в поле поиска
+function AP.AddMat(item, n)
+	local _, add = Target()
+	if not add then AP.NoTarget() return false end
+	add[item] = (add[item] or 0) + n
+	Print("в стек: " .. ItemName(item) .. " +" .. n .. ".")
+	return true
+end
+-- Shift+щелчок по предмету (сумки, окно профессии, торговец), пока открыта вкладка «План» и есть стек на правке:
+-- рецепт-предмет («Чертеж: …») — рецепт, остальное — материал +1. Окно «разделить стопку» после щелчка закрываем
+hooksecurefunc("HandleModifiedItemClick", function(link)
+	if not (link and IsModifiedClick("CHATLINK")) then return end
+	if ChatEdit_GetActiveWindow and ChatEdit_GetActiveWindow() then return end -- открыт чат — это ссылка в чат
+	if not (ui and ui.scroll and ui.scroll:IsVisible()) or not Target() then return end
+	if ui.goalBox and ui.goalBox:HasFocus() then return end -- поле поиска ловит ссылку само
+	local item = tonumber(link:match("item:(%d+)") or "")
+	if not item then return end
+	AP.splitHide = GetTime()
+	local short = (GetItemInfo(item) or ""):match("^[^:]+:%s*(.+)$")
+	local best = short and FindByName(nil, short)
+	if best then
+		if AddGoal(best.sk, best.rec.name) then Print("в стек: " .. best.rec.name .. ".") end
+	else
+		AP.AddMat(item, 1)
+	end
+	Changed()
+end)
+if OpenStackSplitFrame then
+	hooksecurefunc("OpenStackSplitFrame", function()
+		if AP.splitHide == GetTime() and StackSplitFrame then StackSplitFrame:Hide() end
+	end)
 end
 
 local function Box()
@@ -6811,8 +6826,7 @@ local function Box()
 	end)
 	box:SetScript("OnEnterPressed", function(self)
 		local m = Matches(self:GetText())[1]
-		if m then
-			AddGoal(m.sk, m.rec.name)
+		if m and AddGoal(m.sk, m.rec.name) then
 			self:SetText("")
 			self:ClearFocus()
 			Changed()
@@ -6820,9 +6834,8 @@ local function Box()
 	end)
 	box:SetScript("OnEnter", function(self)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
-		GameTooltip:AddLine("Своя цель")
-		GameTooltip:AddLine("Начните писать название рецепта (любой профессии, изученного или нет) и щёлкните по нему в списке; Enter — первый из списка. Можно Shift+щёлкнуть по предмету или рецепту, пока курсор в этом поле.", 1, 1, 1, true)
-		GameTooltip:AddLine("Пока цель не пуста, полоса, «План», «Схема», маршрут и процент считаются для неё. Уберите всё — снова прокачка.", 0.6, 0.8, 1, true)
+		GameTooltip:AddLine("Найти рецепт")
+		GameTooltip:AddLine("Название любой профессии; Enter — первый найденный.", 1, 1, 1, true)
 		GameTooltip:Show()
 	end)
 	box:SetScript("OnLeave", TipLeave)
@@ -6836,33 +6849,50 @@ local function Box()
 	return box
 end
 
--- Стеки. «Сохранить стек» — текущий стек (рецепты с n > 0 и добавки) уходит в сохранённые, его материалы
--- резервируются; full — на момент сохранения всё было собрано (потом не хватает — «опасно», материалы потрачены)
-function AP.SaveStack()
+-- Стеки: «Создать стек» — новый пустой стек сразу на правке; «Сохранить» — правка закрыта (пустой стек удаляется);
+-- «Редактировать» — снова на правку; удаление — со вопросом. full — стек был собран целиком
+-- (потом чего-то не хватает — «опасно», материалы потрачены)
+function AP.NewStack()
 	local g = GoalDB()
-	if not ListActive(g.list, g.add) then return end
-	local short = 0
-	local t = Tree()
-	for _, n in pairs(t.nodes) do if n.short > 0 then short = short + 1 end end
-	local list = {}
-	for _, e in ipairs(g.list) do
-		if e.n > 0 then list[#list + 1] = { sk = e.sk, name = e.name, n = e.n } end
-	end
-	g.stacks[#g.stacks + 1] = { list = list, add = g.add, full = (short == 0), time = time() }
-	g.list, g.add = {}, {}
-	if ui then ui.goalFocus, ui.stackSel, ui.stackEdit = nil, nil, nil end
-	Print("стек сохранён (" .. #list .. " рецептов" .. (short > 0 and (", не хватает материалов: " .. short) or ", всё собрано") .. "). Можно собирать следующий.")
+	g.stacks[#g.stacks + 1] = { list = {}, add = {}, time = time() }
+	g.edit = #g.stacks
+	if ui then ui.stackSel = nil end
+	if not AP.IsOpen() then AP.Toggle(true) end
+	Changed()
+end
+function AP.EditStack(si)
+	GoalDB().edit = si
+	Changed()
+end
+function AP.RemoveStack(si)
+	local g = GoalDB()
+	table.remove(g.stacks, si)
+	if g.edit == si then g.edit = nil elseif g.edit and g.edit > si then g.edit = g.edit - 1 end
+	if ui then ui.stackSel = nil end -- номера стеков сдвинулись
+end
+function AP.SaveStack(si)
+	local g = GoalDB()
+	local st = g.stacks[si]
+	g.edit = nil
+	if st and not ListActive(st.list, st.add) then AP.RemoveStack(si) end
 	Changed()
 end
 function AP.DropStack(si)
-	table.remove(GoalDB().stacks, si)
-	if ui then ui.stackSel, ui.stackEdit = nil, nil end -- номера стеков сдвинулись
+	AP.RemoveStack(si)
 	Changed()
 end
--- Дерево для «Материалов», «Что собрать», «Где фармить»: выбран рецепт текущего стека — только он;
--- отмечены галочками стеки (ui.stackSel = { [номер] = true, cur = true }) — только они вместе; иначе — все стеки
+StaticPopupDialogs["CRAFTPLAN_DROP_STACK"] = {
+	text = "Удалить стек %s?", button1 = YES, button2 = NO, timeout = 0, whileDead = 1, hideOnEscape = 1,
+	OnAccept = function(self, si) AP.DropStack(si or self.data) end,
+}
+-- номер стека для показа — место по порядку навыка
+function AP.StackNum(si)
+	for k, x in ipairs((AP.StackOrder())) do if x == si then return k end end
+	return si
+end
+-- Дерево для «Материалов», «Что собрать», «Где фармить»: отмечены галочками стеки (ui.stackSel = { [номер] = true }) —
+-- только они вместе; иначе — все стеки
 function AP.FocusTree()
-	if ui and ui.goalFocus then return Tree(ui.goalFocus) end
 	local sel = ui and ui.stackSel
 	if sel and next(sel) then return Tree(nil, false, sel) end
 	return Tree(nil, true)
@@ -6879,8 +6909,9 @@ function AP.Short(str, n)
 	end
 	return str
 end
--- Прирост навыка от созданий дерева: по профессиям { sure — точно (оранжевые), maybe — ожидаемо с шансом }.
--- ranks — навык по ходу (общий для стеков по порядку), создания — от низкого жёлтого порога к высокому
+-- Точный прирост навыка от созданий дерева (оранжевые, до жёлтого порога): по профессиям { sure }.
+-- ranks — навык по ходу (общий для стеков по порядку), создания — от низкого жёлтого порога к высокому.
+-- Жёлтые и зелёные создания не считаются: навык от них — как повезёт
 function AP.Gain(tr, ranks, lines)
 	local list = {}
 	for _, key in ipairs(tr.craftOrder) do list[#list + 1] = tr.crafts[key] end
@@ -6894,155 +6925,97 @@ function AP.Gain(tr, ranks, lines)
 			local sk = SKILL_ID[cr.prof]
 			local req = sk and AP.LearnReq(sk, rec.name)
 			if req and r < req then r = req end
-			local o = out[cr.prof] or { sure = 0, maybe = 0 }
+			local o = out[cr.prof] or { sure = 0 }
 			out[cr.prof] = o
-			for _ = 1, cr.times do
-				if r >= L.max then break end -- потолок: дальше только у учителя
-				if r < rec.y then
-					o.sure, r = o.sure + 1, r + 1
-				else
-					local c = Chance(rec.y, rec.g, r)
-					if c <= 0 then break end
-					o.maybe, r = o.maybe + c, math.min(L.max, r + c)
-				end
-			end
+			-- до жёлтого порога и не выше максимума навыка (дальше — к учителю)
+			local n = math.max(0, math.min(cr.times, rec.y - r, L.max - r))
+			o.sure, r = o.sure + n, r + n
 			ranks[cr.prof] = r
 		end
 	end
 	return out
 end
 
--- Плитки стеков: «Собираю сейчас» и сохранённые по порядку навыка; в каждой — прирост навыка,
--- рецепты, собран ли (опасно — материалы сохранённого стека потрачены), кнопки
+-- Плитки стеков по порядку навыка: «Стек N +M» (M — точный прирост навыка), галочка справа вверху — отметить
+-- для «Материалов» (можно несколько), прирост по профессиям, до 4 рецептов, статус; внизу — «Сохранить»
+-- (на правке) или «Редактировать» и значок удаления
 function AP.Stacks(y, W, t)
 	local g = GoalDB()
-	local order, keys = AP.StackOrder()
-	local cur = ListActive(g.list, g.add)
-	if not cur and not order[1] then return y end
-	local lines = SkillLines()
-	-- навык по ходу: стеки и текущий — по своему уровню (текущий — тоже на своё место)
-	local seq = {}
-	for _, si in ipairs(order) do seq[#seq + 1] = { si = si, key = keys[si], tr = t.stacks[si] } end
-	if cur then
-		local ck = AP.StackKey(g.list)
-		local pos = #seq + 1
-		for k, it in ipairs(seq) do if ck < it.key then pos = k break end end
-		table.insert(seq, pos, { cur = true, key = ck, tr = t })
-	end
-	local ranks = {}
-	for _, it in ipairs(seq) do it.gain = AP.Gain(it.tr, ranks, lines) end
-	-- плитки: текущий первым, дальше сохранённые по навыку
-	local tiles = {}
-	for _, it in ipairs(seq) do if it.cur then tiles[1] = it end end
-	for _, it in ipairs(seq) do if not it.cur then tiles[#tiles + 1] = it end end
-	Text("|cffffd200Стеки|r  |cff999999собрал стек — сохраните его и собирайте следующий; у наковальни создаётся всё сразу. Порядок — по навыку рецептов.|r", 10, y - 4, "GameFontNormal", W - 20)
-	y = y - 24
+	local order = AP.StackOrder()
+	local lines, ranks = SkillLines(), {}
 	local TW, GAP = 230, 10
 	local cols = math.max(1, math.floor((W - 20 + GAP) / (TW + GAP)))
 	local col, rowH = 0, 0
-	local num = 0
-	for _, it in ipairs(tiles) do
-		local list = it.cur and g.list or g.stacks[it.si].list
-		local st = not it.cur and g.stacks[it.si]
+	for num, si in ipairs(order) do
+		local st, tr = g.stacks[si], t.stacks[si]
+		local gain = AP.Gain(tr, ranks, lines)
 		local short = 0
-		for _, n in pairs(it.tr.nodes) do if n.short > 0 then short = short + 1 end end
-		if st and short == 0 then st.full = true end -- собран: если потом не хватит — «опасно»
-		local danger = st and st.full and short > 0
-		local body = {}
+		for _, n in pairs(tr.nodes) do if n.short > 0 then short = short + 1 end end
+		local empty = not ListActive(st.list, st.add)
+		if short == 0 and not empty and g.edit ~= si then st.full = true end -- собран: если потом не хватит — «опасно»
+		local danger = st.full and short > 0
+		local editing = g.edit == si
+		local body, sure = {}, 0
 		local profs = {}
-		for prof in pairs(it.gain) do profs[#profs + 1] = prof end
+		for prof, o in pairs(gain) do profs[#profs + 1] = prof; sure = sure + o.sure end
 		table.sort(profs)
 		for _, prof in ipairs(profs) do
-			local o = it.gain[prof]
-			local m = math.floor(o.maybe + 0.5)
-			if o.sure > 0 or m > 0 then
-				body[#body + 1] = "|cffffffff" .. prof .. "|r " .. (o.sure > 0 and ("|cffff8040+" .. o.sure .. "|r") or "")
-					.. (m > 0 and (" |cffffff00+~" .. m .. " с шансом|r") or "")
-			end
+			local o = gain[prof]
+			if o.sure > 0 then body[#body + 1] = "|cffffffff" .. prof .. "|r |cffff8040+" .. o.sure .. "|r" end
 		end
-		if not body[1] then body[1] = "|cff999999навыка не даст (серые рецепты)|r" end
-		local names, more = {}, 0
-		for _, e in ipairs(list) do
+		local names, more = 0, 0
+		for _, e in ipairs(st.list or {}) do
 			if e.n > 0 then
-				if #names < 4 then names[#names + 1] = "|cffccccccx" .. e.n .. " " .. AP.Short(e.name, 32) .. "|r" else more = more + 1 end
+				if names < 4 then names = names + 1; body[#body + 1] = "|cffccccccx" .. e.n .. " " .. AP.Short(e.name, 32) .. "|r" else more = more + 1 end
 			end
 		end
-		for _, nm in ipairs(names) do body[#body + 1] = nm end
 		if more > 0 then body[#body + 1] = "|cff999999и ещё " .. more .. "|r" end
-		local status
-		if danger then
-			status = "|cffff2020ОПАСНО: материалы потрачены (" .. short .. ")|r"
+		if empty then
+			body[#body + 1] = "|cff999999пусто|r"
+		elseif danger then
+			body[#body + 1] = "|cffff2020ОПАСНО: материалы потрачены (" .. short .. ")|r"
 		elseif short > 0 then
-			status = "|cffff8040не собрано: не хватает " .. short .. " мат.|r"
+			body[#body + 1] = "|cffff8040не хватает: " .. short .. " мат.|r"
 		else
-			status = "|cff40ff40всё собрано|r"
+			body[#body + 1] = "|cff40ff40всё собрано|r"
 		end
-		body[#body + 1] = status
-		local h = 22 + #body * 14 + 22
+		local h = 26 + #body * 14 + 24
 		if col >= cols then
 			col = 0
 			y = y - rowH - GAP
 			rowH = 0
 		end
 		local x = 10 + col * (TW + GAP)
-		local fkey = it.cur and "cur" or it.si
 		local sel = ui.stackSel or {}
-		local focused = sel[fkey] and not ui.goalFocus
-		local editing = (it.cur and not ui.stackEdit) or (not it.cur and ui.stackEdit == it.si)
-		-- рамка: красная — опасно, голубая — текущий стек, серая — сохранённый; фон всегда тёмный
-		local bc = danger and { 1, 0.1, 0.1 } or (it.cur and { 0.4, 0.8, 1 } or { 0.4, 0.4, 0.4 })
-		Rect(x, y, TW, h, bc[1], bc[2], bc[3], danger and 1 or 0.7)
+		local bc = danger and { 1, 0.1, 0.1 } or (editing and { 1, 0.82, 0 } or { 0.4, 0.4, 0.4 })
+		Rect(x, y, TW, h, bc[1], bc[2], bc[3], (danger or editing) and 1 or 0.7)
 		Rect(x + 1, y - 1, TW - 2, h - 2, 0.08, 0.08, 0.08, 1)
-		if not it.cur then num = num + 1 end
-		-- в заголовке — сколько навыка точно даст стек (оранжевые создания, все профессии вместе)
-		local sure = 0
-		for _, o in pairs(it.gain) do sure = sure + o.sure end
-		local plus = (sure > 0) and (" |cffff8040+" .. sure .. "|r") or ""
-		local title = (it.cur and ("|cff66ccffСобираю сейчас|r" .. plus) or ("|cffffd200Стек " .. num .. "|r" .. plus .. "  |cff999999с навыка " .. (it.key < 9999 and it.key or "?") .. "|r"))
-		Text(title, x + 8, y - 6, "GameFontNormal")
-		local ty = y - 24
+		Text("|cffffd200Стек " .. num .. "|r" .. (sure > 0 and (" |cffff8040+" .. sure .. "|r") or "") .. (editing and "  |cff999999правка|r" or ""), x + 8, y - 7, "GameFontNormal")
+		local ty = y - 26
 		for _, line in ipairs(body) do
 			Text(line, x + 8, ty, "GameFontHighlightSmall", TW - 16)
 			ty = ty - 14
 		end
-		local tip = {}
-		for _, e in ipairs(list) do if e.n > 0 then tip[#tip + 1] = e.name .. " x" .. e.n end end
-		-- галочка (и щелчок по плитке): отмеченные стеки вместе — «Материалы», «Что собрать», «Где фармить»;
-		-- ни одного не отмечено — все стеки. Можно отметить несколько
+		-- галочка: отмеченные стеки — в «Материалах», «Что собрать», «Где фармить»; ни одного — все
 		local function Pick()
 			ui.stackSel = ui.stackSel or {}
-			ui.stackSel[fkey] = (not ui.stackSel[fkey]) or nil
-			ui.goalFocus = nil
+			ui.stackSel[si] = (not ui.stackSel[si]) or nil
 			CraftPlan.RouteRefresh()
 		end
-		local selTip = { focused and "Отмечен. Материалы, «Что собрать» и «Где фармить» — по отмеченным стекам. Щёлкните — снять."
-			or "Отметить: материалы, «Что собрать» и «Где фармить» — по отмеченным стекам (можно несколько). Ничего не отмечено — по всем.",
-			table.concat(tip, ", ") }
-		local area = TextButton("", x + 1, y - 1, TW - 2, { title = "Стек", lines = selTip, action = Pick })
-		area:SetWidth(TW - 32) -- галочка справа вверху — своя кнопка
-		area:SetHeight(h - 24)
+		local selTip = { "Отметить: материалы ниже — только по отмеченным стекам. Ничего не отмечено — по всем." }
+		local area = TextButton("", x + 1, y - 1, TW - 34, { title = "Стек " .. num, lines = selTip, action = Pick })
+		area:SetHeight(h - 26)
 		Icon("Interface\\Buttons\\UI-CheckBox-Up", x + TW - 26, y - 2, 24, { lines = selTip, action = Pick })
-		if focused then Icon("Interface\\Buttons\\UI-CheckBox-Check", x + TW - 26, y - 2, 24, { lines = selTip, action = Pick }) end
-		-- значок правки: рецепты этого стека — ниже, «Все рецепты» и поиск добавляют в него
-		if editing then Rect(x + TW - 57, y - h + 25, 26, 26, 1, 0.82, 0, 1):SetDrawLayer("ARTWORK") end -- золотая рамка вокруг значка правимого стека, поверх фона плитки
-		Icon("Interface\\Icons\\INV_Misc_Note_01", x + TW - 54, y - h + 22, 20, { alpha = editing and 1 or 0.9,
-			title = editing and "Правится этот стек" or "Править этот стек",
-			lines = { editing and "Ниже — его рецепты и добавки; «Все рецепты», поиск и «+» у учителя/торговца добавляют сюда."
-				or "Щёлкните — ниже его рецепты и добавки, «Все рецепты» и поиск будут добавлять в него." },
-			action = function()
-				ui.stackEdit = (not it.cur and ui.stackEdit ~= it.si) and it.si or nil
-				ui.goalFocus = nil
-				CraftPlan.RouteRefresh(); AP.Update()
-			end })
-		if editing then Text("|cffffd200правка|r", x + TW - 102, y - h + 18, "GameFontNormalSmall") end
-		if it.cur then
-			TextButton("|cff40ff40[сохранить стек]|r", x + 8, y - h + 20, 110, { title = "Сохранить стек",
-				lines = { "Стек уходит в сохранённые, его материалы откладываются: следующий стек их не возьмёт. Создать — у наковальни, полоса покажет всё.",
-					short > 0 and ("|cffff8040Собрано не всё: не хватает " .. short .. ".|r") or "|cff40ff40Всё собрано.|r" }, action = AP.SaveStack })
+		if sel[si] then Icon("Interface\\Buttons\\UI-CheckBox-Check", x + TW - 26, y - 2, 24, { lines = selTip, action = Pick }) end
+		local by = y - h + 20
+		if editing then
+			TextButton("|cff40ff40[Сохранить]|r", x + 8, by, 90, { title = "Сохранить", lines = { "Закрыть правку стека." },
+				action = function() AP.SaveStack(si) end })
 		else
-			local si = it.si
-			TextButton("|cffff4040[x]|r", x + TW - 30, y - h + 20, 22, { title = "Удалить стек",
-				lines = { "Убрать стек целиком (рецепты и добавки).", table.concat(tip, ", ") }, action = function() AP.DropStack(si) end })
+			TextButton("|cff66ccff[Редактировать]|r", x + 8, by, 110, { title = "Редактировать",
+				lines = { "Открыть стек на правку: рецепты и материалы будут добавляться в него." }, action = function() AP.EditStack(si) end })
+			Icon("Interface\\Buttons\\UI-GroupLoot-Pass-Up", x + TW - 26, by + 2, 18, { title = "Удалить стек",
+				action = function() StaticPopup_Show("CRAFTPLAN_DROP_STACK", tostring(num), nil, si) end })
 		end
 		rowH = math.max(rowH, h)
 		col = col + 1
@@ -7051,9 +7024,9 @@ function AP.Stacks(y, W, t)
 end
 
 -- Окно «Все рецепты» справа от окна карты: все рецепты ваших профессий из CraftPlanRouteData —
--- изученные и нет (учитель, торговцы, добыча), по навыку, с цветом для вашего навыка; «- N +» — текущий стек.
+-- изученные и нет (учитель, торговцы, добыча), по навыку, с цветом для вашего навыка; «- N +» — стек на правке.
 -- Настройки: db.apOpen (открыто), db.apProf (профессия), db.apKind (фильтр цвета)
-local AP_ROW, AP_W = 22, 380
+local AP_ROW, AP_W = 36, 440 -- строка: название сверху, материалы значками снизу
 -- фильтр по цвету для вашего навыка — как список на «Схеме» (db.apKind)
 AP.KINDS = {
 	{ key = "skill", text = "Всё, что даёт навык", kinds = { optimal = true, medium = true, easy = true } },
@@ -7076,13 +7049,11 @@ function AP.RecKind(rec, rk)
 end
 function AP.Bump(sk, name, d)
 	local list = Target()
+	if not list then AP.NoTarget() return end
 	for k, e in ipairs(list) do
 		if e.sk == sk and e.name == name then
 			e.n = e.n + d
-			if e.n <= 0 then
-				table.remove(list, k)
-				if ui then ui.goalFocus = nil end
-			end
+			if e.n <= 0 then table.remove(list, k) end
 			Changed()
 			return
 		end
@@ -7093,7 +7064,7 @@ function AP.Bump(sk, name, d)
 	end
 end
 function AP.Count(sk, name)
-	for _, e in ipairs((Target())) do
+	for _, e in ipairs(Target() or {}) do
 		if e.sk == sk and e.name == name then return e.n end
 	end
 	return 0
@@ -7172,13 +7143,13 @@ function AP.Row(i)
 	r:SetHeight(AP_ROW)
 	r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
 	r.icon = r:CreateTexture(nil, "ARTWORK")
-	r.icon:SetWidth(18)
-	r.icon:SetHeight(18)
+	r.icon:SetWidth(30)
+	r.icon:SetHeight(30)
 	r.icon:SetPoint("LEFT", r, "LEFT", 0, 0)
 	r.plus = CreateFrame("Button", nil, r)
 	r.plus:SetWidth(16)
 	r.plus:SetHeight(16)
-	r.plus:SetPoint("RIGHT", r, "RIGHT", 0, 0)
+	r.plus:SetPoint("TOPRIGHT", r, "TOPRIGHT", 0, -1)
 	r.plus:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
 	r.plus:SetPushedTexture("Interface\\Buttons\\UI-PlusButton-Down")
 	r.plus:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
@@ -7194,14 +7165,24 @@ function AP.Row(i)
 	r.minus:SetPushedTexture("Interface\\Buttons\\UI-MinusButton-Down")
 	r.minus:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
 	r.req = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	r.req:SetPoint("RIGHT", r.minus, "LEFT", -6, 0)
-	r.req:SetWidth(64)
+	r.req:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, 2) -- вторая строка справа: «с N (+…) изучен»
 	r.req:SetJustifyH("RIGHT")
 	r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	r.name:SetPoint("LEFT", r.icon, "RIGHT", 4, 0)
-	r.name:SetPoint("RIGHT", r.req, "LEFT", -4, 0)
-	r.name:SetHeight(AP_ROW)
+	r.name:SetPoint("TOPLEFT", r.icon, "TOPRIGHT", 4, 0)
+	r.name:SetPoint("RIGHT", r.minus, "LEFT", -6, 0)
+	r.name:SetHeight(16)
 	r.name:SetJustifyH("LEFT")
+	-- материалы на одно создание: значок и «есть/нужно» (зелёным — хватает), до 7 штук
+	r.rg = {}
+	for k = 1, 7 do
+		local tex = r:CreateTexture(nil, "ARTWORK")
+		tex:SetWidth(14)
+		tex:SetHeight(14)
+		tex:SetPoint("BOTTOMLEFT", r.icon, "BOTTOMRIGHT", 4 + (k - 1) * 46, 0)
+		local fs = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		fs:SetPoint("LEFT", tex, "RIGHT", 2, 0)
+		r.rg[k] = { tex = tex, fs = fs }
+	end
 	r.plus:SetScript("OnClick", function(self) local d = self:GetParent().data; if d then AP.Bump(d.sk, d.rec.name, Step()) end end)
 	r.minus:SetScript("OnClick", function(self) local d = self:GetParent().data; if d then AP.Bump(d.sk, d.rec.name, -Step()) end end)
 	r:SetScript("OnEnter", function(self)
@@ -7216,15 +7197,21 @@ function AP.Row(i)
 			GameTooltip:AddLine("Не изучен: " .. (CraftPlan.RecipeSourceText and CraftPlan.RecipeSourceText(d.prof, d.rec.name) or "где учится — неизвестно") .. ".", 1, 0.5, 0.25, true)
 		end
 		if not d.req and not d.known then
-			GameTooltip:AddLine("С какого навыка учится — неизвестно: «~" .. d.rec.y .. "» — жёлтый порог (учится обычно раньше). Откройте окно учителя с «Недоступными» — аддон запишет точно.", 0.8, 0.8, 0.8, true)
+			GameTooltip:AddLine("С какого навыка учится — неизвестно: «до " .. d.rec.y .. "» — жёлтый порог, учится не позже. Откройте окно учителя с «Недоступными» — аддон запишет точно.", 0.8, 0.8, 0.8, true)
 		end
 		local ci = CraftPlan.ColorInfo and CraftPlan.ColorInfo(d.prof, d.rec.name)
 		GameTooltip:AddLine(ci or ("Пороги: жёлтый с " .. d.rec.y .. ", серый с " .. d.rec.g .. "."), 0.8, 0.8, 0.8, true)
-		GameTooltip:AddLine("Щелчок или «+» — в текущий стек, правый щелчок или «-» — убрать (Shift — по 10).", 0.5, 0.8, 1, true)
+		GameTooltip:AddLine("Материалы на одно создание (есть / нужно):", 1, 0.82, 0)
+		for _, rg in ipairs(d.rec.reag) do
+			local have = TotalCount({ id = rg.id })
+			local ok = have >= rg.count
+			GameTooltip:AddDoubleLine("  " .. ItemName(rg.id), have .. " / " .. rg.count, 1, 1, 1, ok and 0.25 or 1, ok and 1 or 0.4, ok and 0.25 or 0.4)
+		end
+		GameTooltip:AddLine("Щелчок или «+» — в стек на правке, правый — убрать (Shift — по 10).", 0.5, 0.8, 1, true)
 		GameTooltip:Show()
 	end)
 	r:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	-- щелчок по строке — в текущий стек (+1, Shift — +10), правый — убрать; Shift+щелчок при открытом чате — ссылка
+	-- щелчок по строке — в стек на правке (+1, Shift — +10), правый — убрать; Shift+щелчок при открытом чате — ссылка
 	r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 	r:SetScript("OnClick", function(self, button)
 		local d = self.data
@@ -7251,7 +7238,7 @@ function AP.List()
 	local out = {}
 	for _, rec in ipairs(Recipes(sk)) do
 		rec.low = rec.low or Lower(rec.name)
-		local req = (not known[rec.name]) and AP.LearnReq(sk, rec.name) or nil -- у изученных не нужно
+		local req = AP.LearnReq(sk, rec.name)
 		local count = AP.Count(sk, rec.name)
 		-- уже в стеке — видно всегда, иначе по фильтру цвета
 		if rec.y and rec.g and (#q < 2 or rec.low:find(q, 1, true)) and (count > 0 or kinds[AP.RecKind(rec, rank)]) then
@@ -7269,8 +7256,8 @@ function AP.Update()
 	local f = AP.frame
 	if not (f and f:IsShown()) then return end
 	local db = DB()
-	local _, _, tst = Target()
-	f.title:SetText("Все рецепты  |cff999999в " .. (tst and "стек на правке" or "текущий стек") .. "|r")
+	local g = GoalDB()
+	f.title:SetText("Все рецепты  " .. (g.edit and ("|cffffd200в стек " .. AP.StackNum(g.edit) .. "|r") or "|cffff6060стек не открыт|r"))
 	-- кнопки профессий (переносятся по строкам)
 	local profs = AP.Profs()
 	local okProf = false
@@ -7328,15 +7315,49 @@ function AP.Update()
 			r.icon:SetDesaturated(not d.known)
 			r.name:SetText(nameColor .. rec.name .. "|r")
 			-- изучен — «изучен»; не изучен — с какого навыка учится: по учителю (db.learn) «с N»,
-			-- нет данных — «~N» (жёлтый порог); рано учить — красным, можно — серым
+			-- нет данных — «до N» (жёлтый порог; знак «~» шрифт игры рисует высоко); рано учить — красным, можно — серым
+			-- «(+N, +M, +K)» — сколько навыка ещё даст рецепт на каждом цвете, считая от навыка сейчас (или от навыка
+			-- изучения, если он выше): оранжевым — до жёлтого порога, жёлтым — до середины, зелёным — до серого;
+			-- только цвета, выбранные в фильтре
+			local kinds, mid, spans = AP.Kind().kinds, math.floor((rec.y + rec.g) / 2), {}
+			local from = math.max(rk, d.req or 0)
+			local o, ye, gr = rec.y - from, mid - math.max(from, rec.y), rec.g - math.max(from, mid)
+			if kinds.optimal and o > 0 then spans[#spans + 1] = "|cffff8040+" .. o .. "|r" end
+			if kinds.medium and ye > 0 then spans[#spans + 1] = "|cffffff00+" .. ye .. "|r" end
+			if kinds.easy and gr > 0 then spans[#spans + 1] = "|cff40c040+" .. gr .. "|r" end
+			local orange = spans[1] and (" |cff999999(|r" .. table.concat(spans, "|cff999999, |r") .. "|cff999999)|r") or ""
 			if d.known then
-				r.req:SetText("|cff40ff40изучен|r")
+				r.req:SetText((d.req and ("|cff999999с " .. d.req .. "|r" .. orange .. " ") or "") .. "|cff40ff40изучен|r")
 			else
 				local lc = (d.req and d.req > rk) and "|cffff6060" or "|cffcccccc"
-				r.req:SetText(lc .. (d.req and ("с " .. d.req) or ("~" .. rec.y)) .. "|r")
+				r.req:SetText(lc .. (d.req and ("с " .. d.req) or ("до " .. rec.y)) .. "|r" .. orange)
 			end
-			r.count:SetText(d.count > 0 and ("|cffffd200" .. d.count .. "|r") or "|cff5555550|r")
-			if d.count > 0 then r.minus:Show() else r.minus:Hide() end
+			if g.edit then -- «- N +» — только когда есть стек на правке
+				r.count:SetText(d.count > 0 and ("|cffffd200" .. d.count .. "|r") or "|cff5555550|r")
+				r.plus:Show()
+				if d.count > 0 then r.minus:Show() else r.minus:Hide() end
+			else
+				r.count:SetText("")
+				r.plus:Hide()
+				r.minus:Hide()
+			end
+			-- материалы на одно создание: «есть/нужно», зелёным — хватает; не влезают до надписи справа — «+K»
+			local room = (r:GetWidth() or 300) - 34 - (r.req:GetStringWidth() or 0) - 10
+			local k = 0
+			for _, rg in ipairs(rec.reag) do
+				if k < #r.rg and (k + 1) * 46 <= room then
+					k = k + 1
+					local have = TotalCount({ id = rg.id })
+					r.rg[k].tex:SetTexture(GetItemIcon(rg.id) or "Interface\\Icons\\INV_Misc_QuestionMark")
+					r.rg[k].fs:SetText(((have >= rg.count) and "|cff40ff40" or "|cffff6060") .. have .. "/" .. rg.count .. "|r")
+					r.rg[k].tex:Show()
+					r.rg[k].fs:Show()
+				end
+			end
+			for j = k + 1, #r.rg do r.rg[j].tex:Hide(); r.rg[j].fs:Hide() end
+			if k < #rec.reag and k > 0 then
+				r.rg[k].fs:SetText(r.rg[k].fs:GetText() .. " |cff999999+" .. (#rec.reag - k) .. "|r")
+			end
 			r:Show()
 		else
 			r:Hide()
@@ -7361,85 +7382,19 @@ CraftPlan.AllRecipesShow = function(show) -- вкладка «План» пок�
 	end
 end
 
--- Наведение на цель или материал: подсвечена его цепочка — из чего делается (вниз) и для чего нужен (вверх), остальное скрыто
--- Верх вкладки «Маршрут»: поле поиска, найденные рецепты, цель и её материалы. Возвращает новый y
-function CraftPlan.DrawGoal(y, W)
-	local box = Box()
-	local active = CraftPlan.GoalActive()
-	Text("|cffffd200Своя цель:|r", 10, y - 4, "GameFontNormal")
-	box:ClearAllPoints()
-	box:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 104, y)
-	box:Show()
-	TextButton((AP.IsOpen and AP.IsOpen()) and "|cffffd200[Все рецепты]|r" or "|cff66ccff[Все рецепты]|r", 354, y - 2, 100, { title = "Все рецепты",
-		lines = { "Справа от окна — все рецепты ваших профессий: изученные и нет (у учителя, у торговцев, с добычи). «+» — в текущий стек.", "Щёлкните ещё раз — закрыть." },
-		action = function() if AP.Toggle then AP.Toggle() end end })
-	Text("|cff999999или название рецепта, Shift+щелчок по предмету" .. (active and "" or " — тогда всё считается для него") .. "|r", 462, y - 4, "GameFontHighlightSmall", W - 472)
-	y = y - 26
-	-- найденные рецепты
-	local found = Matches(ui.goalQuery)
+-- Строки рецептов стека на правке: по профессиям, значок (щелчок — выбрать рецепт или метка к учителю/торговцу),
+-- название, пороги («275-300» — не изучен, учится с 275; «до 300» — изучен), «N раз», [-] [+] [x]
+function AP.EditRows(y, W, st, tr)
 	local lines = SkillLines()
-	for i = 1, math.min(8, #found) do
-		local m = found[i]
-		local icon = GetItemIcon(m.rec.item)
-		local state = (m.known == 1) and "|cff40ff40изучен|r" or (lines[m.prof] and "|cffff8040не изучен|r" or "|cffff6060нет профессии|r")
-		TextButton((icon and ("|T" .. icon .. ":16|t ") or "") .. "|cffffffff" .. m.rec.name .. "|r  |cff999999" .. m.prof .. ", серый с " .. m.rec.g .. "|r  " .. state,
-			24, y, W - 40, { link = "item:" .. m.rec.item, lines = { "Щёлкните — добавить в цель (1 раз; дальше «+»)." },
-				action = function()
-					AddGoal(m.sk, m.rec.name)
-					box:SetText("")
-					box:ClearFocus()
-					Changed()
-				end })
-		y = y - 18
-	end
-	if #found > 8 then
-		Text("|cff999999и ещё " .. (#found - 8) .. " — уточните название|r", 24, y)
-		y = y - 16
-	end
-	if ui.goalQuery and #ui.goalQuery >= 4 and #found == 0 then
-		Text("|cffff8040Рецепт не найден.|r", 24, y)
-		y = y - 16
-	end
-	if not active and not GoalDB().list[1] then return y - 6 end -- выполненные рецепты показываем и без активной цели
-
-	local t = Tree()
-	local g = GoalDB()
-	y = AP.Stacks(y, W, t)
-	-- ниже — рецепты редактируемого стека: отмеченного галочкой сохранённого или текущего
-	local eList, eAdd, eSt = Target()
-	local eTree = eSt and t.stacks[ui.stackEdit] or t
-	if eSt then
-		local num = 0
-		for k, si in ipairs((AP.StackOrder())) do if si == ui.stackEdit then num = k end end
-		Text("|cffffd200Стек " .. num .. " — правка|r  |cff999999рецепты и добавки этого стека; «Все рецепты» и поиск добавляют сюда. Ещё раз значок правки на плитке — снова текущий стек.|r", 10, y - 2, "GameFontNormal", W - 20)
-		y = y - 20
-	elseif g.list[1] or next(g.add) then
-		Text("|cff66ccffТекущий стек|r  |cff999999что собираете сейчас; материалы сохранённых стеков сюда не идут|r", 10, y - 2, "GameFontNormal", W - 20)
-		y = y - 20
-	end
-	-- щелчок по названию цели — материалы ниже (и «Что собрать») только для неё; ещё щелчок — для всех
-	if ui.goalFocus and (eSt or not g.list[ui.goalFocus]) then ui.goalFocus = nil end
-	-- материалы — по всем стекам (сохранённым и текущему); выбран рецепт текущего стека — только для него
-	local T = AP.FocusTree()
-	local function Focus(i)
-		ui.goalFocus = (ui.goalFocus ~= i) and i or nil
-		ui.stackSel = nil
-		CraftPlan.RouteRefresh()
-	end
-	-- цели — по профессиям (по алфавиту), внутри — в порядке добавления
 	local sorted = {}
-	local learnDB = DB().learn or {}
-	for _, gl in ipairs(eTree.goals) do
-		local l = learnDB[gl.e.sk] and learnDB[gl.e.sk][gl.rec.name]
-		gl.req = (l and l.req) or gl.rec.y
+	for _, gl in ipairs(tr.goals) do
+		gl.req = AP.LearnReq(gl.e.sk, gl.rec.name) or gl.rec.y
 		sorted[#sorted + 1] = gl
 	end
 	table.sort(sorted, function(a, b)
 		if a.prof ~= b.prof then return a.prof < b.prof end
-		-- уровень рецепта: с какого навыка учится (записано у учителя, db.learn), иначе — жёлтый порог; затем жёлтый и серый
 		if a.req ~= b.req then return a.req < b.req end
 		if a.rec.y ~= b.rec.y then return a.rec.y < b.rec.y end
-		if a.rec.g ~= b.rec.g then return a.rec.g < b.rec.g end
 		return a.i < b.i
 	end)
 	local lastProf
@@ -7452,24 +7407,12 @@ function CraftPlan.DrawGoal(y, W)
 			y = y - 20
 		end
 		local known = ScannedRec(prof, rec.name)
-		local state
-		if known then
-			state = "|cff40ff40изучен|r"
-		elseif not lines[prof] then
-			state = "|cffff6060нет профессии|r"
-		else
-			state = "|cffff8040не изучен:|r " .. (CraftPlan.RecipeSourceText and CraftPlan.RecipeSourceText(prof, rec.name) or "где учится — неизвестно")
-		end
-		local done = e.n <= 0 -- выполнено: бледная строка, в план не входит; [x] — убрать, [+] — снова
-		if done then state = "|cff999999выполнено — [x] убрать, [+] сделать ещё|r" end
-		-- пороги цвета вместо названия профессии (она и так в заголовке группы): оранжевым — с какого навыка
-		-- учится (db.learn) до жёлтого, жёлтым — до зелёного (зелёный не показываем)
+		local done = e.n <= 0
+		local state = done and "|cff999999создано|r" or (known and "|cff40ff40изучен|r" or (lines[prof] and "|cffff8040не изучен|r" or "|cffff6060нет профессии|r"))
 		local ranges = ""
 		local rank = lines[prof] and lines[prof].rank
 		if rec.y and rec.g and rec.g > rec.y and not (rank and rank >= rec.g) then -- серый — навыка не даст, не пишем
 			local mid = math.floor((rec.y + rec.g) / 2)
-			-- не изучен — с какого навыка учится («275-300»); изучен или навык неизвестен — «до 300»
-			-- (только пока навык ниже жёлтого порога)
 			local from = (not known) and AP.LearnReq(e.sk, rec.name) or nil
 			local orange = ""
 			if from and from < rec.y then
@@ -7480,104 +7423,138 @@ function CraftPlan.DrawGoal(y, W)
 			ranges = orange .. "|cffffff00" .. rec.y .. "-" .. mid .. "|r"
 			if done then ranges = "|cff808080" .. ranges:gsub("|c%x%x%x%x%x%x%x%x", ""):gsub("|r", "") .. "|r" end
 		end
-		local focused = ui.goalFocus == gl.i
-		if focused then Rect(14, y + 2, W - 28, 32, 1, 0.82, 0, 0.15) end
 		-- не изучен — метка TomTom: к торговцу рецептом или к учителю (запомненному, ближе — в этой зоне)
 		local select = function()
 			if known or not lines[prof] then SelectRecipeByName(prof, rec.name, e.n) return end
 			if CraftPlan.RecipeWaypoint and CraftPlan.RecipeWaypoint(prof, rec.name) then return end
 			local here, best = GetRealZoneText(), nil
-			for _, tr in pairs(DB().trainers and DB().trainers[prof] or {}) do
-				if tr.c and tr.x and (not best or (tr.zone == here and best.zone ~= here)) then best = tr end
+			for _, t in pairs(DB().trainers and DB().trainers[prof] or {}) do
+				if t.c and t.x and (not best or (t.zone == here and best.zone ~= here)) then best = t end
 			end
 			if best and TomTom and TomTom.AddZWaypoint then
 				TomTom:AddZWaypoint(best.c, best.z, best.x * 100, best.y * 100, best.name .. " (учитель: " .. prof .. ")", false, true, true, nil, true)
 				Print("метка TomTom: учитель " .. best.name .. " (" .. (best.zone or "?") .. ") — " .. rec.name .. ".")
 			else
-				ShowTrainers(prof) -- учителей не запоминали — отметить по Questie
+				ShowTrainers(prof)
 			end
 		end
-		local count = prof .. ". Создать " .. e.n .. " раз" .. (rec.made > 1 and (" (" .. e.n * rec.made .. " шт.)") or "") .. "."
+		local tip = { prof .. ". Создать " .. e.n .. " раз" .. (rec.made > 1 and (" (" .. e.n * rec.made .. " шт.)") or "") .. "." }
+		if not known and lines[prof] then
+			tip[#tip + 1] = "Не изучен: " .. (CraftPlan.RecipeSourceText and CraftPlan.RecipeSourceText(prof, rec.name) or "где учится — неизвестно") .. "."
+		end
 		local ci = lines[prof] and CraftPlan.ColorInfo(prof, rec.name)
-		if ci then count = count .. "\n" .. ci end
+		if ci then tip[#tip + 1] = ci end
 		Icon(GetItemIcon(rec.item), 20, y, 28, { count = (rec.made > 1) and ("x" .. rec.made) or "", link = "item:" .. rec.item, title = rec.name,
-			gray = done, alpha = done and 0.5 or 1,
-			lines = { count, (known or not lines[prof]) and "Щелчок при открытом окне профессии — выбрать рецепт."
-				or "Не изучен: щелчок — метка TomTom к торговцу рецептом или к учителю." }, action = select })
-		TextButton((focused and "|cffffd200>|r " or "") .. (done and "|cff808080" or "|cffffffff") .. rec.name .. "|r  " .. ranges .. "   " .. state, 56, y - 2, W - 56 - 170,
-			{ link = "item:" .. rec.item, title = rec.name, action = (not eSt) and function() Focus(gl.i) end or nil,
-				lines = { count, eSt and "Рецепт сохранённого стека: «-», «+», «x» справа." or (focused and "Щёлкните — материалы снова для всех стеков." or "Щёлкните — материалы ниже только для этого рецепта.") } })
-		local w3 = Text(done and "|cff40ff40готово|r" or ("|cffffffff" .. e.n .. "|r раз"), W - 160, y - 8, "GameFontNormal")
+			gray = done, alpha = done and 0.5 or 1, lines = tip, action = select })
+		TextButton((done and "|cff808080" or "|cffffffff") .. rec.name .. "|r  " .. ranges .. "   " .. state, 56, y - 8, W - 56 - 170,
+			{ link = "item:" .. rec.item, title = rec.name, lines = tip, action = select })
+		Text(done and "|cff40ff40готово|r" or ("|cffffffff" .. e.n .. "|r раз"), W - 160, y - 8, "GameFontNormal")
 		local function Set(v)
 			e.n = math.max(0, v)
 			Changed()
 		end
-		local w4 = TextButton("|cffff6060[-]|r", W - 100, y - 6, 22, { lines = { "Меньше (Shift — на 10)." }, action = function() Set(e.n - Step()) end })
-		local w5 = TextButton("|cff40ff40[+]|r", W - 76, y - 6, 22, { lines = { "Больше (Shift — на 10)." }, action = function() Set(e.n + Step()) end })
-		local w6 = TextButton("|cffff4040[x]|r", W - 48, y - 6, 22, { lines = { "Убрать из цели." }, action = function()
-			table.remove(eList, gl.i)
-			ui.goalFocus = nil -- номера целей сдвинулись
+		TextButton("|cffff6060[-]|r", W - 100, y - 6, 22, { lines = { "Меньше (Shift — на 10)." }, action = function() Set(e.n - Step()) end })
+		TextButton("|cff40ff40[+]|r", W - 76, y - 6, 22, { lines = { "Больше (Shift — на 10)." }, action = function() Set(e.n + Step()) end })
+		TextButton("|cffff4040[x]|r", W - 48, y - 6, 22, { lines = { "Убрать из стека." }, action = function()
+			table.remove(st.list, gl.i)
 			Changed()
 		end })
 		y = y - 34
 	end
-	-- «Разное»: добавлено вручную и ни в одном рецепте цели не используется
-	local isMisc, treeIds = {}, {}
-	for _, id in ipairs(T.order) do
-		local n = T.nodes[id]
-		if n.extra > 0 and not T.up[id] then isMisc[#isMisc + 1] = id; isMisc[id] = true else treeIds[#treeIds + 1] = id end
-	end
-	if isMisc[1] and not ui.goalFocus then
-		Text("|cffffd200Разное|r  |cff999999добавлено вручную, в рецептах цели не используется|r", 14, y - 2, "GameFontNormal")
-		y = y - 20
-		for _, id in ipairs(isMisc) do
-			local n = T.nodes[id]
-			local mine = eAdd[id] and eAdd[id] > 0 -- добавка редактируемого стека (у остальных — только просмотр)
-			local have = TotalCount({ id = id })
-			local tip = { "Добавлено вручную: " .. n.extra .. " шт., есть " .. have .. " (сумки и банк).",
-				SourceText(id, n.src or Source(id, t.ctx, 0)) .. "|r", "Щелчок — где взять." }
-			local where = function() WhereToGetReagent({ id = id, name = ItemName(id) }) end
-			local w1 = Icon(GetItemIcon(id), 20, y, 28, { link = "item:" .. id, lines = tip, action = where })
-			local w2 = TextButton("|cffffffff" .. ItemName(id) .. "|r   " .. ((have >= n.extra) and "|cff40ff40" or "|cffff6060") .. have .. "/" .. n.extra .. "|r",
-				56, y - 8, W - 56 - 170, { link = "item:" .. id, lines = tip, action = where })
-			local w3 = Text("|cffffffff" .. n.extra .. "|r шт.", W - 160, y - 8, "GameFontNormal")
-			if mine then
-				TextButton("|cffff6060[-]|r", W - 100, y - 6, 22, { lines = { "Меньше (Shift — на 10)." }, action = function()
-					local v = (eAdd[id] or 0) - Step()
-					eAdd[id] = (v > 0) and v or nil
-					Changed()
-				end })
-				TextButton("|cff40ff40[+]|r", W - 76, y - 6, 22, { lines = { "Больше (Shift — на 10)." }, action = function()
-					eAdd[id] = (eAdd[id] or 0) + Step()
-					Changed()
-				end })
-				TextButton("|cffff4040[x]|r", W - 48, y - 6, 22, { lines = { "Убрать из стека." }, action = function()
-					eAdd[id] = nil
-					Changed()
-				end })
-			else
-				Text("|cff999999в другом стеке|r", W - 120, y - 8, "GameFontHighlightSmall")
-			end
-			y = y - 34
-		end
-	end
-	-- материалы и промежуточное: деревом, у каждого «+» — добавить сверх расчёта
-	if ui.goalFocus then
-		local fe = g.list[ui.goalFocus]
-		Rect(14, y + 2, W - 28, 1, 0.4, 0.4, 0.4, 0.6)
-		TextButton("|cff66ccffМатериалы только для:|r |cffffffff" .. fe.name .. " x" .. fe.n .. "|r   |cffffd200[показать для всех стеков]|r", 20, y - 4, W - 40,
-			{ lines = { "Количества — только на этот рецепт текущего стека (запас — кроме отложенного сохранёнными стеками). Щёлкните — снова все стеки." }, action = function() Focus(ui.goalFocus) end })
+	-- материалы, добавленные в стек вручную
+	local ids = {}
+	for id, x in pairs(st.add) do if x > 0 then ids[#ids + 1] = id end end
+	table.sort(ids)
+	if ids[1] then
+		Text("|cffffd200Материалы стека|r", 14, y - 2, "GameFontNormal")
 		y = y - 20
 	end
-	if treeIds[1] then
-		Rect(14, y + 2, W - 28, 1, 0.4, 0.4, 0.4, 0.6)
-		Text("|cff66ccffМатериалы — все стеки|r  |cff999999нужно всего / есть (сумки и банк) / создать / не хватает. «+» — взять больше в текущий стек (Shift — на 10), «-» — убрать его добавку.|r", 20, y - 4, "GameFontHighlightSmall", W - 40)
+	for _, id in ipairs(ids) do
+		local x = st.add[id]
+		local have = TotalCount({ id = id })
+		local where = function() WhereToGetReagent({ id = id, name = ItemName(id) }) end
+		local tip = { "В стеке: " .. x .. " шт., есть " .. have .. " (сумки и банк).", "Щелчок — где взять." }
+		Icon(GetItemIcon(id), 20, y, 28, { link = "item:" .. id, lines = tip, action = where })
+		TextButton("|cffffffff" .. ItemName(id) .. "|r   " .. ((have >= x) and "|cff40ff40" or "|cffff6060") .. "есть " .. have .. "|r", 56, y - 8, W - 56 - 170,
+			{ link = "item:" .. id, lines = tip, action = where })
+		Text("|cffffffff" .. x .. "|r шт.", W - 160, y - 8, "GameFontNormal")
+		TextButton("|cffff6060[-]|r", W - 100, y - 6, 22, { lines = { "Меньше (Shift — на 10)." }, action = function()
+			local v = (st.add[id] or 0) - Step()
+			st.add[id] = (v > 0) and v or nil
+			Changed()
+		end })
+		TextButton("|cff40ff40[+]|r", W - 76, y - 6, 22, { lines = { "Больше (Shift — на 10)." }, action = function()
+			st.add[id] = (st.add[id] or 0) + Step()
+			Changed()
+		end })
+		TextButton("|cffff4040[x]|r", W - 48, y - 6, 22, { lines = { "Убрать из стека." }, action = function()
+			st.add[id] = nil
+			Changed()
+		end })
+		y = y - 34
+	end
+	return y
+end
+
+-- Правка стека: заголовок, поиск рецепта, рецепты и материалы стека
+function AP.DrawEdit(y, W, si, tr)
+	local st = GoalDB().stacks[si]
+	st.list, st.add = st.list or {}, st.add or {}
+	Rect(10, y + 2, W - 20, 1, 1, 0.82, 0, 0.6)
+	Text("|cffffd200Стек " .. AP.StackNum(si) .. "|r  |cff999999правка|r", 10, y - 6, "GameFontNormal")
+	Text("Найти рецепт:", 150, y - 8, "GameFontHighlightSmall")
+	local box = Box()
+	box:ClearAllPoints()
+	box:SetPoint("TOPLEFT", ui.content, "TOPLEFT", 236, y - 2)
+	box:Show()
+	TextButton("|cff40ff40[Сохранить]|r", W - 100, y - 6, 90, { title = "Сохранить", lines = { "Закрыть правку стека." },
+		action = function() AP.SaveStack(si) end })
+	y = y - 28
+	local found = Matches(ui.goalQuery)
+	local lines = SkillLines()
+	for i = 1, math.min(8, #found) do
+		local m = found[i]
+		local icon = GetItemIcon(m.rec.item)
+		local state = (m.known == 1) and "|cff40ff40изучен|r" or (lines[m.prof] and "|cffff8040не изучен|r" or "|cffff6060нет профессии|r")
+		TextButton((icon and ("|T" .. icon .. ":16|t ") or "") .. "|cffffffff" .. m.rec.name .. "|r  |cff999999" .. m.prof .. "|r  " .. state,
+			24, y, W - 40, { link = "item:" .. m.rec.item, lines = { "Щёлкните — в стек." },
+				action = function()
+					if AddGoal(m.sk, m.rec.name) then
+						box:SetText("")
+						box:ClearFocus()
+						Changed()
+					end
+				end })
+		y = y - 18
+	end
+	if #found > 8 then
+		Text("|cff999999и ещё " .. (#found - 8) .. " — уточните название|r", 24, y)
+		y = y - 16
+	end
+	if ui.goalQuery and #ui.goalQuery >= 4 and #found == 0 then
+		Text("|cffff8040Рецепт не найден.|r", 24, y)
+		y = y - 16
+	end
+	if not ListActive(st.list, st.add) and not (st.list and st.list[1]) then
+		Text("|cff999999Пусто. Добавьте: «Все рецепты», поиск, «+» у учителя, Shift+щелчок по предмету в сумке.|r", 14, y - 2, "GameFontHighlightSmall", W - 28)
 		y = y - 22
 	end
-	for _, id in ipairs(treeIds) do
+	return AP.EditRows(y, W, st, tr) - 4
+end
+
+-- Материалы отмеченных стеков (или всех): дерево с отступом по глубине; [+]/[-] — добавка в стек на правке
+function AP.DrawMaterials(y, W)
+	local T = AP.FocusTree()
+	if not T.order[1] then return y end
+	local _, eAdd = Target()
+	local sel = ui.stackSel and next(ui.stackSel)
+	Rect(10, y + 2, W - 20, 1, 0.4, 0.4, 0.4, 0.6)
+	Text("|cff66ccffМатериалы|r  |cff999999" .. (sel and "отмеченные стеки" or "все стеки") .. "  /  нужно, есть, создать, не хватает|r", 10, y - 6, "GameFontNormal", W - 20)
+	y = y - 26
+	for _, id in ipairs(T.order) do
 		local n = T.nodes[id]
 		local x = 20 + math.max(0, n.depth - 1) * 18
-		local parts = { "нужно |cffffffff" .. n.gross .. "|r" .. (n.extra > 0 and (" |cff66ccff(+" .. n.extra .. " ваши)|r") or "") }
+		local parts = { "нужно |cffffffff" .. n.gross .. "|r" .. (n.extra > 0 and (" |cff66ccff(+" .. n.extra .. ")|r") or "") }
 		parts[#parts + 1] = "есть " .. n.have
 		if n.made > 0 then parts[#parts + 1] = "|cff66ccffсоздать " .. n.made .. "|r" end
 		if n.short > 0 then
@@ -7595,52 +7572,55 @@ function CraftPlan.DrawGoal(y, W)
 				end
 			end
 			Walk(id)
-			parts[#parts + 1] = (lack > 0) and ("|cffff8040на создание не хватает материалов (" .. lack .. ")|r") or "|cff40ff40на создание всё есть|r"
+			parts[#parts + 1] = (lack > 0) and ("|cffff8040не хватает материалов (" .. lack .. ")|r") or "|cff40ff40всё есть|r"
 		else
 			parts[#parts + 1] = "|cff40ff40хватает|r"
 		end
-		local req = CraftPlan.PROSPECT_REQ and CraftPlan.PROSPECT_REQ[id]
-		if req and CraftPlan.ProspectLine and CraftPlan.ProspectLine(id, n.have, n.gross) then
-			parts[#parts + 1] = "|cff66ff66просеять остатки " .. math.floor((n.have - n.gross) / 5) .. " раз|r"
-		end
-		local src = n.src or Source(id, t.ctx, 0)
+		local pl = CraftPlan.ProspectLine and CraftPlan.ProspectLine(id, n.have, n.gross)
+		if pl then parts[#parts + 1] = "|cff66ff66просеять остатки " .. math.floor((n.have - n.gross) / 5) .. " раз|r" end
+		local src = n.src or Source(id, T.ctx, 0)
 		local tip = { "Нужно " .. n.gross .. ", есть " .. n.have .. (n.made > 0 and (", создать " .. n.made) or "") .. (n.short > 0 and (", не хватает " .. n.short) or "") .. ".",
 			SourceText(id, src) .. "|r", "Щелчок — где взять." }
-		local pl = CraftPlan.ProspectLine and CraftPlan.ProspectLine(id, n.have, n.gross)
 		if pl then table.insert(tip, 2, "|cff66ff66" .. pl .. "|r") end
 		local where = function() WhereToGetReagent({ id = id, name = ItemName(id) }) end
-		local w1 = Icon(GetItemIcon(id), x, y, 22, { link = "item:" .. id, gray = n.short > 0 and n.stock == 0 and n.made == 0,
-			lines = tip, action = where })
-		local w2 = TextButton(ItemName(id) .. "   " .. table.concat(parts, "  |cff666666/|r  "), x + 28, y - 4, W - x - 28 - 80,
+		Icon(GetItemIcon(id), x, y, 22, { link = "item:" .. id, gray = n.short > 0 and n.stock == 0 and n.made == 0, lines = tip, action = where })
+		TextButton(ItemName(id) .. "   " .. table.concat(parts, "  |cff666666/|r  "), x + 28, y - 4, W - x - 28 - 80,
 			{ link = "item:" .. id, lines = tip, action = where })
-		local w3
-		if eAdd[id] and eAdd[id] > 0 then
-			w3 = TextButton("|cffff6060[-]|r", W - 76, y - 3, 22, { lines = { "Убрать добавку (Shift — на 10)." }, action = function()
-				local v = (eAdd[id] or 0) - Step()
-				eAdd[id] = (v > 0) and v or nil
+		if eAdd then
+			if eAdd[id] and eAdd[id] > 0 then
+				TextButton("|cffff6060[-]|r", W - 76, y - 3, 22, { lines = { "Убрать из стека на правке (Shift — на 10)." }, action = function()
+					local v = (eAdd[id] or 0) - Step()
+					eAdd[id] = (v > 0) and v or nil
+					Changed()
+				end })
+			end
+			TextButton("|cff40ff40[+]|r", W - 48, y - 3, 22, { lines = { "Добавить в стек на правке (Shift — на 10)." }, action = function()
+				eAdd[id] = (eAdd[id] or 0) + Step()
 				Changed()
 			end })
 		end
-		local w4 = TextButton("|cff40ff40[+]|r", W - 48, y - 3, 22, { lines = { "Взять больше (Shift — на 10)." }, action = function()
-			eAdd[id] = (eAdd[id] or 0) + Step()
-			Changed()
-		end })
 		y = y - 26
 	end
-	if eSt then
-		TextButton("|cffff4040Удалить этот стек|r", 20, y - 2, 320, { lines = { "Убрать сохранённый стек целиком (рецепты и добавки)." },
-			action = function() AP.DropStack(ui.stackEdit) end })
-		return y - 26
+	return y - 4
+end
+
+-- Верх вкладки «План»: «Стеки» + [Создать стек] + [Все рецепты], плитки, правка открытого стека, материалы. Возвращает новый y
+function CraftPlan.DrawGoal(y, W)
+	local g = GoalDB()
+	Text("|cffffd200Стеки|r", 10, y - 4, "GameFontNormalLarge")
+	TextButton("|cff40ff40[Создать стек]|r", 84, y - 6, 100, { title = "Создать стек", lines = { "Новый стек сразу открыт на правку." }, action = AP.NewStack })
+	TextButton((AP.IsOpen() and "|cffffd200" or "|cff66ccff") .. "[Все рецепты]|r", 190, y - 6, 100, { title = "Все рецепты",
+		lines = { "Рецепты ваших профессий — справа от окна." }, action = function() AP.Toggle() end })
+	y = y - 30
+	if ui.goalBox then ui.goalBox:Hide() end
+	if not g.stacks[1] then
+		Text("|cff999999Стеков нет — ниже обычная прокачка.|r", 14, y)
+		return y - 22
 	end
-	if not (g.list[1] or next(g.add)) then return y - 6 end
-	local anyStack = g.stacks[1] ~= nil
-	TextButton("|cffff4040Очистить текущий стек|r" .. (anyStack and "" or " |cff999999— снова прокачка навыков|r"), 20, y - 2, 320,
-		{ lines = { "Убрать все рецепты и добавки текущего стека. Сохранённые стеки остаются." }, action = function()
-			g.list, g.add = {}, {}
-			ui.goalFocus = nil
-			Changed()
-		end })
-	return y - 26
+	local t = Tree()
+	y = AP.Stacks(y, W, t)
+	if g.edit and t.stacks[g.edit] then y = AP.DrawEdit(y, W, g.edit, t.stacks[g.edit]) end
+	return AP.DrawMaterials(y, W)
 end
 end
 
@@ -7650,9 +7630,6 @@ local function DrawRoute()
 	ui.content:SetWidth(W)
 	ResetPools()
 	local y = -6
-	Text("|cff999999Шкала: |cffff8040оранжевое|r — навык точно, |cffffff00жёлтое|r — с шансом, бледное — рецепт ещё не выучен, чёрточки — потолки (к учителю). Наведите на отрезок или значок — подробности, щёлкните — действие.|r",
-		10, y, "GameFontHighlightSmall", W - 20)
-	y = y - 30
 	if not CraftPlanRouteData then
 		Text("|cffff4040Нет таблицы рецептов CraftPlanRouteData.|r", 10, y)
 		ui.content:SetHeight(60)
@@ -7664,12 +7641,12 @@ local function DrawRoute()
 	farmNeed, farmOrder = {}, {}
 	y = CraftPlan.DrawGoal(y, W)
 	if CraftPlan.GoalActive() then
-		-- своя цель: вместо шкал профессий — её недостающее (выбрана одна цель — только для неё)
-		local t = CraftPlan.GoalFocusTree() -- все стеки, выбранный стек или выбранный рецепт
+		-- стеки: вместо шкал профессий — их недостающее (отмечены галочками — только отмеченных)
+		local t = CraftPlan.GoalFocusTree()
 		for _, id in ipairs(t.order) do
 			local n = t.nodes[id]
 			if n.short > 0 then
-				total[id] = { amount = n.short, profs = { ["своя цель"] = true }, kind = Source(id, ctx, 0).kind }
+				total[id] = { amount = n.short, profs = { ["стеки"] = true }, kind = Source(id, ctx, 0).kind }
 				totalOrder[#totalOrder + 1] = id
 				if not n.guess then
 					farmNeed[id] = { amount = n.short }
@@ -7678,6 +7655,8 @@ local function DrawRoute()
 			end
 		end
 	else
+		Text("|cff999999Шкала: |cffff8040оранжевое|r — точно, |cffffff00жёлтое|r — с шансом, бледное — не выучен, чёрточки — потолки.|r", 10, y, "GameFontHighlightSmall", W - 20)
+		y = y - 18
 		for _, route in ipairs(data.routes) do
 			y = DrawProf(route, ctx, stock, total, totalOrder, y, W)
 		end
@@ -7747,7 +7726,7 @@ end
 -- Штуки всех материалов (и сырья, и готовых слитков из запаса) — вместе: есть / (есть + не хватает)
 function CraftPlan.RouteProgress()
 	if not CraftPlanRouteData then return nil end
-	if CraftPlan.GoalActive() then -- своя цель: есть / (есть + не хватает) по материалам всех стеков
+	if CraftPlan.GoalActive() then -- стеки: есть / (есть + не хватает) по материалам всех стеков
 		local t = CraftPlan.GoalTree()
 		local H, N, needs, rows = 0, 0, {}, {}
 		local function Add(label, tr)
@@ -7764,7 +7743,6 @@ function CraftPlan.RouteProgress()
 		for k, si in ipairs((CraftPlan.GoalStackOrder())) do
 			if t.stacks[si] then Add("Стек " .. k, t.stacks[si]) end
 		end
-		Add("Собираю сейчас", t)
 		CraftPlan.routeNeeds, CraftPlan.routeBooks = needs, {}
 		if H + N == 0 then return nil end
 		return H / (H + N), rows
