@@ -1,0 +1,9 @@
+<Bindings>
+	<Binding name="CLICK FishPlanCast:LeftButton" header="FISHPLAN">
+	</Binding>
+	<Binding name="CLICK FishPlanLure:LeftButton" header="FISHPLAN">
+	</Binding>
+	<Binding name="FISHPLAN_SWAP" header="FISHPLAN">
+		if FishPlan and FishPlan.Swap then FishPlan.Swap() end
+	</Binding>
+</Bindings>

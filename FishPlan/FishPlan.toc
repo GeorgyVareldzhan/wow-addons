@@ -1,0 +1,9 @@
+## Interface: 30300
+## Title: FishPlan
+## Notes: Рыбалка: удочка/оружие, приманка, заброс, журнал улова, громкий всплеск
+## Notes-ruRU: Рыбалка: удочка/оружие, приманка, заброс, журнал улова, громкий всплеск
+## Version: 0.1.0
+## X-Sirus-Category: 15
+## SavedVariablesPerCharacter: FishPlanDB
+
+FishPlan.lua
