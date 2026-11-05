@@ -1,11 +1,24 @@
 ## Interface: 30300
 ## Title: CraftPlan
-## Notes: Что скрафтить из сумок прямо сейчас, чтобы поднять профессии как можно выше; где добыть предмет (Questie)
-## Notes-ruRU: Что скрафтить из сумок прямо сейчас, чтобы поднять профессии как можно выше; где добыть предмет (Questie)
-## Version: 0.12.22
+## Notes: Стеки крафта: что собрать, купить и создать, прирост навыка
+## Notes-ruRU: Стеки крафта: что собрать, купить и создать, прирост навыка
+## Version: 2.0.21
 ## X-Sirus-Category: 15
 ## SavedVariables: WhereToGetDB
 ## SavedVariablesPerCharacter: CraftPlanDB
 ## OptionalDeps: Questie-335
 
-CraftPlan.lua
+Data\Thresholds.lua
+Data\Recipes.lua
+Core.lua
+Calc.lua
+Sources.lua
+UI\Widgets.lua
+UI\Window.lua
+UI\Plan.lua
+UI\Schema.lua
+UI\Recipes.lua
+UI\Bar.lua
+Prospect.lua
+Hooks.lua
+WhereToGet.lua
