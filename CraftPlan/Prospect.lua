@@ -1,44 +1,33 @@
--- CraftPlan 2.0 — просеивание (ювелирное дело), перенесено из 0.12. Каждое нажатие — одно просеивание, само ничего не делается.
--- Кнопка на полосе справа от значка окна: значок заклинания, число — сколько раз можно просеять, не трогая руду стеков;
--- при наведении — столбик руды из сумок, щелчок по руде — одно просеивание. Журнал «руда -> что выпало» и подсказки к руде и камням.
+-- CraftPlan 2.0 — prospecting (jewelcrafting): chances (Data/ProspectData.lua), the own log "ore -> what dropped",
+-- ore/gem tooltips, data for the "Просеивание" tab and its "Просеять" button (on hover of an ore row; one press — one prospect).
+-- Button on the bar right of the window icon: spell icon, number = how many prospects without touching stack ore;
+-- on hover a column of ore from the bags, click an ore = one prospect.
 local CP = CraftPlan
 local W = CP.W
 
-local PROSPECT_SPELL = 31252 -- Просеивание
-local ORES = { 2770, 2771, 2772, 3858, 10620, 23424, 23425, 36909, 36912, 36910 } -- руда, которую можно просеять
+local PROSPECT_SPELL = 31252 -- Prospecting
+local ORES = CP.ORES -- ore that can be prospected (Core.lua)
 local IS_ORE = {}
 for _, id in ipairs(ORES) do IS_ORE[id] = true end
-local SIZE = 32
-local LOOT_WAIT = 5 -- сколько секунд после просеивания ждём окно добычи
+local LOOT_WAIT = 5 -- how many seconds after prospecting we wait for the loot window
+local SIZE = 32 -- bar icon size (UI/Bar.lua)
 
--- Что обычно выпадает (данные 3.3.5; на Sirus может отличаться — журнал важнее) и с какого навыка просеивается
-local TBC = { 23077, 21929, 23112, 23079, 23117, 23107, 23436, 23439, 23440, 23437, 23438, 23441 }
-local WOTLK = { 36917, 36920, 36923, 36926, 36929, 36932, 36918, 36921, 36924, 36927, 36930, 36933 }
-local function With(list, ...)
+-- Chances per prospect: Data/ProspectData.lua (Sirus knowledge base, Tools/sirusdb.py); skill needed to prospect
+local DATA = CraftPlan_ProspectData or {}
+local PROSPECT = {} -- [ore] = { gem, ... } by chance
+for ore, list in pairs(DATA) do
 	local t = {}
-	for _, v in ipairs(list) do t[#t + 1] = v end
-	for _, v in ipairs({ ... }) do t[#t + 1] = v end
-	return t
+	for _, g in ipairs(list) do t[#t + 1] = g[1] end
+	PROSPECT[ore] = t
 end
-local PROSPECT = {
-	[2770] = { 774, 818, 1210 },                                  -- медная
-	[2771] = { 1210, 1206, 1705, 1529, 3864, 7909 },              -- оловянная
-	[2772] = { 1529, 3864, 1705, 7909, 7910 },                    -- железная
-	[3858] = { 3864, 7909, 7910, 12361, 12799, 12800, 12364 },    -- мифриловая
-	[10620] = { 7910, 12361, 12799, 12800, 12364 },               -- ториевая
-	[23424] = TBC,                                                -- оскверненного железа
-	[23425] = With(TBC, 24243),                                   -- адамантитовая
-	[36909] = WOTLK,                                              -- кобальтовая
-	[36912] = WOTLK,                                              -- саронитовая
-	[36910] = With(WOTLK, 36919, 36922, 36925, 36928, 36931, 36934, 46849), -- титановая
-}
 local PROSPECT_REQ = { [2770] = 20, [2771] = 50, [2772] = 125, [3858] = 175, [10620] = 250,
 	[23424] = 275, [23425] = 325, [36909] = 350, [36912] = 400, [36910] = 450 }
+local LOG_MIN, LOG_DIFF = 20, 5 -- own chance is used after LOG_MIN prospects if it differs by more than LOG_DIFF points
 
 local function Print(msg) DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffCraftPlan (просеивание):|r " .. msg) end
 
--- Журнал — CraftPlanDB.prospect: ore[руда] = { n = просеиваний, gems = { [камень] = { c = штук, t = раз выпадал } } };
--- fail[руда] = навык, при котором игра отказала (навыка мало)
+-- Log — CraftPlanDB.prospect: ore[ore] = { n = prospects, gems = { [gem] = { c = pieces, t = times dropped } } };
+-- fail[ore] = skill at which the game refused (skill too low)
 local function PDB()
 	local db = CP.DB()
 	local p = db.prospect or {}
@@ -53,28 +42,13 @@ local function JewelRank()
 	return l and l.rank or 0
 end
 
--- Сколько руды нужно стекам
-local function StackNeed(id)
-	local data = CP.Compute()
-	local n = CP.Merge(data.trees, data.order).nodes[id]
-	return n and n.gross or 0
-end
-
--- Свободно для просеивания: всё (сумки + банк) минус нужное стекам, не больше, чем в сумках
-local function FreeOre(id)
-	local bags = GetItemCount(id)
-	local need = StackNeed(id)
-	local total = CP.Have(id)
-	return math.max(0, math.min(bags, total - need)), need, bags, total - bags
-end
-
--- руда, на которой игра отказала при нынешнем навыке, пропускается
+-- ore the game refused at the current skill is skipped
 local function Usable(id)
 	local failAt = PDB().fail[id]
 	return GetItemCount(id) >= 5 and not (failAt and JewelRank() <= failAt)
 end
 
--- Ячейка со стопкой руды от 5 штук
+-- Slot with a stack of 5+ ore
 local function OreSlot(id)
 	for bag = 0, 4 do
 		for slot = 1, GetContainerNumSlots(bag) do
@@ -86,41 +60,177 @@ local function OreSlot(id)
 	end
 end
 
-local function OreTooltipLines(tip, id)
+----------------------------------------------------------------------------------------------
+-- For the "Просеивание" tab
+function CP.Pct(v) return (math.floor(v * 10 + 0.5) / 10) .. "%" end
+CP.JewelRank = JewelRank
+function CP.ProspectReq(ore) return PROSPECT_REQ[ore] or 0 end
+function CP.ProspectData(ore) return DATA[ore] end
+function CP.ProspectLog(ore) local o = PDB().ore[ore]; return o and o.n > 0 and o or nil end
+-- Static index of DATA, built once: byGem[gem] = { { ore, pct, avg } }, gemList = every gem (shared — not changed
+-- by callers), baseTip[gem] = { { ore, pct } } — the first entry of each ore, in CP.ORES order (tooltips)
+local byGem, gemList, baseTip
+local function Index()
+	if byGem then return end
+	byGem, gemList, baseTip = {}, {}, {}
+	for ore, list in pairs(DATA) do
+		for _, g in ipairs(list) do
+			local t = byGem[g[1]]
+			if not t then t = {}; byGem[g[1]] = t; gemList[#gemList + 1] = g[1] end
+			t[#t + 1] = { ore = ore, pct = g[2], avg = g[5] }
+		end
+	end
+	for _, ore in ipairs(ORES) do
+		local seen = {}
+		for _, g in ipairs(DATA[ore] or {}) do
+			if not seen[g[1]] then
+				seen[g[1]] = true
+				local t = baseTip[g[1]] or {}
+				baseTip[g[1]] = t
+				t[#t + 1] = { ore = ore, pct = g[2] }
+			end
+		end
+	end
+end
+-- gem -> ores it comes from: { ore, pct (base), own (own chance or nil), per (expected pieces per prospect) }
+function CP.ProspectOres(gem)
+	Index()
+	local list = byGem[gem]
+	if not list then return nil end
+	local out = {}
+	for _, b in ipairs(list) do
+		local o = PDB().ore[b.ore]
+		local lg = o and o.gems[gem]
+		local own = (o and o.n >= LOG_MIN) and (lg and lg.t / o.n * 100 or 0) or nil
+		if own and math.abs(own - b.pct) <= LOG_DIFF then own = nil end
+		local avg = (own and lg and lg.t > 0) and (lg.c / lg.t) or b.avg
+		out[#out + 1] = { ore = b.ore, pct = b.pct, own = own, per = (own or b.pct) / 100 * avg, req = PROSPECT_REQ[b.ore] or 0 }
+	end
+	return out
+end
+-- the ore with the highest chance for a gem (ore the skill allows first); onlyCan — only such ore
+function CP.ProspectTopOre(gem, onlyCan)
+	local rank, best = JewelRank(), nil
+	for _, o in ipairs(CP.ProspectOres(gem) or {}) do
+		local can = rank >= o.req
+		if can or not onlyCan then
+			if not best or (can and not best.can) or (can == best.can and o.per > best.per) then
+				best = o
+				best.can = can
+			end
+		end
+	end
+	return best
+end
+-- which ore and how much closes the missing gems: each gem — its top ore; gems with the same ore share it
+-- (one prospect gives several gems). nodes: { id, short }. -> { { ore, need, can, gems = { node, ... } }, ... }
+function CP.ProspectPlan(nodes, onlyCan)
+	local out, byOre = {}, {}
+	for _, n in ipairs(nodes) do
+		local o = CP.ProspectTopOre(n.id, onlyCan)
+		if o then
+			local c = byOre[o.ore]
+			if not c then c = { ore = o.ore, need = 0, can = o.can, gems = {} }; byOre[o.ore] = c; out[#out + 1] = c end
+			c.gems[#c.gems + 1] = n
+			c.need = math.max(c.need, math.ceil(n.short / o.per) * 5)
+		end
+	end
+	return out
+end
+-- prospecting is available: the spell is in the spellbook
+function CP.CanProspect()
+	local spell = GetSpellInfo(PROSPECT_SPELL)
+	return spell and GetSpellInfo(spell) and true or false
+end
+function CP.IsProspectGem(id) Index(); return byGem[id] ~= nil end
+-- every gem prospecting gives (shared list — don't change it)
+function CP.ProspectGemList() Index(); return gemList end
+
+-- Tooltip lines are built as entries: { text, r, g, b, wrap } or { text, r, g, b, right = text } (double line, white)
+local BLUE, GREY, WHITE = { 0.4, 0.8, 1 }, { 0.6, 0.6, 0.6 }, { 1, 1, 1 }
+local function Line(out, text, c, wrap) out[#out + 1] = { text = text, c = c, wrap = wrap } end
+local function Double(out, text, right) out[#out + 1] = { text = text, c = WHITE, right = right } end
+
+local function OreTooltipLines(out, id)
 	local o = PDB().ore[id]
 	if not o or o.n == 0 then
-		tip:AddLine("Просеивание: вы ещё не просеивали эту руду.", 0.6, 0.6, 0.6, true)
+		-- no log yet: chances from the Sirus knowledge base
+		if DATA[id] then
+			Line(out, "Просеивание, шанс за раз:", BLUE)
+			for i, g in ipairs(DATA[id]) do
+				if i > 12 then Line(out, "  и ещё " .. (#DATA[id] - 12), GREY) break end
+				Double(out, "  " .. CP.ItemName(g[1]), CP.Pct(g[2]))
+			end
+		else
+			Line(out, "Просеивание: вы ещё не просеивали эту руду.", GREY, true)
+		end
 		return
 	end
 	local list = {}
 	for gem, g in pairs(o.gems) do list[#list + 1] = { gem, g.c / o.n } end
 	table.sort(list, function(a, b) return a[2] > b[2] end)
-	tip:AddLine("Просеивание (ваш журнал, " .. o.n .. " раз), в среднем за раз:", 0.4, 0.8, 1)
+	Line(out, "Просеивание (ваш журнал, " .. o.n .. " раз), в среднем за раз:", BLUE)
 	for i = 1, math.min(#list, 6) do
-		tip:AddDoubleLine("  " .. CP.ItemName(list[i][1]), string.format("%.2f", list[i][2]), 1, 1, 1, 1, 1, 1)
+		Double(out, "  " .. CP.ItemName(list[i][1]), string.format("%.2f", list[i][2]))
 	end
 end
 
+local clickAt, clickOre = 0, nil -- which ore was prospected by a click (for the "skill too low" refusal)
+
 ----------------------------------------------------------------------------------------------
--- Кнопка (защищённая): стоит на полосе справа от значка окна, полоса оставляет ей место
-local mapBtn = CP.mapButton
+-- "Просеять" on hover of an ore row in the tab: one floating secure button (UIParent, not inside the
+-- redrawn canvas), placed over the row out of combat only
+local rowBtn = CreateFrame("Button", "CraftPlanProspectRowButton", UIParent, "SecureActionButtonTemplate,UIPanelButtonTemplate")
+rowBtn:SetText("Просеять")
+rowBtn:SetWidth(rowBtn:GetFontString():GetStringWidth() + 20)
+rowBtn:SetHeight(18)
+rowBtn:SetFrameStrata("DIALOG")
+rowBtn:RegisterForClicks("LeftButtonUp")
+rowBtn:SetAttribute("type1", "macro")
+rowBtn:Hide()
+rowBtn:HookScript("OnClick", function(self) clickAt, clickOre = GetTime(), self.ore end)
+rowBtn:SetScript("OnEnter", function(self) if self.area then W.TipEnter(self.area) end end)
+rowBtn:SetScript("OnLeave", W.TipLeave)
+rowBtn:SetScript("OnUpdate", function(self)
+	if InCombatLockdown() then return end
+	local a = self.area
+	if not a or not a:IsVisible() or a.prOre ~= self.ore or not (MouseIsOver(self) or MouseIsOver(a)) then self:Hide() end
+end)
+-- area: the row (canvas Area with .prOre), x: offset from the row's left edge
+function CP.ProspectHover(area, ore, x)
+	if InCombatLockdown() or not area.prOre then return end
+	local spell = GetSpellInfo(PROSPECT_SPELL)
+	local bag, slot = OreSlot(ore)
+	if not (spell and GetSpellInfo(spell) and bag and Usable(ore)) then return end
+	local s = area:GetEffectiveScale() / UIParent:GetEffectiveScale()
+	rowBtn:ClearAllPoints()
+	rowBtn:SetPoint("LEFT", UIParent, "BOTTOMLEFT", (area:GetLeft() + x) * s, ((area:GetTop() + area:GetBottom()) / 2) * s)
+	rowBtn:SetAttribute("macrotext1", "/cast " .. spell .. "\n/use " .. bag .. " " .. slot)
+	rowBtn.area, rowBtn.ore = area, ore
+	rowBtn:Show()
+end
+
+----------------------------------------------------------------------------------------------
+-- Bar button (secure): right of the window icon, the bar leaves room for it (UI/Bar.lua)
+-- How much ore the stacks need; free for prospecting = everything (bags + bank) minus that, no more than in the bags
+local function StackNeed(id)
+	local n = CP.MergedAll().nodes[id]
+	return n and n.gross or 0
+end
+local function FreeOre(id)
+	local bags = GetItemCount(id)
+	local need = StackNeed(id)
+	local total = CP.Have(id)
+	return math.max(0, math.min(bags, total - need)), need, bags, total - bags
+end
+
 local frame = CreateFrame("Frame", "CraftPlanProspectFrame", UIParent)
 frame:SetWidth(SIZE)
 frame:SetHeight(SIZE)
-frame:SetPoint("LEFT", mapBtn, "RIGHT", 6, 0)
+frame:SetPoint("LEFT", CP.mapButton, "RIGHT", 6, 0)
 frame:SetFrameStrata("MEDIUM")
 frame:Hide()
 CP.prospectFrame = frame
-
-local function Border(b)
-	b.border = b:CreateTexture(nil, "OVERLAY")
-	b.border:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
-	b.border:SetBlendMode("ADD")
-	b.border:SetWidth(SIZE * 1.8)
-	b.border:SetHeight(SIZE * 1.8)
-	b.border:SetPoint("CENTER", b, "CENTER", 0, 0)
-	b.border:SetVertexColor(0.4, 0.8, 1)
-end
 
 local function SecureButton(name, parent)
 	local b = CreateFrame("Button", name, parent, "SecureActionButtonTemplate")
@@ -133,7 +243,7 @@ local function SecureButton(name, parent)
 	b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square", "ADD")
 	b.count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
 	b.count:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -1, 1)
-	-- Ctrl+перетаскивание — передвинуть полосу, как и с её значков
+	-- Ctrl+drag moves the bar, same as from its icons
 	b:RegisterForDrag("LeftButton")
 	b:SetScript("OnDragStart", CP.BarDragStart)
 	b:SetScript("OnDragStop", CP.BarDragStop)
@@ -142,34 +252,37 @@ end
 
 local button = SecureButton("CraftPlanProspect", frame)
 button:SetAllPoints(frame)
-Border(button)
-button.warn = button:CreateTexture(nil, "OVERLAY") -- руда нужна стекам
+button.border = button:CreateTexture(nil, "OVERLAY")
+button.border:SetTexture("Interface\\Buttons\\UI-ActionButton-Border")
+button.border:SetBlendMode("ADD")
+button.border:SetWidth(SIZE * 1.8)
+button.border:SetHeight(SIZE * 1.8)
+button.border:SetPoint("CENTER", button, "CENTER", 0, 0)
+button.border:SetVertexColor(0.4, 0.8, 1)
+button.warn = button:CreateTexture(nil, "OVERLAY") -- ore is needed by stacks
 button.warn:SetWidth(14)
 button.warn:SetHeight(14)
 button.warn:SetPoint("TOPRIGHT", button, "TOPRIGHT", 2, 2)
 button.warn:SetTexture(W.TEX.alert)
 
-local updateSecure
-local clickAt, clickOre = 0, nil -- какую руду просеивали щелчком (для отказа «навыка мало»)
 local flyOres = {}
 button:SetScript("OnEnter", function(self)
-	GameTooltip:SetOwner(self, "ANCHOR_RIGHT") -- снизу — столбик руды
+	GameTooltip:SetOwner(self, "ANCHOR_RIGHT") -- the ore column is below
 	GameTooltip:AddLine("Просеивание")
-	GameTooltip:AddLine("Число — сколько раз всего можно просеять, не трогая руду стеков.", 1, 1, 1, true)
+	GameTooltip:AddLine("Число — сколько раз можно просеять, не трогая руду стеков.", 1, 1, 1, true)
 	for _, id in ipairs(flyOres) do
 		local free, need = FreeOre(id)
 		GameTooltip:AddDoubleLine("  " .. CP.ItemName(id), math.floor(free / 5) .. " раз" .. (need > 0 and ("  (стекам нужно " .. need .. ")") or ""),
 			1, 1, 1, need > 0 and 1 or 0.25, need > 0 and 0.82 or 1, need > 0 and 0 or 0.25)
 	end
-	GameTooltip:AddLine("Значок в углу — какая-то руда нужна стекам. Просеять — щелчок по руде в столбике снизу.", 0.6, 0.8, 1, true)
-	GameTooltip:AddLine("Ctrl+перетаскивание — передвинуть полосу.", 0.6, 0.8, 1, true)
+	GameTooltip:AddLine("Щелчок по руде в столбике — одно просеивание.", 0.6, 0.8, 1, true)
 	GameTooltip:Show()
 end)
 button:SetScript("OnLeave", W.TipLeave)
 
--- Столбик под кнопкой: значок руды, число — сколько раз можно просеять без руды стеков; щелчок — одно просеивание
+-- Column under the button: ore icon, number = how many prospects without stack ore; click = one prospect
 local fly = CreateFrame("Frame", "CraftPlanProspectFly", frame)
-fly:SetPoint("TOP", frame, "BOTTOM", 0, -16) -- ниже процента под значком окна
+fly:SetPoint("TOP", frame, "BOTTOM", 0, -16) -- below the percentage under the window icon
 fly:SetWidth(SIZE)
 fly:Hide()
 local flyButtons = {}
@@ -188,12 +301,17 @@ local function FlyButton(i)
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 		GameTooltip:AddLine(CP.ItemName(id) .. ": в сумках " .. bags .. (bank > 0 and (", в банке " .. bank) or "") .. " шт.")
 		if need > 0 then
-			GameTooltip:AddLine("Стекам нужно " .. need .. ", есть " .. (bags + bank) .. " — свободно " .. free .. ", можно просеять " .. math.floor(free / 5) .. " раз.",
+			GameTooltip:AddLine("Стекам нужно " .. need .. " — свободно " .. free .. ", можно просеять " .. math.floor(free / 5) .. " раз.",
 				free >= 5 and 0.25 or 1, free >= 5 and 1 or 0.4, free >= 5 and 0.25 or 0.4, true)
 		else
 			GameTooltip:AddLine("Стекам не нужна — можно просеять " .. math.floor(bags / 5) .. " раз.", 0.25, 1, 0.25, true)
 		end
-		OreTooltipLines(GameTooltip, id)
+		local out = {}
+		OreTooltipLines(out, id)
+		for _, l in ipairs(out) do
+			if l.right then GameTooltip:AddDoubleLine(l.text, l.right, l.c[1], l.c[2], l.c[3], 1, 1, 1)
+			else GameTooltip:AddLine(l.text, l.c[1], l.c[2], l.c[3], l.wrap) end
+		end
 		GameTooltip:AddLine("Щелчок — одно просеивание этой руды.", 0.6, 0.8, 1, true)
 		GameTooltip:Show()
 	end)
@@ -202,7 +320,7 @@ local function FlyButton(i)
 	return b
 end
 
--- настроить столбик (только вне боя)
+-- set up the column (out of combat only)
 local function FlySetup(spell)
 	wipe(flyOres)
 	for _, id in ipairs(ORES) do
@@ -227,7 +345,7 @@ local function FlySetup(spell)
 	if #flyOres < 1 then fly:Hide() end
 end
 
--- показать при наведении на кнопку; спрятать, когда курсор ушёл и с кнопки, и со столбика
+-- show on button hover; hide when the cursor has left both the button and the column
 button:HookScript("OnEnter", function()
 	if #flyOres >= 1 and not InCombatLockdown() then fly:Show() end
 end)
@@ -245,12 +363,12 @@ fly:SetScript("OnUpdate", function(self, elapsed)
 end)
 
 local pending = false
-updateSecure = function()
+local function UpdateButton()
 	if InCombatLockdown() then pending = true return end
 	pending = false
 	local was = frame:IsShown()
 	local spell = GetSpellInfo(PROSPECT_SPELL)
-	local known = spell and GetSpellInfo(spell) -- есть в книге заклинаний
+	local known = spell and GetSpellInfo(spell) -- is in the spellbook
 	if known then FlySetup(spell) else fly:Hide() end
 	if known and #flyOres > 0 and not CP.DB().collapsed then
 		local times, needed = 0, false
@@ -266,13 +384,13 @@ updateSecure = function()
 	else
 		frame:Hide()
 	end
-	if was ~= frame:IsShown() and CP.RefreshBar then CP.RefreshBar() end -- полоса сдвигает значки
+	if was ~= frame:IsShown() and CP.RefreshBar then CP.RefreshBar() end -- the bar shifts its icons
 end
-CP.ProspectUpdate = function() updateSecure() end
-CP.OnChange(updateSecure)
+CP.ProspectUpdate = UpdateButton
+CP.OnChange(UpdateButton)
 
 ----------------------------------------------------------------------------------------------
--- Журнал: перед просеиванием запоминаем количество руды, после — какая убыла и что выпало
+-- Log: before prospecting remember ore counts, after — which ore decreased and what dropped
 local before, castAt = nil, 0
 local function OreCounts()
 	local t = {}
@@ -282,7 +400,7 @@ end
 
 local events = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_REGEN_ENABLED", "LEARNED_SPELL_IN_TAB",
-	"UNIT_SPELLCAST_SENT", "UNIT_SPELLCAST_SUCCEEDED", "LOOT_OPENED", "UI_ERROR_MESSAGE" }) do
+	"UNIT_SPELLCAST_SENT", "UNIT_SPELLCAST_SUCCEEDED", "LOOT_OPENED", "UI_ERROR_MESSAGE", "PLAYER_REGEN_DISABLED" }) do
 	events:RegisterEvent(e)
 end
 local prospectName
@@ -293,11 +411,11 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 	elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
 		if arg1 == "player" and arg2 == prospectName then castAt = GetTime() end
 	elseif event == "UI_ERROR_MESSAGE" then
-		-- отказ сразу после щелчка со словом «навык»: руда «навыка мало», пока пропускаем
+		-- refusal containing "навык" right after a click: mark the ore as "skill too low" and skip it for now
 		if GetTime() - clickAt < 2 and clickOre and arg1 and arg1:find("навык") then
 			PDB().fail[clickOre] = JewelRank()
 			Print(CP.ItemName(clickOre) .. ": игра пишет, что навыка мало, — пока пропускаю её.")
-			updateSecure()
+			UpdateButton()
 		end
 	elseif event == "LOOT_OPENED" then
 		if not before or GetTime() - castAt > LOOT_WAIT then return end
@@ -320,24 +438,33 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
 				g.t = g.t + 1
 			end
 		end
+	elseif event == "PLAYER_REGEN_DISABLED" then
+		rowBtn:Hide()
 	elseif event == "PLAYER_REGEN_ENABLED" then
-		if pending then updateSecure() end
+		if pending then UpdateButton() end
 	else
-		updateSecure()
+		UpdateButton()
 	end
 end)
 
 ----------------------------------------------------------------------------------------------
--- Подсказки: к руде — что из неё выпадает; к камню — из какой руды получается
-local function AddTip(tip)
-	local _, link = tip:GetItem()
-	local id = CP.ItemOfLink(link)
-	if not id then return end
-	local owner = tip:GetOwner()
-	if owner == button or (owner and owner.ore) then return end -- у кнопок своя подсказка
+-- Tooltips: for ore — what drops from it; for a gem — which ore it comes from.
+-- The finished lines are kept per item until CP.DropCache (Bagnon re-sets the item every 0.2 s while hovering);
+-- a tooltip gets them once until it is cleared (OnTooltipSetItem may fire again for the same item).
+local tipMemo = {}
+CP.OnDrop(function() tipMemo = {} end)
+local function TipLines(id)
+	local out = {}
 	if IS_ORE[id] then
-		if PDB().ore[id] then OreTooltipLines(tip, id) tip:Show() end
-		return
+		OreTooltipLines(out, id) -- log, or typical drops when there is no log yet
+		return out
+	end
+	-- dropped by veins along with their ore (Data/VeinData.lua): the three likeliest veins
+	local vs = CP.VeinSources and CP.VeinSources(id)
+	if vs and vs[1] then
+		local parts = {}
+		for i = 1, math.min(3, #vs) do parts[#parts + 1] = vs[i].name .. " " .. CP.Pct(vs[i].pct) end
+		Line(out, "С жил: " .. table.concat(parts, ", "), BLUE, true)
 	end
 	local parts = {}
 	for ore, o in pairs(PDB().ore) do
@@ -345,18 +472,35 @@ local function AddTip(tip)
 		if g then parts[#parts + 1] = CP.ItemName(ore) .. " (" .. g.t .. " из " .. o.n .. ")" end
 	end
 	if #parts > 0 then
-		tip:AddLine("Просеиванием (ваш журнал): " .. table.concat(parts, ", "), 0.4, 0.8, 1, true)
-		tip:Show()
-		return
+		Line(out, "Просеиванием (ваш журнал): " .. table.concat(parts, ", "), BLUE, true)
+		return out
 	end
-	for _, ore in ipairs(ORES) do
-		for _, g in ipairs(PROSPECT[ore]) do
-			if g == id then parts[#parts + 1] = CP.ItemName(ore) .. " (навык " .. PROSPECT_REQ[ore] .. ")" break end
-		end
+	Index()
+	for _, b in ipairs(baseTip[id] or {}) do
+		parts[#parts + 1] = CP.ItemName(b.ore) .. " " .. CP.Pct(b.pct) .. " (навык " .. PROSPECT_REQ[b.ore] .. ")"
 	end
-	if #parts > 0 then
-		tip:AddLine("Просеиванием (обычно): " .. table.concat(parts, ", "), 0.4, 0.8, 1, true)
-		tip:Show()
-	end
+	if #parts > 0 then Line(out, "Просеиванием: " .. table.concat(parts, ", "), BLUE, true) end
+	return out
 end
-for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do tip:HookScript("OnTooltipSetItem", AddTip) end
+
+local function AddTip(tip)
+	if tip.cpProspect then return end
+	local _, link = tip:GetItem()
+	local id = CP.ItemOfLink(link)
+	if not id then return end
+	local owner = tip:GetOwner()
+	if owner and owner.ore then return end -- the "Просеять" button shows the row tooltip
+	tip.cpProspect = true
+	local out = tipMemo[id]
+	if not out then out = TipLines(id); tipMemo[id] = out end
+	if not out[1] then return end
+	for _, l in ipairs(out) do
+		if l.right then tip:AddDoubleLine(l.text, l.right, l.c[1], l.c[2], l.c[3], 1, 1, 1)
+		else tip:AddLine(l.text, l.c[1], l.c[2], l.c[3], l.wrap) end
+	end
+	tip:Show()
+end
+for _, tip in ipairs({ GameTooltip, ItemRefTooltip }) do
+	tip:HookScript("OnTooltipSetItem", AddTip)
+	tip:HookScript("OnTooltipCleared", function(self) self.cpProspect = nil end)
+end

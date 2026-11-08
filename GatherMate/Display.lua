@@ -567,7 +567,7 @@ function Display:addMiniPin(pin, refresh)
 		end
 	end
 	-- finally show and SetPoint the pin
-	if dist_2 <= 30*30 then -- patched: ближе 30 ярдов значок прячется, остаётся жёлтая точка «Поиска минералов»
+	if dist_2 <= 30*30 or (GatherMate.IsNodeHidden and GatherMate:IsNodeHidden(pin.nodeType, pin.zone, pin.coords)) then -- patched (+Hide.lua): ближе 30 ярдов значок прячется, остаётся жёлтая точка «Поиска минералов»
 		pin:Hide()
 	elseif db.nodeRange or alpha >= 1 then
 		pin:Show()
@@ -765,9 +765,12 @@ function Display:UpdateMiniMap(force)
 		for i,db_type in pairs(GatherMate.db_types) do
 			if GatherMate.Visible[db_type] then
 				for coord, nodeID in GatherMate:FindNearbyNode(zone, x, y, db_type, mapRadius*nodeRange) do
+					if GatherMate.IsNodeHidden and GatherMate:IsNodeHidden(db_type, zone, coord) then -- patched: Hide.lua
+					else
 					local pin = self:getMiniPin(coord, nodeID, db_type, zone, (i * 1e9) + coord)
 					pin.keep = true
 					self:addMiniPin(pin, force)
+					end
 				end
 			end
 		end
@@ -813,7 +816,9 @@ function Display:UpdateWorldMap(force)
 	for i,db_type in pairs(GatherMate.db_types) do
 		if GatherMate.Visible[db_type] then
 			for coord, nodeID in GatherMate:GetNodesForZone(zname, db_type) do
-				self:addWorldPin(coord, nodeID, db_type, zname, (i * 1e9) + coord).keep = true
+				if not (GatherMate.IsNodeHidden and GatherMate:IsNodeHidden(db_type, zname, coord)) then -- patched: Hide.lua
+					self:addWorldPin(coord, nodeID, db_type, zname, (i * 1e9) + coord).keep = true
+				end
 			end
 		end
 	end

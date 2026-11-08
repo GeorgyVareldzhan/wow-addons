@@ -47,3 +47,5 @@ Display.lua
 Collector.lua
 Constants.lua
 Config.lua
+Respawn.lua
+Hide.lua

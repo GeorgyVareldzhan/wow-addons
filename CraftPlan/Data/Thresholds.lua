@@ -1,7 +1,7 @@
--- Пороги цвета рецептов из файлов клиента Sirus (SkillLineAbility.dbc, названия из Spell.dbc).
--- [номер навыка] = { ["название рецепта"] = { жёлтый с навыка, серый с навыка } }.
--- Оранжевый — ниже жёлтого порога, зелёный — с середины между жёлтым и серым, серый — с серого.
--- Рецепты с одинаковым названием и разными порогами не включены (цвет берётся из окна профессии).
+-- Recipe color thresholds from the Sirus client files (SkillLineAbility.dbc, names from Spell.dbc).
+-- [skill id] = { ["recipe name"] = { yellow from skill, grey from skill } }.
+-- Orange is below the yellow threshold, green from the midpoint between yellow and grey, grey from grey.
+-- Recipes with the same name and different thresholds are left out (the color comes from the profession window).
 CraftPlanThresholds = {
 	[164] = {
 		["Адамантитовая кираса"] = { 350, 370 },

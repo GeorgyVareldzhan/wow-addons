@@ -1,10 +1,14 @@
--- CraftPlan 2.0 — окно «Все рецепты» справа от главного: все рецепты ваших профессий из таблицы аддона
--- (изученные и нет), фильтр «Навык», поиск, «- N +» в стек на правке.
+-- CraftPlan 2.0 — the "Все рецепты" window to the right of the main one: all recipes of your professions from the addon table
+-- (learned or not), the "Навык" filter, search, "- N +" into the stack being edited.
 local CP = CraftPlan
 local W = CP.W
 local DB = CP.DB
 
-local ROW, PW = 62, 440
+local PW = 440
+-- Rows have their own height: name 1-2 lines + reagents 0-2 rows, 12 px padding top/bottom.
+-- STEP is the scroll unit per row for the scrollbar (rows are scrolled one by one).
+local STEP, MINH = 50, 56
+local NAMEW = PW - 16 - 36 - 42 - 74 -- name width: panel - scroll insets - icon column - right buttons
 
 local f = CreateFrame("Frame", "CraftPlanRecipes", CP.win)
 f:SetWidth(PW)
@@ -23,9 +27,22 @@ local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
 close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -6, -6)
 close:SetScript("OnClick", function() CP.ToggleRecipes(false) end)
 
+-- Lower case for search: string.lower leaves Cyrillic UTF-8 alone, so А-Я and Ё (2-byte sequences) are mapped here
+local LOWER = { ["\208\129"] = "\209\145" } -- Ё -> ё
+for b = 0x90, 0x9F do LOWER["\208" .. string.char(b)] = "\208" .. string.char(b + 0x20) end -- А..П -> а..п
+for b = 0xA0, 0xAF do LOWER["\208" .. string.char(b)] = "\209" .. string.char(b - 0x20) end -- Р..Я -> р..я
+local function Lower(s) return (s:gsub("\208[\129\144-\175]", LOWER):lower()) end
+local lowerName = {} -- [recipe name] = lower-case name (static)
+local function LowerName(name)
+	local l = lowerName[name]
+	if not l then l = Lower(name); lowerName[name] = l end
+	return l
+end
+
 local profBtns = {}
 local query = ""
-local box = W.SearchBox(f, "CraftPlanRecipesSearch", 150, function(t) query = t:lower(); if f:IsShown() then CP.RefreshRecipes() end end)
+local ResetScroll -- back to the top of the list (defined with the scroll frame)
+local box = W.SearchBox(f, "CraftPlanRecipesSearch", 150, function(t) query = Lower(t); if f:IsShown() then CP.RefreshRecipes() end end)
 local KINDS = {
 	{ "skill", "Всё, что даёт навык" }, { "orange", "Только оранжевые" }, { "oy", "Оранжевые и жёлтые" },
 	{ "yellow", "Только жёлтые" }, { "green", "Только зелёные" }, { "all", "Все (и серые)" },
@@ -34,20 +51,36 @@ local KSET = { skill = "oyg", orange = "o", oy = "oy", yellow = "y", green = "g"
 local LETTER = { optimal = "o", medium = "y", easy = "g", trivial = "t" }
 local drop = W.Dropdown(f, "CraftPlanRecipesKind", 150, KINDS,
 	function() return DB().apKind or "skill" end,
-	function(k) DB().apKind = k; FauxScrollFrame_SetOffset(CraftPlanRecipesScroll, 0); CraftPlanRecipesScroll:SetVerticalScroll(0); CP.RefreshRecipes() end)
+	function(k) DB().apKind = k; ResetScroll(); CP.RefreshRecipes() end)
+-- "Только у учителя": hide recipes you'd have to buy, loot or get from a quest
+local trainerCheck = W.Check(f, "CraftPlanRecipesTrainer", "Только у учителя",
+	function() return DB().apTrainer end,
+	function(v) DB().apTrainer = v or nil; ResetScroll(); CP.RefreshRecipes() end,
+	"Только изученные и те, что учит учитель профессии. Рецепты с торговцев, добычи и заданий скрыты. Рецепты из стека на правке видны всегда.")
 local skillLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 skillLbl:SetText("Навык")
 
 local sc = CreateFrame("ScrollFrame", "CraftPlanRecipesScroll", f, "FauxScrollFrameTemplate")
 sc:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -36, 16)
-sc:SetScript("OnVerticalScroll", function(self, offset) FauxScrollFrame_OnVerticalScroll(self, offset, ROW, CP.RefreshRecipes) end)
-sc:SetScript("OnSizeChanged", function() if f:IsShown() then CP.RefreshRecipes() end end)
+-- scrolling only refills the rows (FillRows, below); while ResetScroll moves to the top the refill is skipped —
+-- its caller redraws anyway
+local FillRows
+local quiet = false
+local function Noop() end
+local function Fill() if f:IsShown() then FillRows() end end
+sc:SetScript("OnVerticalScroll", function(self, offset) FauxScrollFrame_OnVerticalScroll(self, offset, STEP, quiet and Noop or Fill) end)
+sc:SetScript("OnSizeChanged", function() if f:IsShown() and not CP.sizing then CP.RefreshRecipes() end end) -- the grip redraws on release
+ResetScroll = function()
+	FauxScrollFrame_SetOffset(sc, 0)
+	quiet = true
+	sc:SetVerticalScroll(0)
+	quiet = false
+end
 
 local rows = {}
 local function Row(i)
 	if rows[i] then return rows[i] end
 	local r = CreateFrame("Button", nil, f)
-	r:SetHeight(ROW)
 	r:RegisterForClicks("LeftButtonUp", "RightButtonUp")
 	r:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
 	r.sep = r:CreateTexture(nil, "BACKGROUND")
@@ -59,12 +92,12 @@ local function Row(i)
 	r.icon = r:CreateTexture(nil, "ARTWORK")
 	r.icon:SetWidth(30)
 	r.icon:SetHeight(30)
-	r.icon:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -5)
+	r.icon:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -12)
 	r.icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
 	r.plus = CreateFrame("Button", nil, r)
 	r.plus:SetWidth(16)
 	r.plus:SetHeight(16)
-	r.plus:SetPoint("TOPRIGHT", r, "TOPRIGHT", -18, -5)
+	r.plus:SetPoint("TOPRIGHT", r, "TOPRIGHT", -22, -12)
 	r.plus:SetNormalTexture("Interface\\Buttons\\UI-PlusButton-Up")
 	r.plus:SetPushedTexture("Interface\\Buttons\\UI-PlusButton-Down")
 	r.plus:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
@@ -79,49 +112,54 @@ local function Row(i)
 	r.minus:SetNormalTexture("Interface\\Buttons\\UI-MinusButton-Up")
 	r.minus:SetPushedTexture("Interface\\Buttons\\UI-MinusButton-Down")
 	r.minus:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
-	-- крестик: убрать рецепт из стека на правке целиком
+	-- cross: remove the recipe from the stack being edited entirely
 	r.remove = CreateFrame("Button", nil, r)
 	r.remove:SetWidth(14)
 	r.remove:SetHeight(14)
-	r.remove:SetPoint("TOPRIGHT", r, "TOPRIGHT", 0, -6)
+	r.remove:SetPoint("TOPRIGHT", r, "TOPRIGHT", -4, -13)
 	r.remove:SetNormalTexture(W.TEX.clear)
 	r.remove:SetHighlightTexture(W.TEX.clear, "ADD")
 	r.remove:SetScript("OnEnter", function(self) GameTooltip:SetOwner(self, "ANCHOR_RIGHT"); GameTooltip:AddLine("Убрать из стека"); GameTooltip:Show() end)
 	r.remove:SetScript("OnLeave", function() GameTooltip:Hide() end)
-	-- зелёная галочка в углу значка: рецепт есть в каком-то стеке
+	-- green check in the top-left icon corner: the recipe is in some stack
 	r.inStack = r:CreateTexture(nil, "OVERLAY")
 	r.inStack:SetWidth(16)
 	r.inStack:SetHeight(16)
-	r.inStack:SetPoint("BOTTOMRIGHT", r.icon, "BOTTOMRIGHT", 5, -5)
+	r.inStack:SetPoint("TOPLEFT", r.icon, "TOPLEFT", -4, 4) -- top-left corner of the icon
 	r.inStack:SetTexture(W.TEX.ok)
 	r.name = r:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	r.name:SetPoint("TOPLEFT", r, "TOPLEFT", 36, -5)
-	r.name:SetPoint("RIGHT", r, "RIGHT", -70, 0)
-	r.name:SetHeight(28)
+	r.name:SetPoint("TOPLEFT", r, "TOPLEFT", 42, -12)
+	r.name:SetPoint("RIGHT", r, "RIGHT", -74, 0)
+	-- no fixed height: the string grows with wrapping, reagents hang right under it
 	r.name:SetJustifyH("LEFT")
 	r.name:SetJustifyV("TOP")
-	-- справа внизу: значок состояния, «+N», навык изучения
+	-- bottom right: status icon, "+N", learn skill
 	r.status = r:CreateTexture(nil, "OVERLAY")
 	r.status:SetWidth(14)
 	r.status:SetHeight(14)
-	r.status:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, 6)
+	r.status:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", -4, 12)
 	r.gain2 = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	r.gain2:SetPoint("BOTTOMRIGHT", r.status, "BOTTOMLEFT", -4, 0)
+	r.gain2:SetPoint("RIGHT", r.status, "LEFT", -4, 0) -- centered on the status icon
 	r.gain = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	r.gain:SetPoint("BOTTOMRIGHT", r.gain2, "TOPRIGHT", 0, 1)
+	-- trainer price of a not learned recipe: bottom right, under the status icon
+	r.price = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	r.price:SetPoint("TOPRIGHT", r.status, "BOTTOMRIGHT", 0, -1)
+	r.price:SetTextColor(0.78, 0.72, 0.56)
 	r.req = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	r.req:SetPoint("BOTTOMRIGHT", r.status, "BOTTOMLEFT", -48, 0)
-	-- материалы: 3 в ряд, до 2 рядов
+	r.req:SetPoint("RIGHT", r.status, "LEFT", -48, 0)
+	-- reagents: 3 per row, up to 2 rows
 	r.rg = {}
 	for k = 1, 6 do
 		local t = r:CreateTexture(nil, "ARTWORK")
 		t:SetWidth(14)
 		t:SetHeight(14)
 		t:SetTexCoord(0.08, 0.92, 0.08, 0.92)
-		t:SetPoint("TOPLEFT", r, "TOPLEFT", 36 + ((k - 1) % 3) * 72, -34 - math.floor((k - 1) / 3) * 15)
+		-- right under the name, whatever its height (1 or 2 lines)
+		t:SetPoint("TOPLEFT", r.name, "BOTTOMLEFT", ((k - 1) % 3) * 72, -6 - math.floor((k - 1) / 3) * 20)
 		local fs = r:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 		fs:SetPoint("LEFT", t, "RIGHT", 3, 0)
-		-- наведение на материал — подсказка предмета, как в окне профессии
+		-- hovering a reagent shows the item tooltip, as in the profession window
 		local b = CreateFrame("Button", nil, r)
 		b:SetPoint("TOPLEFT", t, "TOPLEFT", 0, 0)
 		b:SetWidth(68)
@@ -144,7 +182,7 @@ local function Row(i)
 		end)
 		r.rg[k] = { t = t, fs = fs, b = b }
 	end
-	-- число меняется сразу, пересчёт — после паузы в щелчках
+	-- the number changes at once, the recalc runs after a pause in clicks
 	local function bump(d, step)
 		local n = CP.Bump(d.rec.sk, d.rec.name, step)
 		if not n then return end
@@ -169,7 +207,7 @@ local function Row(i)
 		end
 		bump(d, (button == "RightButton") and -W.Step() or W.Step())
 	end)
-	-- подсказка (описание предмета, как выучить, пороги, материалы) — только при наведении на значок
+	-- tooltip (item description, how to learn, thresholds, reagents) — only on icon hover
 	r.iconBtn = CreateFrame("Button", nil, r)
 	r.iconBtn:SetAllPoints(r.icon)
 	r.iconBtn:SetFrameLevel(r:GetFrameLevel() + 2)
@@ -205,7 +243,28 @@ local function Row(i)
 	return r
 end
 
--- «+ожидаемо-максимум» по зоне навыка [a, b) от навыка from
+-- Row height: measured with a hidden string (unwrapped width / name width = lines), cached by name
+local measure = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+measure:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0) -- anchored, single point (no wrapping), invisible
+measure:SetAlpha(0)
+local nameLines, lineH = {}, nil
+local function RowHeight(rec)
+	if not lineH then
+		measure:SetText("Ag")
+		lineH = math.max(12, math.floor((measure:GetStringHeight() or 14) + 0.5))
+	end
+	local n = nameLines[rec.name]
+	if not n then
+		measure:SetText(rec.name)
+		n = math.min(3, math.max(1, math.ceil((measure:GetStringWidth() + 4) / NAMEW)))
+		nameLines[rec.name] = n
+	end
+	local rr = #rec.reag == 0 and 0 or (#rec.reag > 3 and 2 or 1)
+	local rh = rr == 0 and 0 or (6 + 14 + (rr - 1) * 20) -- gap under the name, reagent rows 20 px apart
+	return math.max(MINH, 12 + n * lineH + rh + 12) -- top pad, name, reagents, bottom pad
+end
+
+-- "+expected-max" over the skill range [a, b) starting at skill from
 local function Span(rec, from, a, b)
 	local lo = math.max(from, a)
 	if b <= lo then return nil end
@@ -214,24 +273,50 @@ local function Span(rec, from, a, b)
 	return "+" .. math.max(1, math.floor(e + 0.5)) .. "-" .. (b - lo)
 end
 
+-- Learnable at the trainer: learned already, or in the trainer list (db.learn). Not trainer: a recipe item
+-- exists, or the trainer list for this profession is known and lacks it. No data either way — kept.
+local function AtTrainer(sk, prof, name, known)
+	if known then return true end
+	local learn = DB().learn and DB().learn[sk]
+	if learn and learn[name] then return true end
+	if learn and next(learn) then return false end
+	if CP.RecipeItem and CP.RecipeItem(prof, name) then return false end
+	return true
+end
+
+-- The filtered, sorted list of one profession; cached for one key (profession, skill, filters, search) until
+-- CP.DropCache (learned recipes, the stack being edited, trainer data). Scrolling reuses it.
+local listKey, listMemo
+CP.OnDrop(function() listKey, listMemo = nil, nil end)
 local function List(prof, rank)
+	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query
+	if listMemo and listKey == key then return listMemo end
 	local sk = CP.SKILL_ID[prof]
 	local set = KSET[DB().apKind or "skill"]
+	local trainerOnly = DB().apTrainer
 	local out = {}
 	for _, rec in ipairs(CP.Recipes(sk)) do
 		local kind = CP.KindAt(rec.y, rec.g, rank)
 		local cnt = CP.CountIn(sk, rec.name)
-		if (cnt > 0 or set:find(LETTER[kind], 1, true)) and (query == "" or rec.name:lower():find(query, 1, true)) then
-			out[#out + 1] = { rec = rec, prof = prof, kind = kind, count = cnt, known = CP.KnownRecipe(prof, rec.name) and true, req = CP.LearnReq(sk, rec.name) }
+		if (cnt > 0 or set:find(LETTER[kind], 1, true)) and (query == "" or LowerName(rec.name):find(query, 1, true)) then
+			local known = CP.KnownRecipe(prof, rec.name) and true
+			if cnt > 0 or not trainerOnly or AtTrainer(sk, prof, rec.name, known) then
+				out[#out + 1] = { rec = rec, prof = prof, kind = kind, count = cnt, known = known, req = CP.LearnReq(sk, rec.name) }
+			end
 		end
 	end
 	table.sort(out, function(a, b)
-		local ka, kb = a.req or a.rec.y, b.req or b.rec.y
-		if ka ~= kb then return ka < kb end
+		-- by the skill at which the recipe turns yellow, then by the learn skill (unknown — last)
+		if a.rec.y ~= b.rec.y then return a.rec.y < b.rec.y end
+		local ra, rb = a.req or 9999, b.req or 9999
+		if ra ~= rb then return ra < rb end
 		return a.rec.name < b.rec.name
 	end)
+	listKey, listMemo = key, out
 	return out
 end
+
+local curProf, curRank -- the profession shown and its skill (set by CP.RefreshRecipes, used by FillRows)
 
 function CP.RefreshRecipes()
 	if not f:IsShown() then return end
@@ -246,15 +331,16 @@ function CP.RefreshRecipes()
 	local okCur = false
 	for _, p in ipairs(profs) do if p == cur then okCur = true end end
 	if not okCur then cur = profs[1]; db.apProfName = cur end
-	local editSt, editSi = CP.Editing()
+	local _, editSi = CP.Editing()
 	target:SetText(editSi and ("|cffffd200в Стек " .. CP.StackNum(editSi) .. "|r") or "")
-	-- кнопки профессий
+	-- profession buttons
 	local x, y = 16, -44
 	for i, p in ipairs(profs) do
 		local b = profBtns[i]
 		if not b then
 			b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 			b:SetHeight(20)
+			b:SetScript("OnClick", function(self) DB().apProfName = self.prof; ResetScroll(); CP.RefreshRecipes() end)
 			profBtns[i] = b
 		end
 		b:SetText(p .. " " .. lines[p].rank)
@@ -262,8 +348,7 @@ function CP.RefreshRecipes()
 		if x > 16 and x + b:GetWidth() > PW - 16 then x, y = 16, y - 24 end
 		b:ClearAllPoints()
 		b:SetPoint("TOPLEFT", f, "TOPLEFT", x, y)
-		local pp = p
-		b:SetScript("OnClick", function() db.apProfName = pp; FauxScrollFrame_SetOffset(sc, 0); sc:SetVerticalScroll(0); CP.RefreshRecipes() end)
+		b.prof = p
 		if p == cur then b:LockHighlight(); b:GetFontString():SetTextColor(1, 0.82, 0) else b:UnlockHighlight(); b:GetFontString():SetTextColor(0.6, 0.6, 0.6) end
 		b:Show()
 		x = x + b:GetWidth() + 4
@@ -278,22 +363,50 @@ function CP.RefreshRecipes()
 	drop:SetPoint("LEFT", skillLbl, "RIGHT", -10, -2)
 	drop.Refresh()
 	y = y - 28
+	trainerCheck:ClearAllPoints()
+	trainerCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 20, y + 2)
+	trainerCheck:SetChecked(DB().apTrainer)
+	y = y - 24
 	sc:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
+	curProf, curRank = cur, cur and lines[cur].rank
+	FillRows()
+end
+
+-- the visible rows of the current list from the scroll offset
+FillRows = function()
+	local cur, rank = curProf, curRank
 	if not cur then
 		for _, r in ipairs(rows) do r:Hide() end
 		return
 	end
-	local rank = lines[cur].rank
+	local db = DB()
+	local _, editSi = CP.Editing()
 	local list = List(cur, rank)
-	local shown = math.max(1, math.floor(sc:GetHeight() / ROW))
-	FauxScrollFrame_Update(sc, #list, shown, ROW)
+	-- how many rows fit at the very end of the list: the scroll range stops so that the last screen is full
+	local area = sc:GetHeight()
+	if list.fitArea ~= area then
+		local fitLast, acc = 0, 0
+		for j = #list, 1, -1 do
+			acc = acc + RowHeight(list[j].rec)
+			if acc > area then break end
+			fitLast = fitLast + 1
+		end
+		list.fitArea, list.fitLast = area, fitLast
+	end
+	FauxScrollFrame_Update(sc, #list, math.max(1, list.fitLast), STEP)
 	local offset = FauxScrollFrame_GetOffset(sc)
-	for i = 1, shown do
+	local shown, ry = 0, 0
+	for i = 1, #list - offset do
+		local h = RowHeight(list[offset + i].rec)
+		if ry + h > area and i > 1 then break end
+		shown = i
 		local r = Row(i)
 		local d = list[offset + i]
 		r:ClearAllPoints()
-		r:SetPoint("TOPLEFT", sc, "TOPLEFT", 0, -(i - 1) * ROW)
+		r:SetPoint("TOPLEFT", sc, "TOPLEFT", 0, -ry)
 		r:SetPoint("RIGHT", sc, "RIGHT", 0, 0)
+		r:SetHeight(h)
+		ry = ry + h
 		r.data = d
 		if d then
 			local rec = d.rec
@@ -303,7 +416,9 @@ function CP.RefreshRecipes()
 			r.icon:SetDesaturated(not d.known)
 			r.icon:SetAlpha(d.known and 1 or 0.6)
 			r.name:SetText(hex .. rec.name .. "|r")
-			-- навык изучения (не для серых), прирост
+			local li = not d.known and CP.LearnInfo(rec.sk, d.prof, rec.name)
+			r.price:SetText((li and li.at and li.cost > 0) and CP.Money(li.cost) or "")
+			-- learn skill (not for grey), gain
 			local mid = math.floor((rec.y + rec.g) / 2)
 			local from = math.max(rank, d.req or 0)
 			r.req:SetText((d.req and d.kind ~= "trivial") and ((locked and "|cffff6060" or (d.known and "|cff9a9a9a" or "|cffcccccc")) .. d.req .. "|r") or "")
@@ -323,7 +438,7 @@ function CP.RefreshRecipes()
 					r.gain2:SetText((ys and ("|cffffff00" .. ys .. "|r")) or (gs and ("|cff40c040" .. gs .. "|r")) or "")
 				end
 			end
-			-- значок: изучен / можно выучить / рано / неизвестно
+			-- icon: learned / can learn / too early / unknown
 			local kind
 			if d.known then kind = "ok"
 			elseif locked then kind = "lock"
@@ -332,7 +447,7 @@ function CP.RefreshRecipes()
 			r.status:SetTexture(W.TEX[kind])
 			r.status:SetDesaturated(kind == "lock" or kind == "question")
 			if kind == "book" then r.status:SetTexCoord(0.08, 0.92, 0.08, 0.92) else r.status:SetTexCoord(0, 1, 0, 1) end
-			-- материалы
+			-- reagents
 			for k = 1, 6 do
 				local rg, slot = rec.reag[k], r.rg[k]
 				if rg then
@@ -366,18 +481,30 @@ function CP.RefreshRecipes()
 	for i = shown + 1, #rows do rows[i]:Hide() end
 end
 
-function CP.ToggleRecipes(on)
-	if on == nil then on = not f:IsShown() end
-	DB().apOpen = on or nil
-	if on then
-		if not CP.win:IsShown() then CP.ToggleWindow() end
-		f:Show()
-		CP.RefreshRecipes()
-	else
-		f:Hide()
-	end
+local function Highlight(on)
 	if CP.recipesBtn then
 		if on then CP.recipesBtn:LockHighlight() else CP.recipesBtn:UnlockHighlight() end
 	end
 end
-CP.OnWindowShow = function() if DB().apOpen then CP.ToggleRecipes(true) end end
+function CP.ToggleRecipes(on)
+	if on == nil then on = not f:IsShown() end
+	DB().apOpen = on or nil
+	if on then
+		if not CP.win:IsShown() then
+			CP.ToggleWindow() -- opens this panel too (OnWindowShow) and redraws both
+		else
+			f:Show()
+			CP.RefreshRecipes()
+		end
+	else
+		f:Hide()
+	end
+	Highlight(on)
+end
+-- the window is being opened (CP.ToggleWindow redraws right after): only show the panel
+CP.OnWindowShow = function()
+	if DB().apOpen then
+		f:Show()
+		Highlight(true)
+	end
+end

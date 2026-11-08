@@ -1,10 +1,10 @@
--- CraftPlan 2.0 — ядро: база (CraftPlanDB), профессии, подсчёт «есть», чтение окон игры, события.
--- Стеки и расчёт материалов — Calc.lua, окна — UI/*.lua.
+-- CraftPlan 2.0 — core: database (CraftPlanDB), professions, "have" counts, reading game windows, events.
+-- Stacks and material calculation are in Calc.lua, windows in UI/*.lua.
 
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.0.21"
+CP.VERSION = "2.0.84"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
@@ -22,7 +22,7 @@ end
 local DB = CP.DB
 
 ----------------------------------------------------------------------------------------------
--- Профессии: название <-> номер навыка (для таблиц CraftPlanThresholds / CraftPlanRouteData)
+-- Professions: name <-> skill id (for the CraftPlanRouteData table)
 CP.SKILL_ID = {
 	["Кузнечное дело"] = 164, ["Кожевничество"] = 165, ["Алхимия"] = 171, ["Кулинария"] = 185,
 	["Горное дело"] = 186, ["Портняжное дело"] = 197, ["Инженерное дело"] = 202, ["Наложение чар"] = 333,
@@ -31,7 +31,18 @@ CP.SKILL_ID = {
 CP.SKILL_NAME = {}
 for name, id in pairs(CP.SKILL_ID) do CP.SKILL_NAME[id] = name end
 
--- Значки профессий (текстуры игры)
+-- Profession colors (text): profession name in its color
+CP.PROF_COLOR = {
+	["Кузнечное дело"] = "ff9955", ["Ювелирное дело"] = "66ccff", ["Горное дело"] = "c8a060", ["Инженерное дело"] = "ffd040",
+	["Кулинария"] = "ffb36b", ["Первая помощь"] = "ff5555", ["Алхимия"] = "66ff99", ["Портняжное дело"] = "e080ff",
+	["Кожевничество"] = "b08050", ["Наложение чар"] = "b380ff", ["Начертание"] = "a0e0e0",
+}
+function CP.ProfText(prof)
+	local c = CP.PROF_COLOR[prof]
+	return c and ("|cff" .. c .. prof .. "|r") or prof
+end
+
+-- Profession icons (game textures)
 CP.PROF_ICON = {
 	["Кузнечное дело"] = "Interface\\Icons\\Trade_BlackSmithing", ["Кожевничество"] = "Interface\\Icons\\Trade_LeatherWorking",
 	["Алхимия"] = "Interface\\Icons\\Trade_Alchemy", ["Кулинария"] = "Interface\\Icons\\INV_Misc_Food_15",
@@ -41,40 +52,45 @@ CP.PROF_ICON = {
 	["Первая помощь"] = "Interface\\Icons\\Spell_Holy_SealOfSacrifice",
 }
 
-CP.TOP_SKILL = 450 -- верх навыка в 3.3.5 (полоса навыка рисуется до него)
+CP.TOP_SKILL = 450 -- skill cap in 3.3.5 (the skill bar is drawn up to it)
 
--- Цвета рецептов, как в игре
+-- Recipe colors, as in the game
 CP.KIND_COLOR = {
 	optimal = { 1, 0.5, 0.25 }, medium = { 1, 1, 0 }, easy = { 0.25, 0.75, 0.25 }, trivial = { 0.5, 0.5, 0.5 },
 }
 CP.KIND_HEX = { optimal = "|cffff8040", medium = "|cffffff00", easy = "|cff40c040", trivial = "|cff808080" }
 
--- Пороги цвета рецепта: жёлтый с навыка, серый с навыка (или nil)
-function CP.Thresholds(sk, recName)
-	local t = CraftPlanThresholds and CraftPlanThresholds[sk]
-	local v = t and t[recName]
-	if v then return v[1], v[2] end
+-- Skill-up chance (common 3.3.5 formula), the single place it is computed: 0 at/over the profession max
+-- (max may be nil — no cap), then by the floored skill k: 1 below yellow, 0 at/over grey (or grey <= yellow),
+-- otherwise (grey - k) / (grey - yellow)
+local function ChanceYG(y, g, rank, max)
+	if max and rank >= max then return 0 end
+	local k = math.floor(rank + 1e-9)
+	if k < y then return 1 end
+	if k >= g or g <= y then return 0 end
+	return (g - k) / (g - y)
 end
+function CP.ChanceAt(rec, rank, max) return ChanceYG(rec.y, rec.g, rank, max) end
+-- the same for bare thresholds (no profession max)
+function CP.Chance(y, g, r) return ChanceYG(y, g, r) end
 
--- Цвет рецепта при навыке: оранжевый до жёлтого порога, жёлтый до середины, зелёный до серого
+-- Recipe color at a skill: orange below the yellow threshold, yellow up to the midpoint, green up to grey
 function CP.KindAt(y, g, rank)
+	if ChanceYG(y, g, rank) <= 0 then return "trivial" end
 	if rank < y then return "optimal" end
 	if rank < math.floor((y + g) / 2) then return "medium" end
-	if rank < g then return "easy" end
-	return "trivial"
+	return "easy"
 end
 
--- Шанс роста навыка: оранжевый — всегда, дальше убывает к серому порогу (общая формула 3.3.5)
-function CP.Chance(y, g, r)
-	if r < y then return 1 end
-	if r >= g or g <= y then return 0 end
-	return (g - r) / (g - y)
-end
-
--- Навык и максимум профессии сейчас (из окна навыков, без окна профессии)
--- Навык берём больший из списка навыков и окна профессии: после создания окно профессии обновляется сразу,
--- а список навыков — чуть позже (иначе итог «навык + прирост» на миг или насовсем уменьшался бы)
+-- Current skill and max of a profession (from the skills list, without the profession window)
+-- Take the larger skill of the skills list and the profession window: after a craft the profession window updates at once,
+-- the skills list a bit later (otherwise the "skill + gain" total would shrink for a moment or for good)
+-- The result is cached and SHARED: callers must not change it. Dropped in CP.DropCache and on the skill /
+-- profession window events.
+local skillLines
+function CP.DropSkillLines() skillLines = nil end
 function CP.SkillLines()
+	if skillLines then return skillLines end
 	local t = {}
 	for i = 1, GetNumSkillLines() do
 		local name, isHeader, _, rank, _, _, max = GetSkillLineInfo(i)
@@ -86,11 +102,16 @@ function CP.SkillLines()
 		if l and rank and rank > l.rank then l.rank = rank end
 		if l and max and max > l.max then l.max = max end
 	end
+	skillLines = t
 	return t
 end
 
+-- Ore that can be prospected (in display order) and the stone mined from the same veins
+CP.ORES = { 2770, 2771, 2772, 3858, 10620, 23424, 23425, 36909, 36912, 36910 }
+CP.STONE = { [2770] = 2835, [2771] = 2836, [2772] = 2838, [3858] = 7912, [10620] = 12365 }
+
 ----------------------------------------------------------------------------------------------
--- Предметы: название и значок (кэш игры, иначе база Questie, иначе «предмет N»)
+-- Items: name and icon (game cache, otherwise the Questie database, otherwise "предмет N")
 local function ItemOfLink(link) return link and tonumber(link:match("item:(%d+)")) end
 CP.ItemOfLink = ItemOfLink
 
@@ -111,40 +132,47 @@ function CP.ItemIcon(id)
 end
 
 ----------------------------------------------------------------------------------------------
--- Сколько предмета есть: сумки + хранилище для ингредиентов Sirus (контейнер -4, крафт берёт из него
--- где угодно; содержимое запоминается, если игра его сейчас не отдаёт) + банк (запомненный).
+-- How many of an item we have: bags + the Sirus reagent storage (container -4; crafting takes from it
+-- anywhere; its contents are remembered when the game doesn't return them right now) + bank (remembered).
+-- Add the items of one container to into[id]
+local function CountBag(bag, into)
+	for slot = 1, GetContainerNumSlots(bag) or 0 do
+		local id = ItemOfLink(GetContainerItemLink(bag, slot))
+		if id then
+			local _, count = GetContainerItemInfo(bag, slot)
+			into[id] = (into[id] or 0) + (count or 1)
+		end
+	end
+	return into
+end
+-- Backpack and bags -> { [id] = count }
+local function CountBags()
+	local into = {}
+	for bag = 0, NUM_BAG_SLOTS do CountBag(bag, into) end
+	return into
+end
+
 do
 	local REAGENT_BAG = -4
 	local ids, stamp
 	local function Scan()
-		ids = {}
-		for bag = 0, NUM_BAG_SLOTS do
-			for slot = 1, GetContainerNumSlots(bag) or 0 do
-				local id = ItemOfLink(GetContainerItemLink(bag, slot))
-				if id then
-					local _, count = GetContainerItemInfo(bag, slot)
-					ids[id] = (ids[id] or 0) + (count or 1)
-				end
+		ids = CountBags()
+		local live = CountBag(REAGENT_BAG, {})
+		-- an empty answer away from the bank doesn't wipe what we remembered (storage may not have loaded yet)
+		-- db.reagentBag = { [id] = count } (older versions: a list of { id, name, count })
+		if next(live) or CP.bankIsOpen then DB().reagentBag = live end
+		for k, v in pairs(DB().reagentBag or {}) do
+			if type(v) == "table" then
+				if v[1] then ids[v[1]] = (ids[v[1]] or 0) + (v[3] or 1) end
+			else
+				ids[k] = (ids[k] or 0) + v
 			end
-		end
-		local live = {}
-		for slot = 1, GetContainerNumSlots(REAGENT_BAG) or 0 do
-			local link = GetContainerItemLink(REAGENT_BAG, slot)
-			if link then
-				local _, count = GetContainerItemInfo(REAGENT_BAG, slot)
-				live[#live + 1] = { ItemOfLink(link), link:match("%[(.-)%]"), count or 1 }
-			end
-		end
-		-- пустой ответ вдали от банка не затирает запомненное (хранилище могло ещё не загрузиться)
-		if #live > 0 or CP.bankIsOpen then DB().reagentBag = live end
-		for _, e in ipairs(DB().reagentBag or {}) do
-			if e[1] then ids[e[1]] = (ids[e[1]] or 0) + e[3] end
 		end
 	end
-	-- пересчёт не чаще раза за кадр
-	CreateFrame("Frame"):SetScript("OnUpdate", function() stamp = nil end)
+	-- recount at most once per frame (GetTime() is the same during one frame)
 	function CP.BagCount(id)
-		if not stamp then Scan() stamp = true end
+		local now = GetTime()
+		if stamp ~= now then Scan() stamp = now end
 		return (id and ids[id]) or 0
 	end
 end
@@ -154,74 +182,151 @@ function CP.BankCount(id)
 end
 function CP.Have(id) return CP.BagCount(id) + CP.BankCount(id) end
 
--- Банк: запоминаем содержимое, пока он открыт
+-- Bags: written to SavedVariables on logout/reload (db.bags = { [id] = count }, db.bagsTime) — for planning outside the game
+local function SaveBags()
+	DB().bags = CountBags()
+	DB().bagsTime = time()
+end
+
+-- Bank: remember its contents while it is open
 local function ScanBank()
 	if not CP.bankIsOpen then return end
-	local bank = {}
-	local bags = { BANK_CONTAINER or -1 }
-	for b = NUM_BAG_SLOTS + 1, NUM_BAG_SLOTS + NUM_BANKBAGSLOTS do bags[#bags + 1] = b end
-	for _, bag in ipairs(bags) do
-		for slot = 1, GetContainerNumSlots(bag) or 0 do
-			local id = ItemOfLink(GetContainerItemLink(bag, slot))
-			if id then
-				local _, count = GetContainerItemInfo(bag, slot)
-				bank[id] = (bank[id] or 0) + (count or 1)
-			end
-		end
-	end
+	local bank = CountBag(BANK_CONTAINER or -1, {})
+	for b = NUM_BAG_SLOTS + 1, NUM_BAG_SLOTS + NUM_BANKBAGSLOTS do CountBag(b, bank) end
 	DB().bank = bank
+	DB().bankTime = time()
+end
+-- bag events come in bursts: rescan the open bank at most once per frame
+local bankTimer = CreateFrame("Frame")
+bankTimer:Hide()
+bankTimer:SetScript("OnUpdate", function(self)
+	self:Hide()
+	ScanBank()
+end)
+local function ScanBankSoon()
+	if CP.bankIsOpen then bankTimer:Show() end
 end
 
 ----------------------------------------------------------------------------------------------
--- Окно профессии: изученные рецепты (название, изделие, материалы, перезарядка)
-local scanning = false
-function CP.ScanTradeSkill(expand)
-	if scanning then return end
-	if IsTradeSkillLinked and IsTradeSkillLinked() then return end -- чужая профессия по ссылке
-	local profName, rank, maxRank = GetTradeSkillLine()
-	if not profName or profName == "UNKNOWN" then return end
-	scanning = true
-	-- свёрнутые разделы прячут рецепты — разворачиваем, только при открытии окна
+-- Profession window: learned recipes. db.profs[prof] = { rank, max, scanned, known = { [recipe name] = true } }
+-- (before: recipes = { full recipe snapshots } — converted by MigrateProf)
+local function MigrateProf(p)
+	if p.recipes then
+		local known = p.known or {}
+		for _, rec in ipairs(p.recipes) do if rec.name then known[rec.name] = true end end
+		p.known, p.recipes = known, nil
+	end
+	return p
+end
+
+-- Nothing hides recipes in the window: no search text, no "have materials", no subclass / slot / level filter.
+-- Anything unclear counts as filtered (then the scan only adds names, never drops them).
+local function NoFilters()
+	if TradeSkillFrameAvailableFilterCheckButton and TradeSkillFrameAvailableFilterCheckButton:GetChecked() then return false end
+	if GetTradeSkillSubClassFilter and not GetTradeSkillSubClassFilter(0) then return false end
+	if GetTradeSkillInvSlotFilter and not GetTradeSkillInvSlotFilter(0) then return false end
+	if GetTradeSkillItemLevelFilter then
+		local lo, hi = GetTradeSkillItemLevelFilter()
+		if (lo and lo > 0) or (hi and hi > 0) then return false end
+	end
+	local box = TradeSkillFrameEditBox
+	local text = box and box:GetText()
+	if text and text ~= "" and text ~= SEARCH then return false end
+	return true
+end
+
+-- -> true when rank, max or the set of learned recipes changed
+local function DoScan(profName, rank, maxRank, expand)
+	-- collapsed headers hide recipes — expand them, only when the window opens
 	if expand then
 		for i = GetNumTradeSkills(), 1, -1 do
 			local _, kind, _, expanded = GetTradeSkillInfo(i)
 			if kind == "header" and not expanded then ExpandTradeSkillSubClass(i) end
 		end
 	end
-	local recipes = {}
+	local seen, full = {}, true
 	for i = 1, GetNumTradeSkills() do
-		local name, kind = GetTradeSkillInfo(i)
-		if name and kind ~= "header" then
-			local rec = {
-				name = name, kind = kind, icon = GetTradeSkillIcon(i), link = GetTradeSkillItemLink(i),
-				tools = GetTradeSkillTools and GetTradeSkillTools(i) or nil,
-				made = GetTradeSkillNumMade and GetTradeSkillNumMade(i) or 1, reagents = {},
-			}
-			for j = 1, GetTradeSkillNumReagents(i) do
-				local rName, rIcon, rCount = GetTradeSkillReagentInfo(i, j)
-				local rID = ItemOfLink(GetTradeSkillReagentItemLink(i, j))
-				if rName or rID then rec.reagents[#rec.reagents + 1] = { id = rID, name = rName, icon = rIcon, count = rCount or 1 } end
-			end
-			local cd = GetTradeSkillCooldown and GetTradeSkillCooldown(i)
-			if cd and cd > 0 then rec.cdEnd = time() + cd end
-			recipes[#recipes + 1] = rec
+		local name, kind, _, expanded = GetTradeSkillInfo(i)
+		if kind == "header" then
+			if not expanded then full = false end
+		elseif name then
+			seen[name] = true
 		end
 	end
-	DB().profs[profName] = { rank = rank, max = maxRank, recipes = recipes, scanned = time() }
-	scanning = false
-	CP.Changed()
+	if not next(seen) then full = false end -- an empty list is the window not filled yet, not "nothing learned"
+	if full then
+		local ok, res = pcall(NoFilters)
+		full = ok and res
+	end
+	local profs = DB().profs
+	local old = profs[profName] and MigrateProf(profs[profName])
+	local oldKnown = old and old.known or {}
+	-- a partial view (collapsed headers, filters) only adds names: what is hidden now stays known
+	local known = seen
+	if not full then
+		for name in pairs(oldKnown) do known[name] = true end
+	end
+	local changed = not old or old.rank ~= rank or old.max ~= maxRank
+	if not changed then
+		for name in pairs(known) do if not oldKnown[name] then changed = true break end end
+	end
+	if not changed then
+		for name in pairs(oldKnown) do if not known[name] then changed = true break end end
+	end
+	profs[profName] = { rank = rank, max = maxRank, scanned = time(), known = known }
+	return changed
 end
 
--- Изучен ли рецепт (по последнему открытию окна профессии)
+local scanning = false
+function CP.ScanTradeSkill(expand)
+	if scanning then return end
+	if IsTradeSkillLinked and IsTradeSkillLinked() then return end -- someone else's profession via a link
+	local profName, rank, maxRank = GetTradeSkillLine()
+	if not profName or profName == "UNKNOWN" then return end
+	scanning = true
+	local ok, res = pcall(DoScan, profName, rank, maxRank, expand)
+	scanning = false
+	if not ok then
+		CP.Print("|cffff4040ошибка:|r " .. tostring(res))
+	elseif res then
+		CP.Changed()
+	end
+end
+
+-- The profession window sends updates often: rescan at most once every 2 seconds
+-- (the last update isn't lost — we rescan once the 2 seconds have passed)
+local SCAN_GAP = 2
+local lastScan, scanDue = 0, nil
+local scanTimer = CreateFrame("Frame")
+scanTimer:Hide()
+scanTimer:SetScript("OnUpdate", function(self)
+	if GetTime() < scanDue then return end
+	self:Hide()
+	lastScan = GetTime()
+	if TradeSkillFrame and TradeSkillFrame:IsShown() then CP.ScanTradeSkill(false) end
+end)
+function CP.NoteScan() lastScan = GetTime() end
+function CP.ScanTradeSkillSoon()
+	local now = GetTime()
+	if now - lastScan >= SCAN_GAP and not scanTimer:IsShown() then
+		lastScan = now
+		CP.ScanTradeSkill(false)
+	elseif not scanTimer:IsShown() then
+		scanDue = lastScan + SCAN_GAP
+		scanTimer:Show()
+	end
+end
+
+-- Is the recipe learned (as of the last opening of the profession window): true or nil
 function CP.KnownRecipe(prof, name)
 	local p = DB().profs[prof]
-	for _, rec in ipairs(p and p.recipes or {}) do
-		if rec.name == name then return rec end
-	end
+	if not p then return nil end
+	if p.recipes then MigrateProf(p) end
+	return p.known and p.known[name] or nil
 end
 
 ----------------------------------------------------------------------------------------------
--- Учитель: с какого навыка учится рецепт и сколько стоит. learn[навык][название] = { req, cost }
+-- Trainer: which skill a recipe is learned at and its cost. learn[skill][name] = { req, cost }
 local function ScanTrainer()
 	if not (IsTradeskillTrainer and IsTradeskillTrainer()) then return end
 	local db = DB()
@@ -237,23 +342,33 @@ local function ScanTrainer()
 			db.learn[sk] = t
 			local cost = GetTrainerServiceCost(i) or 0
 			local old = t[name]
-			if not (old and old.req == (req or 0) and old.cost == cost) then changed = true end
-			t[name] = { req = req or 0, cost = cost }
+			local used = kind == "used" or nil -- already learned (the reminder drops it before the profession window is opened)
+			if not (old and old.req == (req or 0) and old.cost == cost and old.used == used) then changed = true end
+			t[name] = { req = req or 0, cost = cost, used = used }
 		end
 	end
 	if changed then CP.Changed() end
 end
 
--- С какого навыка учится рецепт: учитель, иначе «Требуется: … (N)» в подсказке рецепта-предмета
--- (db.bookReq[предмет]); нет данных — nil
-local reqTip, reqMiss = nil, {}
+-- Skill a recipe is learned at: the trainer, otherwise "Требуется: … (N)" in the recipe item's tooltip
+-- (db.bookReq[item]); no data — nil
+local reqTip, reqMiss, reqPrimed = nil, {}, {}
 function CP.BookReq(item, prof)
 	local db = DB()
 	db.bookReq = db.bookReq or {}
 	if db.bookReq[item] or reqMiss[item] then return db.bookReq[item] end
-	if not GetItemInfo(item) then return nil end -- нет в кэше игры — спросим, когда придёт
-	reqMiss[item] = true -- строки «Требуется» нет — больше не читаем подсказку в эту сессию
 	reqTip = reqTip or CreateFrame("GameTooltip", "CraftPlanReqTip", UIParent, "GameTooltipTemplate")
+	if not GetItemInfo(item) then
+		-- not in the game cache yet: ask the server once (a hidden tooltip does it), resolve on a later call
+		if not reqPrimed[item] then
+			reqPrimed[item] = true
+			reqTip:SetOwner(UIParent, "ANCHOR_NONE")
+			reqTip:SetHyperlink("item:" .. item)
+			reqTip:Hide()
+		end
+		return nil
+	end
+	reqMiss[item] = true -- no "Требуется" line — don't read the tooltip again this session
 	reqTip:SetOwner(UIParent, "ANCHOR_NONE")
 	reqTip:SetHyperlink("item:" .. item)
 	for i = 2, reqTip:NumLines() do
@@ -267,7 +382,17 @@ function CP.BookReq(item, prof)
 end
 
 ----------------------------------------------------------------------------------------------
--- Перерисовка после изменений: не чаще раза в 0.3 с (BAG_UPDATE идёт пачками)
+-- Caches: every cache clear registers here (CP.OnDrop) and runs synchronously in CP.DropCache —
+-- CP.Changed / CP.ChangedSettle call it at once, and the redraw tick calls it again before the listeners,
+-- so a listener never sees a stale cache. Listeners (CP.OnChange) only redraw.
+local droppers = {}
+function CP.OnDrop(fn) droppers[#droppers + 1] = fn end
+function CP.DropCache()
+	for i = 1, #droppers do droppers[i]() end
+end
+CP.OnDrop(CP.DropSkillLines)
+
+-- Redraw after changes: at most once per 0.3 s (BAG_UPDATE comes in bursts)
 local listeners = {}
 function CP.OnChange(fn) listeners[#listeners + 1] = fn end
 local due
@@ -281,24 +406,25 @@ ticker:SetScript("OnUpdate", function(self)
 		self:Show()
 		return
 	end
+	CP.DropCache()
 	for _, fn in ipairs(listeners) do
 		local ok, err = pcall(fn)
 		if not ok then CP.Print("|cffff4040ошибка:|r " .. tostring(err)) end
 	end
 end)
 function CP.Changed(delay)
-	if CP.DropCache then CP.DropCache() end
+	CP.DropCache()
 	local t = GetTime() + (delay or 0.3)
 	if not ticker:IsShown() or t < due then due = t end
 	ticker:Show()
 end
--- пересчёт через sec после ПОСЛЕДНЕГО вызова (щелчки «+»/«-» подряд — один пересчёт)
+-- recalc sec after the LAST call (rapid "+"/"-" clicks — a single recalc)
 function CP.ChangedSettle(sec)
-	if CP.DropCache then CP.DropCache() end
+	CP.DropCache()
 	due = GetTime() + (sec or 0.5)
 	ticker:Show()
 end
--- ещё один пересчёт позже (после создания: игра обновляет навык с задержкой)
+-- one more recalc later (after a craft the game updates the skill with a delay)
 local later = CreateFrame("Frame")
 later:Hide()
 later:SetScript("OnUpdate", function(self)
@@ -313,29 +439,43 @@ end
 
 local events = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "BAG_UPDATE", "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE", "SKILL_LINES_CHANGED",
-	"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "TRAINER_SHOW", "TRAINER_UPDATE", "PLAYER_REGEN_ENABLED" }) do
+	"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "TRAINER_SHOW", "TRAINER_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT" }) do
 	events:RegisterEvent(e)
 end
 events:SetScript("OnEvent", function(_, event)
 	if event == "PLAYER_LOGIN" then
 		local db = DB()
-		-- настройки, убранные в 2.0
+		-- settings removed in 2.0
 		db.allowChance, db.hideUseless, db.oreOff, db.nodeApplied, db.noBank = nil, nil, nil, nil, nil
+		-- data of 0.x windows and features that no longer exist
+		for _, k in ipairs({ "vendorStock", "trainers", "vendor", "probe", "map", "mapTab", "mapSize", "mapPos",
+			"routeFold", "learnFull", "needShown", "apProf" }) do
+			db[k] = nil
+		end
+		-- the fishing log moved to FishPlan: drop it once FishPlan has taken it over
+		if FishPlanDB and FishPlanDB.migrated then db.fish = nil end
+		-- learned recipes: full snapshots -> name sets
+		for _, p in pairs(db.profs) do if type(p) == "table" then MigrateProf(p) end end
 		if CP.OnLogin then CP.OnLogin() end
 		CP.Changed()
+	elseif event == "PLAYER_LOGOUT" then
+		SaveBags()
 	elseif event == "BANKFRAME_OPENED" then
 		CP.bankIsOpen = true
 		ScanBank()
 		CP.Changed()
 	elseif event == "BANKFRAME_CLOSED" then
-		CP.bankIsOpen = false -- не читаем: банк уже недоступен и записался бы пустым
+		CP.bankIsOpen = false -- don't read: the bank is no longer available and would be saved as empty
 	elseif event == "PLAYERBANKSLOTS_CHANGED" or event == "BAG_UPDATE" then
-		ScanBank()
+		ScanBankSoon()
 		CP.Changed()
 	elseif event == "TRADE_SKILL_SHOW" then
+		CP.DropSkillLines()
 		CP.ScanTradeSkill(true)
+		CP.NoteScan() -- expanding headers sends updates — don't rescan for them right away
 	elseif event == "TRADE_SKILL_UPDATE" then
-		CP.ScanTradeSkill(false)
+		CP.DropSkillLines()
+		CP.ScanTradeSkillSoon()
 	elseif event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
 		pcall(ScanTrainer)
 	else
@@ -343,7 +483,7 @@ events:SetScript("OnEvent", function(_, event)
 	end
 end)
 
--- Выбрать рецепт в открытом окне профессии и подставить количество
+-- Select a recipe in the open profession window and fill in the count
 function CP.SelectRecipe(prof, recipeName, count)
 	if not (TradeSkillFrame and TradeSkillFrame:IsShown()) or GetTradeSkillLine() ~= prof then
 		CP.Print("откройте окно профессии «" .. prof .. "» и щёлкните ещё раз.")

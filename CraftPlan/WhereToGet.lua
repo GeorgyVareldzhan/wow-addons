@@ -1,15 +1,14 @@
--- CraftPlan 2.0: «где взять» предмет (Questie) — перенесено из 0.12 без изменений
-local function Print(msg) DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffCraftPlan:|r " .. msg) end
+-- CraftPlan 2.0: "where to get" (Questie) — item sources on the map, and NPCs such as profession trainers
 ----------------------------------------------------------------------------------------------
--- Где добыть (бывший аддон WhereToGet): источники предмета на карте через Questie, кнопка у миникарты.
--- Отдельная функция — свои локальные переменные, не мешают остальному коду.
-;(function()
--- Предмет, перетащенный на кнопку у миникарты (или щелчок по реагенту в плане), отмечается на карте
--- через Questie: где выпадает (мобы), добывается (объекты) или продаётся (торговцы).
--- Повторный вызов для того же предмета убирает отметки.
+-- Where to get (formerly the WhereToGet addon): item sources on the map via Questie, a minimap button.
+-- A separate function — its own locals, not interfering with the rest of the code.
+(function()
+-- An item dropped onto the minimap button (or a click on a reagent in the plan) gets marked on the map
+-- via Questie: where it drops (mobs), is gathered (objects) or is sold (vendors).
+-- Calling again for the same item removes the marks.
 
--- Рыба старого мира: поправки Questie стирают у неё косяки (objectDrops = {}), хотя сами косяки
--- с координатами в базе есть. Списки — из базы Questie (wotlkItemDB) до поправок
+-- Old-world fish: Questie corrections wipe its pools (objectDrops = {}), although the pools themselves
+-- with coordinates are in the database. The lists come from the Questie database (wotlkItemDB) before corrections
 local POOL_OBJECTS = {
 	[6358] = { 180248, 180582, 180664, 180682, 180750, 180900 }, -- Oily Blackmouth
 	[6359] = { 180248, 180657, 180661, 180683, 180752, 180902 }, -- Firefin Snapper
@@ -19,13 +18,13 @@ local POOL_OBJECTS = {
 	[21153] = { 180684, 184956 },                                -- Raw Greater Sagefish
 }
 
--- Косяки на карте: значок рыбы такого размера; по этим словам в названии объекта Questie узнаём косяк
+-- Pools on the map: a fish icon of this size; these words in a Questie object name identify a pool
 local POOL_SCALE = 1.3
 local POOL_WORDS = { "School", "Pool", "Swarm", "Shoal", "Wreckage", "Debris", "Floating", "Oil Spill" }
 
-local MAX_SOURCES = 40 -- больше не рисуем, чтобы не завалить карту (например, ткань падает почти со всех)
+local MAX_SOURCES = 40 -- don't draw more than this, so the map isn't flooded (e.g. cloth drops from almost everything)
 
--- Ореол: под каждой меткой крупное мягкое свечение, рядом стоящие сливаются в пятно-область
+-- Halo: a large soft glow under each mark; nearby ones merge into an area blob
 local HALO_TEXTURE = "Interface\\AddOns\\CraftPlan\\halo"
 local HALO_SCALE = 3
 local HALO_TYP_NPC = "wtg_halo_npc"
@@ -39,14 +38,14 @@ local function Print(msg)
 	DEFAULT_CHAT_FRAME:AddMessage("|cff33ff99Где добыть:|r " .. msg)
 end
 
--- itemID -> список { id, typ } для QuestieMap:UnloadManualFrames
--- (обычные метки: typ = nil, NPC id > 0, объекты id < 0; ореолы: свой typ, id > 0)
+-- itemID -> list of { id, typ } for QuestieMap:UnloadManualFrames
+-- (regular marks: typ = nil, NPC id > 0, objects id < 0; halos: their own typ, id > 0)
 local shownByItem = {}
--- itemID -> { name = "[Название]", area = areaId зоны, где меток больше всего } — для кнопки у миникарты
+-- itemID -> { name = "[Name]", area = areaId of the zone with the most marks } — for the minimap button
 local shownInfo = {}
-local lastItemID -- последний отмеченный предмет
+local lastItemID -- last marked item
 
--- Открыть карту мира на зоне (areaId) через Questie
+-- Open the world map on a zone (areaId) via Questie
 local function OpenMapAt(areaId)
 	local ZoneDB = QuestieLoader and QuestieLoader:ImportModule("ZoneDB")
 	local wmf = QuestieCompat and QuestieCompat.WorldMapFrame
@@ -68,9 +67,10 @@ local function UnloadEntries(QuestieMap, entries)
 	end
 end
 
--- Показать на карте источники предмета по номеру (вызывается и из других аддонов, например CraftPlan).
--- Повторный вызов для того же предмета убирает отметки.
-function WhereToGet_ShowItem(itemID, link)
+-- Show an item's sources on the map by id (also called from other addons, e.g. CraftPlan).
+-- Calling again for the same item removes the marks.
+function WhereToGet_ShowItem(itemID, link, quiet)
+	local Print = quiet and function() end or Print -- quiet: no chat, no map (map marks from CraftPlan "Где фармить")
 	local itemName = GetItemInfo(itemID)
 	local name = (link and link:match("|h(%[.-%])|h")) or (itemName and ("[" .. itemName .. "]")) or ("предмет " .. itemID)
 
@@ -84,8 +84,13 @@ function WhereToGet_ShowItem(itemID, link)
 		Print("не удалось подключиться к Questie.")
 		return
 	end
+	if type(QuestieDB.QueryNPCSingle) ~= "function" or type(QuestieDB.QueryItem) ~= "function" then
+		Print("Questie ещё загружается — попробуйте через минуту.")
+		return
+	end
 
-	-- Повторное нажатие на тот же предмет — убрать отметки
+	-- Pressing again on the same item — remove the marks (quiet calls never remove)
+	if shownByItem[itemID] and quiet then return end
 	if shownByItem[itemID] then
 		UnloadEntries(QuestieMap, shownByItem[itemID])
 		shownByItem[itemID] = nil
@@ -109,7 +114,7 @@ function WhereToGet_ShowItem(itemID, link)
 
 	local entries, total, counts, skipped = {}, 0, { npc = 0, object = 0, vendor = 0 }, 0
 	local halo = HaloEnabled()
-	local zoneCounts = {} -- areaId -> число источников с местами появления в этой зоне
+	local zoneCounts = {} -- areaId -> number of sources with spawn points in this zone
 	local function countZones(spawns)
 		for areaId in pairs(spawns) do
 			zoneCounts[areaId] = (zoneCounts[areaId] or 0) + 1
@@ -120,7 +125,7 @@ function WhereToGet_ShowItem(itemID, link)
 		if spawns then
 			if total >= MAX_SOURCES then skipped = skipped + 1 return end
 			countZones(spawns)
-			if halo then -- ореол рисуем первым, чтобы он был под меткой
+			if halo then -- draw the halo first so it sits under the mark
 				QuestieMap:ShowNPC(npcID, HALO_TEXTURE, HALO_SCALE, nil, nil, true, HALO_TYP_NPC)
 				entries[#entries + 1] = { npcID, HALO_TYP_NPC }
 			end
@@ -131,7 +136,7 @@ function WhereToGet_ShowItem(itemID, link)
 		end
 	end
 	for _, npcID in pairs(sources[1] or {}) do addNPC(npcID, "npc") end
-	-- косяк рыбы — крупная метка со значком самой рыбы, иначе стандартная точка Questie плохо видна
+	-- a fish pool gets a large mark with the fish icon, otherwise the standard Questie dot is hard to see
 	local itemIcon = select(10, GetItemInfo(itemID))
 	local function PoolIcon(objectID)
 		if not itemIcon then return nil end
@@ -177,7 +182,7 @@ function WhereToGet_ShowItem(itemID, link)
 	end
 	Print(msg)
 
-	-- В каких зонах искать: текущая зона подсвечивается, остальные — по числу источников
+	-- Which zones to search: the current zone is highlighted, the rest by number of sources
 	local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
 	if TrackerUtils and TrackerUtils.GetZoneNameByID then
 		local here = GetRealZoneText()
@@ -203,15 +208,63 @@ function WhereToGet_ShowItem(itemID, link)
 			Print("|cffff8800В этой зоне нет.|r Зоны: " .. table.concat(parts, ", "))
 		end
 
-		-- открыть карту мира на зоне с метками: текущей, если источники есть здесь, иначе на той,
-		-- где их больше всего (иначе карта откроется на текущей зоне, и меток не будет видно)
+		-- open the world map on the zone with marks: the current one if there are sources here, otherwise the one
+		-- with the most (otherwise the map opens on the current zone and the marks aren't visible)
 		local targetArea = hereArea or (list[1] and list[1][3])
 		shownInfo[itemID].area = targetArea
-		OpenMapAt(targetArea)
+		if not quiet then OpenMapAt(targetArea) end
 	end
 end
 
--- Убрать отметки всех предметов сразу, без наведения на предмет
+-- NPCs on the map by id (CraftPlan: trainers of a profession). key — what to remember the marks by;
+-- calling again with the same key removes them
+function WhereToGet_ShowNPCs(key, npcs, title)
+	local QuestieDB = QuestieLoader and QuestieLoader:ImportModule("QuestieDB")
+	local QuestieMap = QuestieLoader and QuestieLoader:ImportModule("QuestieMap")
+	if not (QuestieDB and QuestieMap and QuestieMap.ShowNPC) then Print("Questie не загружен.") return end
+	-- before Questie finishes its start-up (it may rebuild its database after a client restart) the queries are not set up
+	if type(QuestieDB.QueryNPCSingle) ~= "function" then Print("Questie ещё загружается — попробуйте через минуту.") return end
+	if shownByItem[key] then
+		UnloadEntries(QuestieMap, shownByItem[key])
+		shownByItem[key], shownInfo[key] = nil, nil
+		if lastItemID == key then lastItemID = next(shownInfo) end
+		Print(title .. ": отметки убраны с карты.")
+		return
+	end
+	local entries, zoneCounts, total = {}, {}, 0
+	for _, npcID in ipairs(npcs) do
+		local spawns = QuestieDB.QueryNPCSingle(npcID, "spawns")
+		if spawns and next(spawns) then
+			for areaId in pairs(spawns) do zoneCounts[areaId] = (zoneCounts[areaId] or 0) + 1 end
+			QuestieMap:ShowNPC(npcID)
+			entries[#entries + 1] = { npcID }
+			total = total + 1
+		end
+	end
+	if total == 0 then Print(title .. ": в базе Questie нет координат.") return end
+	shownByItem[key], shownInfo[key], lastItemID = entries, { name = title }, key
+	local TrackerUtils = QuestieLoader:ImportModule("TrackerUtils")
+	local here, hereArea, list = GetRealZoneText(), nil, {}
+	for areaId, n in pairs(zoneCounts) do
+		local zn = TrackerUtils and TrackerUtils.GetZoneNameByID and TrackerUtils:GetZoneNameByID(areaId) or tostring(areaId)
+		if zn == here then hereArea = areaId else list[#list + 1] = { zn, n, areaId } end
+	end
+	table.sort(list, function(a, b) return a[2] > b[2] or (a[2] == b[2] and a[1] < b[1]) end)
+	local parts = {}
+	for i = 1, math.min(#list, 8) do parts[#parts + 1] = list[i][1] end
+	if #list > 8 then parts[#parts + 1] = "и ещё " .. (#list - 8) end
+	Print(title .. ": " .. total .. " на карте. " .. (hereArea and "|cff00ff00Есть в этой зоне.|r " or "") ..
+		(parts[1] and ("Зоны: " .. table.concat(parts, ", ") .. ".") or "") .. " Повторный щелчок — убрать.")
+	local target = hereArea or (list[1] and list[1][3])
+	shownInfo[key].area = target
+	OpenMapAt(target)
+end
+
+-- For CraftPlan: is the item marked; open the world map on a Questie area
+function WhereToGet_IsShown(itemID) return shownByItem[itemID] ~= nil end
+WhereToGet_OpenMapAt = OpenMapAt
+
+-- Remove the marks of all items at once, without hovering an item
 function WhereToGet_ClearAll()
 	local QuestieMap = QuestieLoader and QuestieLoader:ImportModule("QuestieMap")
 	local count = 0
@@ -230,7 +283,7 @@ function WhereToGet_ClearAll()
 	end
 end
 
--- /wtg clear — убрать все метки; /wtg — справка
+-- /wtg clear — remove all marks; /wtg — help
 SLASH_WHERETOGET1 = "/wtg"
 SlashCmdList["WHERETOGET"] = function(msg)
 	msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -251,7 +304,7 @@ SlashCmdList["WHERETOGET"] = function(msg)
 	end
 end
 
--- Shift+щелчок по метке Questie убирает метку — убираем вместе с ней и её ореол
+-- Shift+click on a Questie mark removes the mark — remove its halo along with it
 local haloHook = CreateFrame("Frame")
 haloHook:RegisterEvent("PLAYER_LOGIN")
 haloHook:SetScript("OnEvent", function()
@@ -267,8 +320,8 @@ haloHook:SetScript("OnEvent", function()
 	end)
 end)
 
--- Кнопка у миникарты: перетащить предмет на кнопку — показать источники; щелчок — открыть карту
--- на зоне меток; правый щелчок — убрать все метки; перетаскивание кнопки — сдвинуть по кругу.
+-- Minimap button: drop an item onto it to show sources; click to open the map
+-- on the marks' zone; right click removes all marks; drag the button to move it around the ring.
 local mmButton
 
 local function ButtonPosition()
@@ -285,7 +338,7 @@ local function ButtonPosition()
 	mmButton:SetPoint("CENTER", Minimap, "CENTER", x, y)
 end
 
--- Предмет, который держат на курсоре (взяли из сумки): показать его источники
+-- An item held on the cursor (taken from a bag): show its sources
 local function TakeCursorItem()
 	local kind, itemID, link = GetCursorInfo()
 	if kind ~= "item" or not itemID then return false end

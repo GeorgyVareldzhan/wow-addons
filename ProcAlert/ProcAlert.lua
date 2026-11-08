@@ -101,7 +101,6 @@ local REND_REFRESH = 3   -- за сколько секунд до конца К�
 local REND_RESERVE = 3   -- за сколько секунд до конца Кровопускания держать на него ярость (запас Удара героя)
 local LOW_LEVEL_DIFF = 5  -- цель ниже вас на столько уровней (обычная) — бой короткий: без Кровопускания,
                           -- Раскола брони и без копления на Казнь
-local KILL_MARGIN = 0.9   -- оценку «Казнь добьёт» берём с запасом (урон x 0.9)
 local SHIELD_TEX = "Interface\\Icons\\INV_Shield_06" -- значок в углу: нужен щит
 local OVERFLOW_RAGE = 90  -- от стольких ярости Удар героя / Рассекающий пульсируют: ярость скоро пропадёт
 local CLEAVE_ENEMIES = 2  -- от стольких врагов в ближнем бою — Рассекающий вместо Удара героя
@@ -206,8 +205,9 @@ end
 local function SlotHasSpell(slot, spellName)
 	local actionType, id, subType, globalID = GetActionInfo(slot)
 	if actionType == "spell" then
-		return (globalID and GetSpellInfo(globalID) == spellName)
-			or (id and GetSpellInfo(id) == spellName)
+		-- id — номер в книге заклинаний, а не номер заклинания: по нему GetSpellInfo дал бы чужое заклинание
+		if globalID then return GetSpellInfo(globalID) == spellName end
+		return (id and GetSpellInfo(id) == spellName)
 			or (id and GetSpellName(id, subType or BOOKTYPE_SPELL) == spellName)
 	elseif actionType == "macro" then
 		return GetMacroSpell(id) == spellName
@@ -334,10 +334,14 @@ local function AddItem(row, spellID, name, texture, pop)
 	f.noMana = false
 	f.blocked = false
 	f.cdStart = nil
-	f.cdKey = nil
+	f.cdS, f.cdD = nil, nil
 	f.cd:Hide()
 	f.buffExpires = nil
 	f.timer:SetText("")
+	f.timerShown = nil
+	f.overflow = nil
+	f.rendAt, f.rendOn = nil, nil
+	f.placedX, f.placedY, f.drawnBase, f.drawnSize = nil, nil, nil, nil
 	f.rage:SetText("")
 	f.badge:Hide()
 	f.imba = nil
@@ -384,13 +388,18 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 
 	for _, row in ipairs(rows) do
 		row.y = row.y + (row.targetY - row.y) * k
+		if math.abs(row.targetY - row.y) < 0.05 then row.y = row.targetY end -- доехал — дальше не двигаем
 		for i = #row.items, 1, -1 do
 			local f = row.items[i]
 			if f.expiresAt and now >= f.expiresAt then f.removing = true end
 
 			f.x = f.x + (f.targetX - f.x) * k
-			f:ClearAllPoints()
-			f:SetPoint("CENTER", anchor, "CENTER", f.x, row.y)
+			if math.abs(f.targetX - f.x) < 0.05 then f.x = f.targetX end
+			if f.placedX ~= f.x or f.placedY ~= row.y then -- место не изменилось — точку не переставляем
+				f.placedX, f.placedY = f.x, row.y
+				f:ClearAllPoints()
+				f:SetPoint("CENTER", anchor, "CENTER", f.x, row.y)
+			end
 
 			local base = ItemSize(row, f)
 			local size = base
@@ -398,13 +407,19 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 			if f.pop and age < POP_TIME then
 				size = base * (POP_SCALE - (POP_SCALE - 1) * (age / POP_TIME))
 			end
-			f:SetWidth(base)
-			f:SetHeight(base)
-			f.icon:SetWidth(size)
-			f.icon:SetHeight(size)
-			if f.imba then
+			if f.drawnBase ~= base then
+				f.drawnBase = base
+				f:SetWidth(base)
+				f:SetHeight(base)
 				f.glow:SetWidth(base * 1.9)
 				f.glow:SetHeight(base * 1.9)
+			end
+			if f.drawnSize ~= size then
+				f.drawnSize = size
+				f.icon:SetWidth(size)
+				f.icon:SetHeight(size)
+			end
+			if f.imba then
 				f.glow:SetAlpha(0.5 + 0.5 * math.abs(math.sin(now * 4)))
 				f.glow:Show()
 			else
@@ -426,8 +441,10 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 			end
 			f:SetAlpha(f.alpha)
 			-- Кровопускание забыли или оно не попало (уклонение, парирование, промах) — мигает
-			if f.spellID == 772 and not f.removing and RendAlert and RendAlert() then
-				f:SetAlpha(f.alpha * (0.35 + 0.65 * math.abs(math.sin(now * 6))))
+			-- (условие проверяем раз в CHECK_INTERVAL: в нём перебор ослаблений цели)
+			if f.spellID == 772 and not f.removing and RendAlert then
+				if not f.rendAt or now - f.rendAt >= CHECK_INTERVAL then f.rendAt, f.rendOn = now, RendAlert() end
+				if f.rendOn then f:SetAlpha(f.alpha * (0.35 + 0.65 * math.abs(math.sin(now * 6)))) end
 			end
 
 			if f.cdStart or f.blocked then
@@ -441,10 +458,15 @@ anchor:SetScript("OnUpdate", function(_, elapsed)
 			-- отсчёт эффекта таланта и мигание в конце
 			local left = f.buffExpires and f.buffExpires > 0 and (f.buffExpires - now)
 			if left and left > 0 then
-				f.timer:SetText(left >= 3 and tostring(math.floor(left + 0.5)) or string.format("%.1f", left))
+				-- текст меняем, только когда меняется число: от 3 с — целые секунды, меньше — десятые (со сдвигом в минус)
+				local shown = left >= 3 and math.floor(left + 0.5) or (-1 - math.floor(left * 10 + 0.5))
+				if f.timerShown ~= shown then
+					f.timerShown = shown
+					f.timer:SetText(shown > 0 and tostring(shown) or string.format("%.1f", (-1 - shown) / 10))
+				end
 				f.icon:SetAlpha(left < BLINK_TIME and (0.55 + 0.45 * math.abs(math.sin(now * 8))) or 1)
 			else
-				f.timer:SetText("")
+				if f.timerShown then f.timerShown = nil f.timer:SetText("") end
 				-- ярость почти полная: Удар героя / Рассекающий пульсируют
 				f.icon:SetAlpha(f.overflow and (0.45 + 0.55 * math.abs(math.sin(now * 6))) or 1)
 			end
@@ -502,18 +524,6 @@ local function StanceAllows(stances)
 	return false
 end
 
--- Ваш дебафф на цели: true и сколько секунд осталось (nil — бессрочный)
-local function HasMyDebuff(name)
-	for i = 1, 40 do
-		local dName, _, _, _, _, _, expires, caster = UnitDebuff("target", i)
-		if not dName then return false end
-		if dName == name and caster == "player" then
-			return true, (expires and expires > 0) and (expires - GetTime()) or nil
-		end
-	end
-	return false
-end
-
 -- Сколько врагов рядом в ближнем бою: цель и те, кто за последние MELEE_WINDOW секунд бил вас
 -- с руки или кого били вы (по журналу боя). Полоски над головами не годятся: видны и дальние мобы
 local MELEE_WINDOW = 4
@@ -562,9 +572,8 @@ end
 
 -- «Часы» на иконке: при общей перезарядке только «часы», при своей — ещё и серая иконка (f.cdStart)
 local function SetItemCooldown(f, start, duration)
-	local key = start and (start .. ":" .. duration)
-	if key == f.cdKey then return end
-	f.cdKey = key
+	if start == f.cdS and duration == f.cdD then return end -- без склейки строк: вызывается каждую проверку
+	f.cdS, f.cdD = start, duration
 	f.cdStart = start and duration > GCD_MAX and start or nil
 	if start then
 		f.cd:SetCooldown(start, duration)
@@ -574,13 +583,71 @@ local function SetItemCooldown(f, start, duration)
 	end
 end
 
--- Ваш эффект с этим номером заклинания: true и время окончания (0 — бессрочный) или nil
-local function MyBuff(spellID)
-	local buffName = GetSpellInfo(spellID)
-	for i = 1, 40 do
-		local name, _, _, _, _, _, expires, _, _, _, id = UnitBuff("player", i)
-		if not name then return nil end
-		if id == spellID or (buffName and name == buffName) then return true, expires or 0 end
+-- Эффекты на вас и ослабления на цели. За одну проверку (между AuraTick(true) и AuraTick(false))
+-- каждый список перебирается один раз и запоминается; вне проверки — перебирается заново при каждом вызове
+local MyBuff, HasMyDebuff, SunderInfo, AuraTick
+do
+	local tickAt               -- время начала идущей проверки (GetTime в кадре) или nil
+	local buffsDone, debuffsDone = false, false
+	local buffExp = {}         -- номер в списке -> время окончания (false — нет)
+	local buffByName, buffById = {}, {} -- название / номер заклинания -> первый номер в списке
+	local myDebuff = {}        -- название -> время окончания вашего ослабления на цели (0 — бессрочное)
+	local anyDebuff = {}       -- название -> номер первого ослабления с ним на цели (чьего угодно)
+	local debuffCount, debuffExp = {}, {} -- номер в списке -> стаки и время окончания
+	local function Live() return tickAt ~= nil and tickAt == GetTime() end
+	local function ScanBuffs()
+		local live = Live()
+		if live and buffsDone then return end
+		buffsDone = live
+		wipe(buffExp) wipe(buffByName) wipe(buffById)
+		for i = 1, 40 do
+			local name, _, _, _, _, _, expires, _, _, _, id = UnitBuff("player", i)
+			if not name then break end
+			buffExp[i] = expires or false
+			if not buffByName[name] then buffByName[name] = i end
+			if id and not buffById[id] then buffById[id] = i end
+		end
+	end
+	local function ScanDebuffs()
+		local live = Live()
+		if live and debuffsDone then return end
+		debuffsDone = live
+		wipe(myDebuff) wipe(anyDebuff) wipe(debuffCount) wipe(debuffExp)
+		for i = 1, 40 do
+			local name, _, _, count, _, _, expires, caster = UnitDebuff("target", i)
+			if not name then break end
+			if not anyDebuff[name] then
+				anyDebuff[name] = i
+				debuffCount[i], debuffExp[i] = count, expires
+			end
+			if caster == "player" and not myDebuff[name] then myDebuff[name] = expires or 0 end
+		end
+	end
+	AuraTick = function(on)
+		tickAt = on and GetTime() or nil
+		buffsDone, debuffsDone = false, false
+	end
+	-- Ваш эффект с этим номером заклинания: true и время окончания (0 — бессрочный) или nil
+	MyBuff = function(spellID)
+		ScanBuffs()
+		local buffName = GetSpellInfo(spellID)
+		local i, j = buffById[spellID], buffName and buffByName[buffName]
+		if j and (not i or j < i) then i = j end -- первый в списке, как при переборе
+		if i then return true, buffExp[i] or 0 end
+	end
+	-- Ваш дебафф на цели: true и сколько секунд осталось (nil — бессрочный)
+	HasMyDebuff = function(name)
+		ScanDebuffs()
+		local expires = myDebuff[name]
+		if not expires then return false end
+		return true, (expires > 0) and (expires - GetTime()) or nil
+	end
+	-- Стаки Раскола брони на цели (от любого воина) и время окончания
+	SunderInfo = function()
+		ScanDebuffs()
+		local i = anyDebuff[GetSpellInfo(7386)]
+		if not i then return 0 end
+		return debuffCount[i] or 1, debuffExp[i]
 	end
 end
 
@@ -615,9 +682,27 @@ local function ProcState(name)
 	return ready, noMana and true or false
 end
 
-local function Known(spellID)
-	local name, _, texture = GetSpellInfo(spellID)
-	if name and GetSpellInfo(name) then return name, texture end -- есть в книге заклинаний
+-- Изучено ли заклинание: название и значок или nil. Вызывается десятки раз за проверку, поэтому
+-- ответ запоминается до смены книги заклинаний (изучение, таланты, вход в мир)
+local Known
+do
+	local cache = {} -- номер -> { название, значок } или false (не изучено)
+	local watch = CreateFrame("Frame")
+	watch:RegisterEvent("SPELLS_CHANGED")
+	watch:RegisterEvent("LEARNED_SPELL_IN_TAB")
+	watch:RegisterEvent("PLAYER_TALENT_UPDATE")
+	watch:RegisterEvent("ACTIVE_TALENT_GROUP_CHANGED")
+	watch:RegisterEvent("PLAYER_ENTERING_WORLD")
+	watch:SetScript("OnEvent", function() wipe(cache) end)
+	Known = function(spellID)
+		local c = cache[spellID]
+		if c == nil then
+			local name, _, texture = GetSpellInfo(spellID)
+			c = (name and GetSpellInfo(name)) and { name, texture } or false -- есть в книге заклинаний
+			cache[spellID] = c
+		end
+		if c then return c[1], c[2] end
+	end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -625,15 +710,6 @@ end
 local fearNames
 local function InGroup()
 	return (GetNumRaidMembers() or 0) > 0 or (GetNumPartyMembers() or 0) > 0
-end
-local function SunderInfo() -- стаки Раскола брони на цели (от любого воина) и время окончания
-	local sunderName = GetSpellInfo(7386)
-	for i = 1, 40 do
-		local name, _, _, count, _, _, expires = UnitDebuff("target", i)
-		if not name then return 0 end
-		if name == sunderName then return count or 1, expires end
-	end
-	return 0
 end
 -- Короткий бой: обычная цель заметно ниже вас по уровню
 local function LowTarget()
@@ -648,43 +724,16 @@ local function TargetPct()
 	return (max and max > 0) and (UnitHealth("target") / max * 100) or 100
 end
 
-----------------------------------------------------------------------------------------------
--- Оценка Казни в процентах здоровья цели. Абсолютного здоровья чужих мобов игра не даёт, поэтому:
--- сколько процентов цели снимает 1 единица вашего урона (по текущему бою, иначе — по прошлым мобам
--- с тем же именем), средний обычный удар оружием и урон Казни от ярости (по вашим прошлым Казням)
-local fight = { guid = nil } -- текущая цель: стартовые %, ваш урон, чужой урон
-local swingAvg               -- средний урон удара оружием (без критов), за сеанс
-local execRage               -- ярость в момент применения Казни
-local function ExecDB()
-	ProcAlertDB = ProcAlertDB or {}
-	ProcAlertDB.mobPct = ProcAlertDB.mobPct or {} -- [имя] = процентов за 1 урона
-	ProcAlertDB.exec = ProcAlertDB.exec or { n = 0, r = 0, d = 0, rr = 0, rd = 0 }
-	return ProcAlertDB
+do -- однократно: убрать из ProcAlertDB данные прежнего сбора для оценки Казни
+	local f = CreateFrame("Frame")
+	f:RegisterEvent("ADDON_LOADED")
+	f:SetScript("OnEvent", function(self, _, addon)
+		if addon ~= "ProcAlert" then return end
+		self:UnregisterEvent("ADDON_LOADED")
+		if ProcAlertDB then ProcAlertDB.mobPct, ProcAlertDB.exec = nil, nil end
+	end)
 end
 
--- Процентов цели за 1 единицу урона или nil
-local function PctPerDamage()
-	if fight.guid == UnitGUID("target") and not fight.dirty and fight.dmg > 0 then
-		local drop = fight.startPct - TargetPct()
-		if drop >= 5 then return drop / fight.dmg end
-	end
-	local name = UnitName("target")
-	return name and ExecDB().mobPct[name]
-end
-
--- Ожидаемый урон Казни при ярости rage (прямая по вашим Казням без критов) или nil
-local function ExecDamage(rage)
-	local e = ExecDB().exec
-	if e.n < 1 then return nil end
-	local meanR, meanD = e.r / e.n, e.d / e.n
-	local varR = e.rr / e.n - meanR * meanR
-	if e.n < 3 or varR < 1 then return meanD end
-	local b = (e.rd / e.n - meanR * meanD) / varR
-	return meanD + b * (rage - meanR)
-end
-
--- Что делать с Казнью сейчас: "skip" — добьёт и обычный удар, "kill" — Казнь добьёт,
--- "weak" — не добьёт, nil — данных нет
 -- Щита нет: способности со щитом (needShield) показываем со значком щита — макрос сначала наденет сет
 local function NoShield()
 	local link = GetInventoryItemLink("player", 17)
@@ -863,7 +912,8 @@ end
 local function RegularReady(name, r)
 	if not StanceAllows(r.stances) then return false end
 	if r.cond and not CONDS[r.cond]() then return false end
-	local saving = TargetPct() <= EXECUTE_PCT + SAVE_PCT and StanceAllows({ BATTLE, BERSERKER })
+	local stance = CurrentStance()
+	local saving = TargetPct() <= EXECUTE_PCT + SAVE_PCT and (stance == BATTLE or stance == BERSERKER)
 		and Known(5308) and not LowTarget() -- скоро Казнь: ярость копим на неё (не на слабых мобах)
 	if r.longFight and LowTarget() then return false end -- моб умрёт раньше, чем это отработает
 	if r.saveExec and saving then return false end
@@ -874,10 +924,7 @@ local function RegularReady(name, r)
 	if not IsUsableSpell(name) and not (r.needShield and NoShield()) and not r.anyStance then return false end -- не хватает ярости
 	if CooldownOf(name) then return false end
 	if IsSpellInRange(name, "target") == 0 then return false end
-	if r.skipDebuff then
-		local has, left = HasMyDebuff(name)
-		if has and not (r.refresh and left and left < r.refresh) then return false end
-	end
+	if r.skipDebuff and HasMyDebuff(name) then return false end
 	if DUMP_SPELLS[r.id] then
 		-- второй враг рядом — Рассекающий, один — Удар героя
 		local enemies = MeleeEnemies()
@@ -890,26 +937,30 @@ end
 -- Какую способность показать для записи: без alts — саму; с alts — первую изученную и
 -- готовую (без перезарядки и применимую), иначе первую изученную. "shout" — крик,
 -- которым вы пользовались последним (по умолчанию Боевой); под благословением могущества — Командирский
-local function Resolve(e)
-	if not e.alts then return Known(e.id) end
-	local list = e.alts
-	if list[1] == "shout" then
-		if MightBlessed() then
-			list = { 469 }
-		else
-			list = (ProcAlertDB and ProcAlertDB.shout == 469) and { 469, 6673 } or { 6673, 469 }
+local Resolve
+do
+	local MIGHT, BATTLE_FIRST, COMMAND_FIRST = { 469 }, { 6673, 469 }, { 469, 6673 } -- без новых таблиц на каждой проверке
+	Resolve = function(e)
+		if not e.alts then return Known(e.id) end
+		local list = e.alts
+		if list[1] == "shout" then
+			if MightBlessed() then
+				list = MIGHT
+			else
+				list = (ProcAlertDB and ProcAlertDB.shout == 469) and COMMAND_FIRST or BATTLE_FIRST
+			end
 		end
-	end
-	local firstName, firstTex
-	for _, id in ipairs(list) do
-		local name, texture = Known(id)
-		if name then
-			local usable, noMana = IsUsableSpell(name)
-			if not CooldownOf(name) and (usable or noMana) then return name, texture end
-			firstName, firstTex = firstName or name, firstTex or texture
+		local firstName, firstTex
+		for _, id in ipairs(list) do
+			local name, texture = Known(id)
+			if name then
+				local usable, noMana = IsUsableSpell(name)
+				if not CooldownOf(name) and (usable or noMana) then return name, texture end
+				firstName, firstTex = firstName or name, firstTex or texture
+			end
 		end
+		return firstName, firstTex
 	end
-	return firstName, firstTex
 end
 
 ----------------------------------------------------------------------------------------------
@@ -1187,74 +1238,6 @@ local function StanceKeep() -- сколько ярости сохраняетс�
 end
 local function RageCostOr(name, default) return RageCost(name) or default end
 
--- Какой крик вы применили последним — его и напоминать (Боевой или Командирский)
--- Журнал боя: ваш урон по цели, проценты цели, урон Казни от ярости
-local tracker = CreateFrame("Frame")
-tracker:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
-tracker:RegisterEvent("PLAYER_TARGET_CHANGED")
-tracker:RegisterEvent("UNIT_SPELLCAST_SENT")
-tracker:RegisterEvent("UNIT_HEALTH")
-local function SaveFight()
-	if fight.guid and not fight.dirty and fight.dmg > 0 and fight.name then
-		local drop = fight.startPct - (fight.lastPct or fight.startPct)
-		if drop >= 30 then -- достаточно данных: запомнить для мобов с этим именем
-			local ppd = drop / fight.dmg
-			local db = ExecDB().mobPct
-			db[fight.name] = db[fight.name] and (db[fight.name] * 0.7 + ppd * 0.3) or ppd
-		end
-	end
-end
-local function NewFight()
-	SaveFight()
-	local guid = UnitGUID("target")
-	fight = { guid = guid, name = UnitName("target"), startPct = TargetPct(), dmg = 0 }
-	fight.lastPct = fight.startPct
-end
-tracker:SetScript("OnEvent", function(_, event, ...)
-	if event == "PLAYER_TARGET_CHANGED" then
-		NewFight()
-		return
-	elseif event == "UNIT_HEALTH" then
-		if ... == "target" and fight.guid == UnitGUID("target") and fight.dmg > 0 then fight.lastPct = TargetPct() end
-		return
-	elseif event == "UNIT_SPELLCAST_SENT" then
-		local unit, spellName = ...
-		if unit == "player" and spellName == GetSpellInfo(5308) then execRage = PlayerRage() end
-		return
-	end
-	local _, sub, srcGUID, _, _, dstGUID = ...
-	if not fight.guid or dstGUID ~= fight.guid then return end
-	local dmg, overkill, crit
-	if sub == "SWING_DAMAGE" then
-		dmg, overkill = select(9, ...), select(10, ...)
-		crit = select(15, ...)
-	elseif sub == "SPELL_DAMAGE" or sub == "RANGE_DAMAGE" then
-		dmg, overkill = select(12, ...), select(13, ...)
-		crit = select(18, ...)
-	else
-		return
-	end
-	if not dmg then return end
-	if srcGUID ~= UnitGUID("player") then
-		fight.dirty = true -- бьёт кто-то ещё: по этому бою проценты не считаем
-		return
-	end
-	local real = dmg - ((overkill and overkill > 0) and overkill or 0)
-	if fight.dmg == 0 then fight.startPct = TargetPct() + 0 end
-	fight.dmg = fight.dmg + real
-	fight.lastPct = TargetPct()
-	if not crit then
-		if sub == "SWING_DAMAGE" then
-			swingAvg = swingAvg and (swingAvg * 0.8 + dmg * 0.2) or dmg
-		elseif select(10, ...) == GetSpellInfo(5308) and execRage then
-			local e = ExecDB().exec
-			e.n, e.r, e.d = e.n + 1, e.r + execRage, e.d + dmg
-			e.rr, e.rd = e.rr + execRage * execRage, e.rd + execRage * dmg
-			execRage = nil
-		end
-	end
-end)
-
 -- Полоска ярости: внизу, под персонажем — над панелью стоек; видна в бою или с враждебной целью.
 -- Белая черта — сколько ярости нужно для Удара героя (порог /pa hs), цифра справа — ярость сейчас
 local RAGE_W, RAGE_H = 220, 12
@@ -1307,7 +1290,7 @@ rageBar:SetScript("OnUpdate", function(self, elapsed)
 	local target = show and 1 or 0
 	if a < target then self:SetAlpha(math.min(target, a + elapsed / FADE_IN))
 	elseif a > target then self:SetAlpha(math.max(target, a - elapsed / FADE_OUT)) end
-	if self:GetAlpha() == 0 then return end
+	if self:GetAlpha() == 0 then self.markWait = 0 return end
 	local max = UnitPowerMax and UnitPowerMax("player", 1) or 100
 	if not max or max <= 0 then max = 100 end
 	local rage = PlayerRage()
@@ -1316,8 +1299,11 @@ rageBar:SetScript("OnUpdate", function(self, elapsed)
 	self.text:SetText(rage)
 	-- над краем заполнения (у левого края — не выходит за полоску)
 	local edge = math.max(8, RAGE_W * math.min(rage, max) / max)
-	self.text:ClearAllPoints()
-	self.text:SetPoint("BOTTOM", self, "TOPLEFT", edge, 1)
+	if self.textEdge ~= edge then
+		self.textEdge = edge
+		self.text:ClearAllPoints()
+		self.text:SetPoint("BOTTOM", self, "TOPLEFT", edge, 1)
+	end
 	-- почти полная — полоска мигает красный ↔ жёлтый (ярость скоро начнёт пропадать)
 	if rage >= OVERFLOW_RAGE then
 		local k = math.abs(math.sin(GetTime() * 5))
@@ -1327,6 +1313,10 @@ rageBar:SetScript("OnUpdate", function(self, elapsed)
 		self:SetStatusBarColor(0.85, 0.1, 0.1)
 		self.text:SetTextColor(1, 1, 1)
 	end
+	-- порог считаем раз в CHECK_INTERVAL: DumpRage перебирает удары, стойку и ослабления цели
+	self.markWait = (self.markWait or 0) - elapsed
+	if self.markWait > 0 then return end
+	self.markWait = CHECK_INTERVAL
 	local heroic = Known(78)
 	local need = heroic and DumpRage(heroic)
 	if need and need > 0 and need < max then
@@ -1365,10 +1355,10 @@ swingBar:SetScript("OnUpdate", function(self, elapsed)
 	local p = swing.speed > 0 and math.min(1, (GetTime() - swing.at) / swing.speed) or 0
 	self:SetValue(p)
 	local queued
-	for _, id in ipairs({ 78, 845 }) do
-		local n = Known(id)
-		if n and IsCurrentSpell(n) then queued = n end
-	end
+	local n = Known(78) -- Удар героя, затем Рассекающий (без таблицы на каждый кадр)
+	if n and IsCurrentSpell(n) then queued = n end
+	n = Known(845)
+	if n and IsCurrentSpell(n) then queued = n end
 	if queued then
 		local cost = RageCost(queued)
 		if cost and PlayerRage() < cost then
@@ -1382,6 +1372,7 @@ swingBar:SetScript("OnUpdate", function(self, elapsed)
 	end
 end)
 
+-- Какой крик вы применили последним — его и напоминать (Боевой или Командирский)
 local shoutWatcher = CreateFrame("Frame")
 shoutWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
 shoutWatcher:SetScript("OnEvent", function(_, _, unit, spellName)
@@ -1400,14 +1391,13 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 	elapsedTotal = elapsedTotal + elapsed
 	if elapsedTotal < CHECK_INTERVAL then return end
 	elapsedTotal = 0
+	AuraTick(true) -- эффекты и ослабления перебираются один раз за проверку
 	local enemy = HasEnemyTarget()
 	UpdateDefensive()
 	UpdateRush()
 	PlaceLeftColumn()
 
 	-- Казнь и Превосходство показываются по своим срабатываниям, оба сразу (яркие или синеватые — по ярости)
-	local suppress = {}
-
 	for _, p in ipairs(PROCS) do
 		local spellID = p.id
 		local name, texture = Resolve(p)
@@ -1416,7 +1406,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 			local hasBuff, buffExpires
 			if p.buff then hasBuff, buffExpires = MyBuff(p.buff) end
 			if (enemy or p.anyTarget) and StanceAllows(p.stances) and (hasBuff or not p.buffOnly)
-				and (not p.cond or CONDS[p.cond]()) and not suppress[spellID] then
+				and (not p.cond or CONDS[p.cond]()) then
 				ready, noMana = ProcState(name)
 				if not ready and p.needShield and NoShield() then ready, noMana, shieldOnly = true, false, true end
 			end
@@ -1424,7 +1414,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 			if f and f.expiresAt then
 				-- иконка из /pa test: не трогаем
 			elseif ready then
-				if not f and p.sound and (hasBuff or not p.soundBuff) and (not p.soundCond or CONDS[p.soundCond]())
+				if not f and p.sound and (hasBuff or not p.soundBuff)
 					and AlertEnabled() and not SoundEnabled() then
 					PlaySound("RaidWarning")
 				end
@@ -1438,10 +1428,6 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				f.rage:SetText(noMana and RageText(name) or "")
 				if shieldOnly then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.buffExpires = hasBuff and buffExpires or nil
-				if p.myDebuff then -- отсчёт: сколько осталось вашему эффекту на цели
-					local has, left = HasMyDebuff(name)
-					f.buffExpires = has and left and (GetTime() + left) or nil
-				end
 				SetItemCooldown(f, AnyCooldownOf(name))
 			elseif f then
 				f.removing = true
@@ -1477,7 +1463,8 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 
 	-- Прерывания: чьё заклинание сбивать — цели, иначе фокуса
 	local castUnit, castEnds
-	for _, unit in ipairs({ "target", "focus" }) do
+	for u = 1, 2 do
+		local unit = (u == 1) and "target" or "focus"
 		if UnitExists(unit) and UnitCanAttack("player", unit) and not UnitIsDead(unit) then
 			local name, _, _, _, _, endTime, _, _, notInterruptible = UnitCastingInfo(unit)
 			if not name then
@@ -1540,9 +1527,6 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 					local count, expires = SunderInfo()
 					f.rage:SetText(count .. "/5")
 					f.buffExpires = expires
-				elseif r.buff then
-					local has, expires = MyBuff(r.buff)
-					f.buffExpires = has and expires or nil
 				end
 				f.overflow = DUMP_SPELLS[r.id] and PlayerRage() >= OVERFLOW_RAGE or nil
 				f.removing = false
@@ -1551,6 +1535,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 			end
 		end
 	end
+	AuraTick(false)
 end)
 
 ----------------------------------------------------------------------------------------------
@@ -1579,7 +1564,8 @@ local function Test()
 		local name, _, texture = GetSpellInfo(spellID)
 		if name then
 			local startAt = GetTime() + delay
-			local timer = CreateFrame("Frame")
+			local timer = p.testTimer or CreateFrame("Frame") -- один кадр на запись: повторный /pa test новых не создаёт
+			p.testTimer = timer
 			timer:SetScript("OnUpdate", function(self)
 				if GetTime() < startAt then return end
 				self:SetScript("OnUpdate", nil)
@@ -1617,6 +1603,7 @@ SlashCmdList["PROCALERT"] = function(msg)
 			ProcAlertDB.gap = n
 			Layout(procRow)
 			Layout(regularRow)
+			Layout(kickRow)
 			Print("расстояние между иконками: " .. n .. ".")
 		else
 			Print("укажите число от 0 до 200, например /pa gap 18 (сейчас: " .. GetGap() .. ").")
@@ -1687,10 +1674,11 @@ local TARGET_X = 130         -- левый край от центра ряда �
 local SIDE_MARGIN = 20       -- столько от края ряда срабатываний до цели справа и до значка стойки слева
 local TARGET_Y = PROC_SIZE / 2 -- верх строки: значки ослаблений — на одной линии со срабатываниями, их размера
 local MAX_ROWS = 6
-local ROW_H = 50
+local ROW_H = 56              -- портрет + здоровье + каст
 local FACE = 40              -- портрет моба (вместо имени)
 local TARGET_FACE = 64       -- портрет вашей цели (строка по центру)
 local TARGET_HP_W, TARGET_HP_H = 128, 8 -- полоска здоровья цели под портретом
+local CAST_H, TARGET_CAST_H = 4, 14 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
 local ICON = 34
 -- Главные ослабления — первыми (все значки одного размера ICON): замедление — моб не убежит,
 -- Кровопускание — от него «Вкус крови» и Превосходство, Раскол брони — стаки
@@ -1763,6 +1751,23 @@ log:SetScript("OnEvent", function(_, event, ...)
 	end
 	local _, sub, srcGUID, srcName, srcFlags, dstGUID, dstName, dstFlags = ...
 	if sub == "UNIT_DIED" or sub == "PARTY_KILL" then Remove(dstGUID) return end
+	-- каст врага из списка (для мобов без метки; у цели/фокуса/под курсором — точный из Sync)
+	if sub == "SPELL_CAST_START" then
+		local e = enemies[srcGUID]
+		if e then
+			local name, _, icon, _, _, _, castTime = GetSpellInfo((select(9, ...)))
+			if name and castTime and castTime > 0 then
+				local now = GetTime()
+				e.cast = { name = name, icon = icon, start = now, ends = now + castTime / 1000 }
+			end
+		end
+	elseif sub == "SPELL_CAST_SUCCESS" or sub == "SPELL_CAST_FAILED" then
+		local e = enemies[srcGUID]
+		if e then e.cast = nil end
+	elseif sub == "SPELL_INTERRUPT" then
+		local e = enemies[dstGUID]
+		if e then e.cast = nil end
+	end
 	local me = UnitGUID("player")
 	if dstGUID == me and srcGUID ~= me then
 		-- бьют вас
@@ -1777,8 +1782,10 @@ log:SetScript("OnEvent", function(_, event, ...)
 		Enemy(dstGUID, dstName)
 	elseif sub:find("^SPELL_AURA") then
 		local spellId, spellName, _, auraType, amount = select(9, ...)
+		if sub == "SPELL_AURA_BROKEN_SPELL" then auraType = select(15, ...) end -- перед ним ещё заклинание, которое сбило
 		if auraType ~= "DEBUFF" then return end
-		if sub == "SPELL_AURA_REMOVED" then
+		-- сбитое уроном (BROKEN) — тоже снято, а не наложено заново
+		if sub == "SPELL_AURA_REMOVED" or sub == "SPELL_AURA_BROKEN" or sub == "SPELL_AURA_BROKEN_SPELL" then
 			-- снятие не добавляет врага в список (иначе после боя он появился бы снова)
 			local e = enemies[dstGUID]
 			if e then e.debuffs[spellName] = nil end
@@ -1803,27 +1810,49 @@ log:SetScript("OnEvent", function(_, event, ...)
 	end
 end)
 
--- Цель, фокус, моб под курсором: точные здоровье и ослабления, заодно выучить длительности
+-- Цель, фокус, моб под курсором: точные здоровье и ослабления, заодно выучить длительности.
+-- Вызывается каждые 0,1 с для нескольких меток — таблицы каста и ослаблений переиспользуются
+local syncN = 0 -- номер прохода: ослабления, не встреченные в этом проходе, убираются
 local function Sync(unit)
 	local guid = UnitGUID(unit)
 	local e = guid and enemies[guid]
 	if not e then return end
 	local max = UnitHealthMax(unit)
 	if max and max > 0 then e.hp = UnitHealth(unit) / max * 100 end
+	-- каст: по метке точно (обычный или поток, можно ли сбить)
+	local cn, _, _, cicon, cst, cen, _, _, cni = UnitCastingInfo(unit)
+	local chan = false
+	if not cn then
+		cn, _, _, cicon, cst, cen, _, cni = UnitChannelInfo(unit)
+		chan = cn ~= nil
+	end
+	if cn and cst and cen then
+		local c = e.cast or {}
+		c.name, c.icon, c.start, c.ends, c.locked, c.channel = cn, cicon, cst / 1000, cen / 1000, cni, chan
+		e.cast = c
+	else
+		e.cast = nil
+	end
 	-- в бою с вами (в списке угрозы), но бьёт не вас — красная рамка (кого провоцировать)
 	local tanking, status = UnitDetailedThreatSituation("player", unit)
 	if status ~= nil then e.notOnMe = not tanking else e.notOnMe = nil end
 	e.faceUnit = e.faceUnit or unit -- портрет снять при отрисовке, пока моб доступен по этой метке
-	local exact = {}
+	syncN = syncN + 1
+	local debuffs = e.debuffs
 	for i = 1, 40 do
 		local name, _, icon, count, _, duration, expires, caster, _, _, spellId = UnitDebuff(unit, i)
 		if not name then break end
 		if caster == "player" then
-			exact[name] = { icon = icon, count = count, expires = (expires and expires > 0) and expires or nil, spellId = spellId }
+			local d = debuffs[name]
+			if not d then d = {} debuffs[name] = d end
+			d.icon, d.count, d.expires, d.spellId = icon, count, (expires and expires > 0) and expires or nil, spellId
+			d.sync = syncN
 			if duration and duration > 0 then Learned()[name] = duration end
 		end
 	end
-	e.debuffs = exact
+	for name, d in pairs(debuffs) do -- остальные (из журнала боя) на метке уже не висят
+		if d.sync ~= syncN then debuffs[name] = nil end
+	end
 end
 
 ----------------------------------------------------------------------------------------------
@@ -1863,6 +1892,18 @@ local function Row(i)
 	r.hp.bg = r.hp:CreateTexture(nil, "BACKGROUND")
 	r.hp.bg:SetAllPoints(r.hp)
 	r.hp.bg:SetTexture(0, 0, 0, 0.6)
+	r.cast = CreateFrame("StatusBar", nil, r) -- каст под здоровьем
+	r.cast:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
+	r.cast:SetMinMaxValues(0, 1)
+	r.cast.bg = r.cast:CreateTexture(nil, "BACKGROUND")
+	r.cast.bg:SetAllPoints(r.cast)
+	r.cast.bg:SetTexture(0, 0, 0, 0.6)
+	r.cast.icon = r.cast:CreateTexture(nil, "OVERLAY")
+	r.cast.icon:SetPoint("RIGHT", r.cast, "LEFT", -2, 0)
+	r.cast.text = r.cast:CreateFontString(nil, "OVERLAY")
+	r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+	r.cast.text:SetPoint("CENTER", r.cast, "CENTER", 0, 0)
+	r.cast:Hide()
 	r.icons = {}
 	rows[i] = r
 	return r
@@ -1946,6 +1987,21 @@ local function Face(e)
 	return f
 end
 
+-- сравнения для сортировки — один раз, а не на каждом проходе
+local function BySeen(a, b) return a.seen > b.seen end
+local function ByPriority(a, b)
+	local sa, sb = PRIORITY[a] or 0, PRIORITY[b] or 0
+	if sa ~= sb then return sa > sb end
+	return a < b
+end
+-- Кровопускание / Подрезать сухожилия кончается (меньше REND_REFRESH с) — значок мигает; у мобов справа ещё и крупнее
+-- (у цели размер не меняем: значки в одну линию со срабатываниями)
+local function Ending(e, name, now)
+	local d = e.debuffs[name]
+	return ENDING_ALERT[name] and d.expires and (d.expires - now) < REND_REFRESH
+end
+local names = {} -- названия ослаблений строки (переиспользуется в Draw)
+
 local elapsedSum = 0
 frame:SetScript("OnUpdate", function(_, elapsed)
 	elapsedSum = elapsedSum + elapsed
@@ -1985,7 +2041,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		for _, e in ipairs(list) do if e.face then e.face:Hide() end end
 		list = {}
 	end
-	table.sort(list, function(a, b) return a.seen > b.seen end)
+	table.sort(list, BySeen)
 
 	-- ваша цель — отдельной строкой по центру под срабатываниями, остальные — столбиком справа
 	local targetEntry
@@ -2009,25 +2065,15 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		face:SetWidth(fs)
 		face:SetHeight(fs)
 
-		local names = {}
+		for k = #names, 1, -1 do names[k] = nil end
 		for name in pairs(e.debuffs) do names[#names + 1] = name end
-		table.sort(names, function(a, b)
-			local sa, sb = PRIORITY[a] or 0, PRIORITY[b] or 0
-			if sa ~= sb then return sa > sb end
-			return a < b
-		end)
-		-- Кровопускание / Подрезать сухожилия кончается (меньше REND_REFRESH с) — значок мигает; у мобов справа ещё и крупнее
-		-- (у цели размер не меняем: значки в одну линию со срабатываниями)
-		local function Ending(name)
-			local d = e.debuffs[name]
-			return ENDING_ALERT[name] and d.expires and (d.expires - now) < REND_REFRESH
-		end
+		table.sort(names, ByPriority)
 		-- у цели значки размером со срабатывания и с тем же промежутком
 		local base = vertical and PROC_SIZE or ICON
 		local gap = vertical and GetGap() or 3
 		local iconsW, maxSize = 0, 0
 		for k, name in ipairs(names) do
-			local size = (Ending(name) and not vertical) and REND_BIG or base
+			local size = (Ending(e, name, now) and not vertical) and REND_BIG or base
 			iconsW = iconsW + size + (k > 1 and gap or 0)
 			if size > maxSize then maxSize = size end
 		end
@@ -2067,11 +2113,38 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		else
 			r.hp:Hide()
 		end
+		-- каст под здоровьем: оранжевый — можно сбить, серый — нельзя; у цели ещё значок, название и остаток
+		local c = e.cast
+		if c and c.ends > now then
+			local ch = vertical and TARGET_CAST_H or CAST_H
+			r.cast:SetWidth(vertical and TARGET_HP_W or fs)
+			r.cast:SetHeight(ch)
+			r.cast:ClearAllPoints()
+			r.cast:SetPoint("TOP", r.hp, "BOTTOM", 0, -2)
+			local p = (now - c.start) / math.max(0.01, c.ends - c.start)
+			if p < 0 then p = 0 elseif p > 1 then p = 1 end
+			r.cast:SetValue(c.channel and (1 - p) or p)
+			if c.locked then r.cast:SetStatusBarColor(0.55, 0.55, 0.55) else r.cast:SetStatusBarColor(1, 0.6, 0) end
+			if vertical then
+				r.cast.icon:SetTexture(c.icon)
+				r.cast.icon:SetWidth(ch)
+				r.cast.icon:SetHeight(ch)
+				r.cast.icon:Show()
+				r.cast.text:SetText(c.name .. "  " .. string.format("%.1f", c.ends - now))
+			else
+				r.cast.icon:Hide()
+				r.cast.text:SetText("")
+			end
+			r.cast:Show()
+		else
+			e.cast = nil
+			r.cast:Hide()
+		end
 
 		for k, name in ipairs(names) do
 			local d = e.debuffs[name]
 			local f = Icon(r, k)
-			local ending = Ending(name)
+			local ending = Ending(e, name, now)
 			local size = (ending and not vertical) and REND_BIG or base
 			if f.size ~= size or f.vertical ~= vertical then
 				f.size, f.vertical = size, vertical

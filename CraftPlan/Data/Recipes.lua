@@ -1,6 +1,6 @@
 
--- Рецепты для маршрута прокачки (SkillLineAbility.dbc + Spell.dbc из patch-ruRU-4.mpq):
--- "заклинание|название|жёлтый с|серый с|1 = даётся с профессией|изделие|штук за раз|материал*штук;…|перезарядка"
+-- Recipes for the leveling route (SkillLineAbility.dbc + Spell.dbc from patch-ruRU-4.mpq):
+-- "spell|name|yellow from|grey from|1 = granted with the profession|product|count per craft|reagent*count;…|cooldown"
 CraftPlanRouteData = {
 	[164] = {
 		"12260|Грубый медный жилет|15|55|1|10421|1|2840*4|0",
