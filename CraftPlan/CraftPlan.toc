@@ -2,7 +2,7 @@
 ## Title: CraftPlan
 ## Notes: Стеки крафта: что собрать, купить и создать, прирост навыка
 ## Notes-ruRU: Стеки крафта: что собрать, купить и создать, прирост навыка
-## Version: 2.0.84
+## Version: 2.1.4
 ## X-Sirus-Category: 15
 ## SavedVariables: WhereToGetDB
 ## SavedVariablesPerCharacter: CraftPlanDB

@@ -172,6 +172,27 @@ function CP.StackNum(si)
 	CP.StackOrder()
 	return stackNum[si] or si
 end
+-- Stacks that take part in everything (calculation, materials, bar, crafting watcher). A switched off stack
+-- (st.off) keeps its tile and number but is left out. Cached until CP.DropCache; shared list — don't change it.
+local activeOrder
+CP.OnDrop(function() activeOrder = nil end)
+function CP.ActiveOrder()
+	if activeOrder then return activeOrder end
+	local g, out = CP.Goal(), {}
+	for _, si in ipairs(CP.StackOrder()) do
+		if not g.stacks[si].off then out[#out + 1] = si end
+	end
+	activeOrder = out
+	return out
+end
+function CP.ToggleStackOff(si)
+	local g = CP.Goal()
+	local st = g.stacks[si]
+	if not st or g.edit then return end
+	st.off = (not st.off) or nil
+	CP.sel[si] = nil
+	CP.Changed()
+end
 
 -- Tree of one stack. stock is the shared supply (stacks reserve their share in order).
 -- nodes[id] = { id, gross, made, short, have, parents = { [key] = count }, kids = { id } }
@@ -280,7 +301,7 @@ function CP.Compute()
 	if computed then return computed end
 	local g = CP.Goal()
 	local lines = CP.SkillLines()
-	local order = CP.StackOrder()
+	local order = CP.ActiveOrder()
 	-- pass 1: trees in the current order — which intermediates must be crafted
 	local stock, trees = {}, {}
 	for _, si in ipairs(order) do trees[si] = BuildStack(si, g.stacks[si], stock) end
@@ -305,7 +326,7 @@ function CP.Compute()
 		c.can = true -- have the materials for one craft right now
 		for _, rg in ipairs(c.rec.reag) do if CP.Have(rg.id) < rg.count then c.can = false break end end
 	end
-	local rank, sure = {}, {}
+	local rank = {} -- expected skill per profession (oranges +1, yellow/green by chance)
 	local function Chance(c)
 		local L = lines[c.prof]
 		local r = rank[c.prof] or L.rank
@@ -325,7 +346,7 @@ function CP.Compute()
 		local L = lines[prof]
 		local r = rank[prof] or L.rank
 		local rk = math.floor(r + 1e-9)
-		local cap = sure[prof] or L.rank
+		local cap = rk -- unlearned recipes count once the expected skill reaches their requirement
 		local cum, m = 0, math.huge
 		for _, c in ipairs(byY) do
 			if c.rem > 0 and c.prof == prof and c.req <= cap and rk < c.rec.y then
@@ -349,7 +370,7 @@ function CP.Compute()
 		wipe(slack)
 		for i, c in ipairs(todo) do
 			local L = lines[c.prof]
-			if c.rem > 0 and L and c.req <= (sure[c.prof] or L.rank) then
+			if c.rem > 0 and L and c.req <= math.floor((rank[c.prof] or L.rank) + 1e-9) then
 				local _, rk, ch = Chance(c)
 				local k1, k2, k3, k4, k5
 				if rk < c.rec.y then
@@ -390,7 +411,6 @@ function CP.Compute()
 			AddGain(gg, rk, ch, c.rec.y, mid)
 			if ge then AddGain(ge, rk, ch, c.rec.y, mid) end
 			rank[c.prof] = to
-			if ch >= 1 then sure[c.prof] = math.min(L.max, (sure[c.prof] or L.rank) + 1) end -- guaranteed only by exact +1
 		end
 	end
 	for _, c in ipairs(todo) do
@@ -579,13 +599,13 @@ end
 function CP.StacksWith(sk, name)
 	if not stacksWith then
 		local g, map = CP.Goal(), {}
-		for k, si in ipairs(CP.StackOrder()) do
+		for _, si in ipairs(CP.ActiveOrder()) do
 			local seen = {}
 			for _, e in ipairs(g.stacks[si].list or {}) do
 				local key = e.sk .. ":" .. e.name
 				if e.n > 0 and not seen[key] then
 					seen[key] = true
-					map[key] = (map[key] and (map[key] .. ", ") or "") .. "Стек " .. k
+					map[key] = (map[key] and (map[key] .. ", ") or "") .. "Стек " .. CP.StackNum(si)
 				end
 			end
 		end
@@ -660,7 +680,9 @@ local function InAnyStack(spell)
 	if not craftNames then
 		craftNames = {}
 		for _, st in ipairs(CP.Goal().stacks) do
-			for _, e in ipairs(st.list) do if e.n > 0 then craftNames[e.name] = true end end
+			if not st.off then
+				for _, e in ipairs(st.list) do if e.n > 0 then craftNames[e.name] = true end end
+			end
 		end
 	end
 	return craftNames[spell]
@@ -671,7 +693,7 @@ watch:SetScript("OnEvent", function(_, _, unit, spell)
 	if unit ~= "player" or not spell or not CraftPlanDB or not CraftPlanDB.goal then return end
 	if not InAnyStack(spell) then return end
 	local g = CP.Goal()
-	for _, si in ipairs(CP.StackOrder()) do
+	for _, si in ipairs(CP.ActiveOrder()) do
 		local st = g.stacks[si]
 		for _, e in ipairs(st.list) do
 			if e.name == spell and e.n > 0 then

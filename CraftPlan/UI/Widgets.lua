@@ -249,6 +249,8 @@ function Canvas:Icon(tex, x, y, size, opts)
 	if plain then b.tex:SetTexCoord(0, 1, 0, 1) else b.tex:SetTexCoord(0.08, 0.92, 0.08, 0.92) end
 	b:SetHighlightTexture(plain and tex or "Interface\\Buttons\\ButtonHilight-Square", "ADD")
 	b.tex:SetDesaturated(opts.gray and true or false)
+	local tc = opts.color -- tint {r, g, b}; pooled: always set
+	if tc then b.tex:SetVertexColor(tc[1], tc[2], tc[3]) else b.tex:SetVertexColor(1, 1, 1) end
 	b:SetAlpha(opts.alpha or 1)
 	b.count:SetFontObject(size >= 30 and "NumberFontNormal" or "NumberFontNormalSmall")
 	b.count:SetText(opts.count or "")

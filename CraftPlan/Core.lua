@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.0.84"
+CP.VERSION = "2.1.4"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
@@ -175,6 +175,63 @@ do
 		if stamp ~= now then Scan() stamp = now end
 		return (id and ids[id]) or 0
 	end
+
+	-- Crafting away from the bank also takes materials from the reagent storage, and the game does not show the
+	-- storage there: what a craft took beyond the bags is subtracted from the remembered contents.
+	-- Bags are counted when the cast is sent/started and again a moment after it succeeded.
+	local recipeOf -- [recipe name] = rec (reagents)
+	local function RecipeOf(name)
+		if not name then return nil end
+		if not recipeOf then
+			recipeOf = {}
+			for _, sk in pairs(CP.SKILL_ID) do
+				for _, rec in ipairs(CP.Recipes(sk)) do
+					if not recipeOf[rec.name] then recipeOf[rec.name] = rec end
+				end
+			end
+		end
+		return recipeOf[name]
+	end
+	local before, pending = nil, {}
+	local tracker = CreateFrame("Frame")
+	tracker:Hide()
+	tracker:RegisterEvent("UNIT_SPELLCAST_SENT")
+	tracker:RegisterEvent("UNIT_SPELLCAST_START")
+	tracker:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+	tracker:SetScript("OnEvent", function(self, event, unit, spell)
+		if unit ~= "player" then return end
+		local rec = RecipeOf(spell)
+		if not rec then return end
+		if event == "UNIT_SPELLCAST_SUCCEEDED" then
+			if before then
+				pending[#pending + 1] = { rec = rec, before = before, at = GetTime() + 0.3 }
+				before = nil
+				self:Show()
+			end
+		else
+			before = CountBags()
+		end
+	end)
+	tracker:SetScript("OnUpdate", function(self)
+		local p = pending[1]
+		if not p then self:Hide() return end
+		if GetTime() < p.at then return end
+		table.remove(pending, 1)
+		if next(CountBag(REAGENT_BAG, {})) then return end -- the storage is readable now: the scan has it right
+		local mem = DB().reagentBag
+		if type(mem) ~= "table" then return end
+		local now, changed = CountBags(), false
+		for _, g in ipairs(p.rec.reag) do
+			local fromBags = math.max(0, (p.before[g.id] or 0) - (now[g.id] or 0))
+			local fromStore = g.count - fromBags
+			local v = mem[g.id]
+			if fromStore > 0 and type(v) == "number" and v > 0 then
+				mem[g.id] = (v - fromStore > 0) and (v - fromStore) or nil
+				changed = true
+			end
+		end
+		if changed then stamp = nil; CP.Changed() end
+	end)
 end
 function CP.BankCount(id)
 	local bank = DB().bank
@@ -319,10 +376,17 @@ end
 
 -- Is the recipe learned (as of the last opening of the profession window): true or nil
 function CP.KnownRecipe(prof, name)
-	local p = DB().profs[prof]
-	if not p then return nil end
-	if p.recipes then MigrateProf(p) end
-	return p.known and p.known[name] or nil
+	local db = DB()
+	local p = db.profs[prof]
+	if p then
+		if p.recipes then MigrateProf(p) end
+		if p.known and p.known[name] then return true end
+	end
+	-- just bought at the trainer: it marks the recipe as learned before the profession window is opened again
+	local sk = CP.SKILL_ID[prof]
+	local t = sk and db.learn and db.learn[sk] and db.learn[sk][name]
+	if t and t.used then return true end
+	return nil
 end
 
 ----------------------------------------------------------------------------------------------

@@ -192,6 +192,18 @@ function CP.DrawOrePlan(cv, y, Wd)
 			y = cv:Chips(items, X + fs:GetStringWidth() + 8, y, X, Wd - 10)
 			y = y - 24
 		end
+		-- the leftovers could go into these recipes, only other materials are missing
+		for i, e in ipairs(P.blocked or {}) do
+			if i > 3 then break end
+			local c = e.c
+			cv:Icon(CP.ItemIcon(c.rec.item > 0 and c.rec.item or nil), X + 4, y - 1, 20, { link = c.rec.item > 0 and ("item:" .. c.rec.item) or nil })
+			local fs = cv:Text(c.rec.name .. " |cffffd100x" .. e.n .. "|r  |cffffff00+" .. math.floor(e.gain + 0.5) .. "|r  |cff9a9a9aне хватает:|r",
+				X + 30, y - 4, "GameFontHighlightSmall", nil, nil, HEAD)
+			local items = {}
+			for _, m in ipairs(e.miss) do items[#items + 1] = { id = m.id, label = CP.ItemName(m.id) .. " |cffff6060" .. m.n .. "|r" } end
+			y = cv:Chips(items, X + 30 + fs:GetStringWidth() + 8, y, X + 30, Wd - 10)
+			y = y - 24
+		end
 	end
 	return math.min(y, leftY) - 6
 end

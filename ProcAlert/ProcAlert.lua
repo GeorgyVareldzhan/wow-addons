@@ -1674,11 +1674,21 @@ local TARGET_X = 130         -- левый край от центра ряда �
 local SIDE_MARGIN = 20       -- столько от края ряда срабатываний до цели справа и до значка стойки слева
 local TARGET_Y = PROC_SIZE / 2 -- верх строки: значки ослаблений — на одной линии со срабатываниями, их размера
 local MAX_ROWS = 6
-local ROW_H = 56              -- портрет + здоровье + каст
+local ROW_H = 60              -- портрет + здоровье + каст
 local FACE = 40              -- портрет моба (вместо имени)
 local TARGET_FACE = 64       -- портрет вашей цели (строка по центру)
 local TARGET_HP_W, TARGET_HP_H = 128, 8 -- полоска здоровья цели под портретом
-local CAST_H, TARGET_CAST_H = 4, 14 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
+local CAST_H, TARGET_CAST_H = 8, 18 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
+local TARGET_CAST_ICON = 24  -- значок заклинания цели слева от полоски
+-- прерывания для подсветки каста: Зуботычина, Удар щитом (стойку и щит сменит макрос)
+local KICK_IDS = { 6552, 72 }
+local function KickReady()
+	for _, id in ipairs(KICK_IDS) do
+		local name = Known(id)
+		if name and not CooldownOf(name) then return true end
+	end
+	return false
+end
 local ICON = 34
 -- Главные ослабления — первыми (все значки одного размера ICON): замедление — моб не убежит,
 -- Кровопускание — от него «Вкус крови» и Превосходство, Раскол брони — стаки
@@ -1882,6 +1892,19 @@ local function Row(i)
 	r.warn:SetHeight(FACE + 12)
 	r.warn:SetTexture(ROUND)
 	r.warn:SetVertexColor(1, 0.1, 0.1, 1)
+	r.alarm = r:CreateTexture(nil, "BACKGROUND") -- красное кольцо ещё шире — кастует, можно сбить
+	r.alarm:SetPoint("CENTER", r.border, "CENTER", 0, 0)
+	r.alarm:SetTexture(ROUND)
+	r.alarm:SetVertexColor(1, 0, 0, 1)
+	r.alarm:Hide()
+	r.castOv = CreateFrame("Frame", nil, r) -- значок заклинания и секунды поверх портрета (мобы справа)
+	r.castOv:SetFrameLevel(frame:GetFrameLevel() + 5)
+	r.castOv.tex = r.castOv:CreateTexture(nil, "ARTWORK")
+	r.castOv.tex:SetAllPoints(r.castOv)
+	r.castOv.text = r.castOv:CreateFontString(nil, "OVERLAY")
+	r.castOv.text:SetFont("Fonts\\FRIZQT__.TTF", 16, "THICKOUTLINE")
+	r.castOv.text:SetPoint("CENTER", r.castOv, "CENTER", 0, 0)
+	r.castOv:Hide()
 	r.hp = CreateFrame("StatusBar", nil, r)
 	r.hp:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -(FACE + 4))
 	r.hp:SetWidth(FACE)
@@ -2113,8 +2136,11 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		else
 			r.hp:Hide()
 		end
-		-- каст под здоровьем: оранжевый — можно сбить, серый — нельзя; у цели ещё значок, название и остаток
+		-- каст под здоровьем: можно сбить и прерывание готово — красный, мигает (у мобов справа ещё кольцо);
+		-- можно сбить, прерывания на перезарядке — оранжевый; нельзя — серый.
+		-- у цели — крупный значок, название и остаток; у мобов справа — значок и секунды поверх портрета
 		local c = e.cast
+		local pulse = 0.35 + 0.65 * math.abs(math.sin(now * 8))
 		if c and c.ends > now then
 			local ch = vertical and TARGET_CAST_H or CAST_H
 			r.cast:SetWidth(vertical and TARGET_HP_W or fs)
@@ -2124,21 +2150,49 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 			local p = (now - c.start) / math.max(0.01, c.ends - c.start)
 			if p < 0 then p = 0 elseif p > 1 then p = 1 end
 			r.cast:SetValue(c.channel and (1 - p) or p)
-			if c.locked then r.cast:SetStatusBarColor(0.55, 0.55, 0.55) else r.cast:SetStatusBarColor(1, 0.6, 0) end
+			local hot = not c.locked and KickReady()
+			if c.locked then
+				r.cast:SetStatusBarColor(0.55, 0.55, 0.55)
+			elseif hot then
+				r.cast:SetStatusBarColor(1, 0.1 * pulse, 0.05)
+			else
+				r.cast:SetStatusBarColor(1, 0.6, 0)
+			end
+			r.cast:SetAlpha(hot and (0.5 + 0.5 * pulse) or 1)
 			if vertical then
 				r.cast.icon:SetTexture(c.icon)
-				r.cast.icon:SetWidth(ch)
-				r.cast.icon:SetHeight(ch)
+				r.cast.icon:SetWidth(TARGET_CAST_ICON)
+				r.cast.icon:SetHeight(TARGET_CAST_ICON)
 				r.cast.icon:Show()
+				r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
 				r.cast.text:SetText(c.name .. "  " .. string.format("%.1f", c.ends - now))
+				r.castOv:Hide()
+				r.alarm:Hide()
 			else
 				r.cast.icon:Hide()
 				r.cast.text:SetText("")
+				r.castOv:ClearAllPoints()
+				r.castOv:SetPoint("CENTER", face, "CENTER", 0, 0)
+				r.castOv:SetWidth(fs - 6)
+				r.castOv:SetHeight(fs - 6)
+				SetPortraitToTexture(r.castOv.tex, c.icon or UNKNOWN_FACE) -- круглый, как портрет
+				r.castOv.text:SetText(string.format("%.1f", math.max(0, c.ends - now)))
+				r.castOv:Show()
+				if c.locked then
+					r.alarm:Hide()
+				else
+					r.alarm:SetWidth(fs + 20)
+					r.alarm:SetHeight(fs + 20)
+					r.alarm:SetAlpha(hot and pulse or 0.45)
+					r.alarm:Show()
+				end
 			end
 			r.cast:Show()
 		else
 			e.cast = nil
 			r.cast:Hide()
+			r.castOv:Hide()
+			r.alarm:Hide()
 		end
 
 		for k, name in ipairs(names) do

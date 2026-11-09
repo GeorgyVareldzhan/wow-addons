@@ -9,7 +9,6 @@ local PROSPECT_SPELL = 31252 -- Prospecting
 local ORES = CP.ORES -- ore that can be prospected (Core.lua)
 local IS_ORE = {}
 for _, id in ipairs(ORES) do IS_ORE[id] = true end
-local LOOT_WAIT = 5 -- how many seconds after prospecting we wait for the loot window
 local SIZE = 32 -- bar icon size (UI/Bar.lua)
 
 -- Chances per prospect: Data/ProspectData.lua (Sirus knowledge base, Tools/sirusdb.py); skill needed to prospect
@@ -22,17 +21,16 @@ for ore, list in pairs(DATA) do
 end
 local PROSPECT_REQ = { [2770] = 20, [2771] = 50, [2772] = 125, [3858] = 175, [10620] = 250,
 	[23424] = 275, [23425] = 325, [36909] = 350, [36912] = 400, [36910] = 450 }
-local LOG_MIN, LOG_DIFF = 20, 5 -- own chance is used after LOG_MIN prospects if it differs by more than LOG_DIFF points
 
 local function Print(msg) DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffCraftPlan (просеивание):|r " .. msg) end
 
--- Log — CraftPlanDB.prospect: ore[ore] = { n = prospects, gems = { [gem] = { c = pieces, t = times dropped } } };
--- fail[ore] = skill at which the game refused (skill too low)
+-- CraftPlanDB.prospect: fail[ore] = skill at which the game refused (skill too low).
+-- (The own log of drops, prospect.ore, was removed in 2.1.4: chances come only from the Sirus knowledge base.)
 local function PDB()
 	local db = CP.DB()
 	local p = db.prospect or {}
 	db.prospect = p
-	p.ore = p.ore or {}
+	p.ore = nil
 	p.fail = p.fail or {}
 	return p
 end
@@ -66,7 +64,6 @@ function CP.Pct(v) return (math.floor(v * 10 + 0.5) / 10) .. "%" end
 CP.JewelRank = JewelRank
 function CP.ProspectReq(ore) return PROSPECT_REQ[ore] or 0 end
 function CP.ProspectData(ore) return DATA[ore] end
-function CP.ProspectLog(ore) local o = PDB().ore[ore]; return o and o.n > 0 and o or nil end
 -- Static index of DATA, built once: byGem[gem] = { { ore, pct, avg } }, gemList = every gem (shared — not changed
 -- by callers), baseTip[gem] = { { ore, pct } } — the first entry of each ore, in CP.ORES order (tooltips)
 local byGem, gemList, baseTip
@@ -77,7 +74,7 @@ local function Index()
 		for _, g in ipairs(list) do
 			local t = byGem[g[1]]
 			if not t then t = {}; byGem[g[1]] = t; gemList[#gemList + 1] = g[1] end
-			t[#t + 1] = { ore = ore, pct = g[2], avg = g[5] }
+			t[#t + 1] = { ore = ore, pct = g[2], avg = g[5], min = g[3], max = g[4] }
 		end
 	end
 	for _, ore in ipairs(ORES) do
@@ -99,12 +96,7 @@ function CP.ProspectOres(gem)
 	if not list then return nil end
 	local out = {}
 	for _, b in ipairs(list) do
-		local o = PDB().ore[b.ore]
-		local lg = o and o.gems[gem]
-		local own = (o and o.n >= LOG_MIN) and (lg and lg.t / o.n * 100 or 0) or nil
-		if own and math.abs(own - b.pct) <= LOG_DIFF then own = nil end
-		local avg = (own and lg and lg.t > 0) and (lg.c / lg.t) or b.avg
-		out[#out + 1] = { ore = b.ore, pct = b.pct, own = own, per = (own or b.pct) / 100 * avg, req = PROSPECT_REQ[b.ore] or 0 }
+		out[#out + 1] = { ore = b.ore, pct = b.pct, per = b.pct / 100 * b.avg, req = PROSPECT_REQ[b.ore] or 0, min = b.min, max = b.max }
 	end
 	return out
 end
@@ -122,6 +114,39 @@ function CP.ProspectTopOre(gem, onlyCan)
 	end
 	return best
 end
+-- Ore for `need` pieces of a gem with probability CONF (85%) (not on average): one prospect gives the gem with chance
+-- p, min..max pieces then (equally likely). Distribution of the pieces after n prospects, capped at need. Memoized
+local CONF = 0.85
+local needMemo = {}
+function CP.ProspectNeed(o, need)
+	if need <= 0 then return 0 end
+	local p = (o.pct or 0) / 100
+	if p <= 0 then return 0 end
+	local a, b = o.min or 1, o.max or o.min or 1
+	if b < a then b = a end
+	local key = p .. "|" .. a .. "|" .. b .. "|" .. need
+	local hit = needMemo[key]
+	if hit then return hit end
+	local w = p / (b - a + 1)
+	local d, n = { [0] = 1 }, 0
+	while n < 2000 and (d[need] or 0) < CONF do
+		n = n + 1
+		local nd = {}
+		for k = 0, need do
+			local v = d[k]
+			if v and v > 0 then
+				nd[k] = (nd[k] or 0) + v * (1 - p)
+				for x = a, b do
+					local j = math.min(need, k + x)
+					nd[j] = (nd[j] or 0) + v * w
+				end
+			end
+		end
+		d = nd
+	end
+	needMemo[key] = n * 5
+	return n * 5
+end
 -- which ore and how much closes the missing gems: each gem — its top ore; gems with the same ore share it
 -- (one prospect gives several gems). nodes: { id, short }. -> { { ore, need, can, gems = { node, ... } }, ... }
 function CP.ProspectPlan(nodes, onlyCan)
@@ -130,9 +155,10 @@ function CP.ProspectPlan(nodes, onlyCan)
 		local o = CP.ProspectTopOre(n.id, onlyCan)
 		if o then
 			local c = byOre[o.ore]
-			if not c then c = { ore = o.ore, need = 0, can = o.can, gems = {} }; byOre[o.ore] = c; out[#out + 1] = c end
+			if not c then c = { ore = o.ore, need = 0, avg = 0, can = o.can, gems = {} }; byOre[o.ore] = c; out[#out + 1] = c end
 			c.gems[#c.gems + 1] = n
-			c.need = math.max(c.need, math.ceil(n.short / o.per) * 5)
+			c.need = math.max(c.need, CP.ProspectNeed(o, n.short)) -- 85% for each gem
+			c.avg = math.max(c.avg, math.ceil(n.short / o.per) * 5) -- on average, for the tooltip
 		end
 	end
 	return out
@@ -151,27 +177,13 @@ local BLUE, GREY, WHITE = { 0.4, 0.8, 1 }, { 0.6, 0.6, 0.6 }, { 1, 1, 1 }
 local function Line(out, text, c, wrap) out[#out + 1] = { text = text, c = c, wrap = wrap } end
 local function Double(out, text, right) out[#out + 1] = { text = text, c = WHITE, right = right } end
 
+-- chances from the Sirus knowledge base
 local function OreTooltipLines(out, id)
-	local o = PDB().ore[id]
-	if not o or o.n == 0 then
-		-- no log yet: chances from the Sirus knowledge base
-		if DATA[id] then
-			Line(out, "Просеивание, шанс за раз:", BLUE)
-			for i, g in ipairs(DATA[id]) do
-				if i > 12 then Line(out, "  и ещё " .. (#DATA[id] - 12), GREY) break end
-				Double(out, "  " .. CP.ItemName(g[1]), CP.Pct(g[2]))
-			end
-		else
-			Line(out, "Просеивание: вы ещё не просеивали эту руду.", GREY, true)
-		end
-		return
-	end
-	local list = {}
-	for gem, g in pairs(o.gems) do list[#list + 1] = { gem, g.c / o.n } end
-	table.sort(list, function(a, b) return a[2] > b[2] end)
-	Line(out, "Просеивание (ваш журнал, " .. o.n .. " раз), в среднем за раз:", BLUE)
-	for i = 1, math.min(#list, 6) do
-		Double(out, "  " .. CP.ItemName(list[i][1]), string.format("%.2f", list[i][2]))
+	if not DATA[id] then return end
+	Line(out, "Просеивание, шанс за раз:", BLUE)
+	for i, g in ipairs(DATA[id]) do
+		if i > 12 then Line(out, "  и ещё " .. (#DATA[id] - 12), GREY) break end
+		Double(out, "  " .. CP.ItemName(g[1]), CP.Pct(g[2]))
 	end
 end
 
@@ -390,53 +402,17 @@ CP.ProspectUpdate = UpdateButton
 CP.OnChange(UpdateButton)
 
 ----------------------------------------------------------------------------------------------
--- Log: before prospecting remember ore counts, after — which ore decreased and what dropped
-local before, castAt = nil, 0
-local function OreCounts()
-	local t = {}
-	for _, id in ipairs(ORES) do t[id] = GetItemCount(id) end
-	return t
-end
-
 local events = CreateFrame("Frame")
-for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_REGEN_ENABLED", "LEARNED_SPELL_IN_TAB",
-	"UNIT_SPELLCAST_SENT", "UNIT_SPELLCAST_SUCCEEDED", "LOOT_OPENED", "UI_ERROR_MESSAGE", "PLAYER_REGEN_DISABLED" }) do
+for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_REGEN_ENABLED", "LEARNED_SPELL_IN_TAB", "UI_ERROR_MESSAGE", "PLAYER_REGEN_DISABLED" }) do
 	events:RegisterEvent(e)
 end
-local prospectName
 events:SetScript("OnEvent", function(_, event, arg1, arg2)
-	prospectName = prospectName or GetSpellInfo(PROSPECT_SPELL)
-	if event == "UNIT_SPELLCAST_SENT" then
-		if arg1 == "player" and arg2 == prospectName then before = OreCounts() end
-	elseif event == "UNIT_SPELLCAST_SUCCEEDED" then
-		if arg1 == "player" and arg2 == prospectName then castAt = GetTime() end
-	elseif event == "UI_ERROR_MESSAGE" then
+	if event == "UI_ERROR_MESSAGE" then
 		-- refusal containing "навык" right after a click: mark the ore as "skill too low" and skip it for now
 		if GetTime() - clickAt < 2 and clickOre and arg1 and arg1:find("навык") then
 			PDB().fail[clickOre] = JewelRank()
 			Print(CP.ItemName(clickOre) .. ": игра пишет, что навыка мало, — пока пропускаю её.")
 			UpdateButton()
-		end
-	elseif event == "LOOT_OPENED" then
-		if not before or GetTime() - castAt > LOOT_WAIT then return end
-		local now, ore = OreCounts(), nil
-		for id, n in pairs(before) do
-			if (now[id] or 0) <= n - 5 then ore = id break end
-		end
-		before = nil
-		if not ore then return end
-		local o = PDB().ore[ore] or { n = 0, gems = {} }
-		PDB().ore[ore] = o
-		o.n = o.n + 1
-		for i = 1, GetNumLootItems() do
-			local id = CP.ItemOfLink(GetLootSlotLink(i))
-			if id then
-				local _, _, qty = GetLootSlotInfo(i)
-				local g = o.gems[id] or { c = 0, t = 0 }
-				o.gems[id] = g
-				g.c = g.c + (qty or 1)
-				g.t = g.t + 1
-			end
 		end
 	elseif event == "PLAYER_REGEN_DISABLED" then
 		rowBtn:Hide()
@@ -456,7 +432,7 @@ CP.OnDrop(function() tipMemo = {} end)
 local function TipLines(id)
 	local out = {}
 	if IS_ORE[id] then
-		OreTooltipLines(out, id) -- log, or typical drops when there is no log yet
+		OreTooltipLines(out, id) -- typical drops (Sirus knowledge base)
 		return out
 	end
 	-- dropped by veins along with their ore (Data/VeinData.lua): the three likeliest veins
@@ -467,14 +443,6 @@ local function TipLines(id)
 		Line(out, "С жил: " .. table.concat(parts, ", "), BLUE, true)
 	end
 	local parts = {}
-	for ore, o in pairs(PDB().ore) do
-		local g = o.gems[id]
-		if g then parts[#parts + 1] = CP.ItemName(ore) .. " (" .. g.t .. " из " .. o.n .. ")" end
-	end
-	if #parts > 0 then
-		Line(out, "Просеиванием (ваш журнал): " .. table.concat(parts, ", "), BLUE, true)
-		return out
-	end
 	Index()
 	for _, b in ipairs(baseTip[id] or {}) do
 		parts[#parts + 1] = CP.ItemName(b.ore) .. " " .. CP.Pct(b.pct) .. " (навык " .. PROSPECT_REQ[b.ore] .. ")"

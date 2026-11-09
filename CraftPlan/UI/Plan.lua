@@ -70,6 +70,38 @@ end
 -- "Пересчитать" of a stack made by "План по руде": tooltip and action (stack tile icon and the table button)
 local function RecalcLines(st) return { "Стек из плана по руде «" .. CP.ItemName(st.orePlan.ore) .. "»: заново по текущим сумкам и навыку." } end
 local function Recalc(si) return function() CP.RecalcOreStack(si) end end
+
+-- spinning arrow on "Пересчитать" of a stack that no longer matches its ore plan: canvas icons with this
+-- texture get their texture coords rotated every frame; an icon reused for something else drops out
+local SPIN_TEX = "Interface\\AddOns\\CraftPlan\\spin"
+local spinning = setmetatable({}, { __mode = "k" })
+local spinFrame = CreateFrame("Frame")
+spinFrame:Hide()
+local spinAngle = 0
+spinFrame:SetScript("OnUpdate", function(self, e)
+	spinAngle = (spinAngle - e * 4.5) % (2 * math.pi) -- clockwise, about 1.4 s per turn
+	local c, s = math.cos(spinAngle), math.sin(spinAngle)
+	local any
+	for tex in pairs(spinning) do
+		local t = tex:GetTexture()
+		if t and t:lower():find("craftplan\\spin", 1, true) and tex:IsVisible() then
+			any = true
+			local function P(x, y) x, y = x - 0.5, y - 0.5; return 0.5 + x * c - y * s, 0.5 + x * s + y * c end
+			local ulx, uly = P(0, 0)
+			local llx, lly = P(0, 1)
+			local urx, ury = P(1, 0)
+			local lrx, lry = P(1, 1)
+			tex:SetTexCoord(ulx, uly, llx, lly, urx, ury, lrx, lry)
+		else
+			spinning[tex] = nil
+		end
+	end
+	if not any then self:Hide() end
+end)
+local function Spin(icon)
+	spinning[icon.tex] = true
+	spinFrame:Show()
+end
 local KHEX = CP.KIND_HEX
 
 local function KindOf(rec, rank)
@@ -87,8 +119,20 @@ local function DrawTiles(y, Wd, data)
 	local chip = math.floor((TW - 16 - 4 * 3) / 5)
 	-- tile contents first, to get a common height
 	local tiles = {}
-	for num, si in ipairs(data.order) do
-		local st, t = g.stacks[si], data.trees[si]
+	for _, si in ipairs(CP.StackOrder()) do
+		local st, t, num = g.stacks[si], data.trees[si], CP.StackNum(si)
+		if st.off or not t then
+			-- switched off: number, professions and their skill only; out of all calculations
+			local profs, seen = {}, {}
+			for _, x in ipairs(CP.Entries(st)) do
+				if not seen[x.prof] then
+					seen[x.prof] = true
+					local L = data.lines[x.prof]
+					profs[#profs + 1] = { name = x.prof, rank = L and L.rank or "?" }
+				end
+			end
+			tiles[#tiles + 1] = { si = si, num = num, st = st, off = true, profs = profs, raw = {}, h = 10 + 20 + #profs * 25 + 26 + 8 }
+		else
 		local profs, seen = {}, {}
 		for _, x in ipairs(t.ents) do
 			if not seen[x.prof] then
@@ -111,6 +155,7 @@ local function DrawTiles(y, Wd, data)
 		local h = 10 + 20 + #profs * 25 + 26 + math.ceil(nChips / 5) * (chip + 3) + 8
 		tiles[#tiles + 1] = { si = si, num = num, st = st, t = t, profs = profs, kinds = kinds, pieces = pieces, raw = raw, h = h,
 			empty = (#t.ents == 0 and not next(st.add)) }
+		end
 	end
 	local TH = 120
 	for _, tl in ipairs(tiles) do TH = math.max(TH, tl.h) end
@@ -122,9 +167,26 @@ local function DrawTiles(y, Wd, data)
 	end
 	for _, tl in ipairs(tiles) do
 		local x, ty = Pos()
+		if tl.off then
+			local a = 0.5
+			cv:Box(x, ty, TW, TH, { 0.07, 0.065, 0.06, a }, { 0.3, 0.27, 0.2, a }, 1)
+			cv:Text("Стек " .. tl.num, x + 8, ty - 8, "GameFontNormal", nil, nil, GOLD):SetAlpha(a)
+			if not editSi then
+				cv:Icon(W.TEX.no, x + TW - 26, ty - 6, 16, { level = 6, plain = true, title = "Стек выключен",
+					lines = { "Не участвует в расчётах и материалах.", "Щелчок - включить." }, action = function() CP.ToggleStackOff(tl.si) end })
+			end
+			local yy = ty - 28
+			for _, p in ipairs(tl.profs) do
+				cv:Icon(CP.PROF_ICON[p.name], x + 8, yy + 3, 22, { alpha = a, level = 3 })
+				cv:Text(p.name .. "  |cff9a8a66" .. p.rank .. "|r", x + 36, yy - 2, "GameFontHighlight", TW - 44):SetAlpha(a)
+				yy = yy - 25
+			end
+			cv:Text("Выключен", x + 36, yy - 2, "GameFontHighlight", TW - 44, nil, GREY)
+		else
 		local sel = CP.sel[tl.si]
 		local edit = (tl.si == editSi)
 		local dim = (editSi and not edit) and 0.6 or 1
+		local stale = not editSi and tl.st and tl.st.orePlan and CP.OreStackStale(tl.si)
 		local border = edit and { 1, 0.82, 0 } or (sel and { 0.79, 0.64, 0.15 } or { 0.24, 0.2, 0.15 })
 		cv:Box(x, ty, TW, TH, { sel and 0.13 or 0.09, sel and 0.11 or 0.08, 0.06, dim }, { border[1], border[2], border[3], dim }, (sel or edit) and 2 or 1)
 		cv:Area(x, ty, TW, TH, { level = 1, action = function()
@@ -134,11 +196,18 @@ local function DrawTiles(y, Wd, data)
 		end })
 		cv:Text("Стек " .. tl.num, x + 8, ty - 8, "GameFontNormal", nil, nil, GOLD):SetAlpha(dim)
 		if not editSi then
-			cv:Icon(W.TEX.pencil, x + TW - 26, ty - 6, 16, { level = 6, plain = true, title = "Редактировать стек", action = function() CP.BeginEdit(tl.si) end })
+			cv:Icon(W.TEX.ok, x + TW - 26, ty - 6, 16, { level = 6, plain = true, title = "Стек включён",
+				lines = { "Щелчок - выключить: стек останется, но не будет участвовать в расчётах и материалах." }, action = function() CP.ToggleStackOff(tl.si) end })
+			cv:Icon(W.TEX.pencil, x + TW - 48, ty - 6, 16, { level = 6, plain = true, title = "Редактировать стек", action = function() CP.BeginEdit(tl.si) end })
 			local st = tl.st
 			if st and st.orePlan then
-				cv:Icon(W.TEX.refresh, x + TW - 48, ty - 5, 18, { level = 6, plain = true, title = "Пересчитать",
-					lines = RecalcLines(st), action = Recalc(tl.si) })
+				if stale then
+					Spin(cv:Icon(SPIN_TEX, x + TW - 70, ty - 5, 18, { level = 6, plain = true, color = { 1, 0.55, 0.16 },
+						title = "План по руде изменился — пересчитать стек", lines = RecalcLines(st), action = Recalc(tl.si) }))
+				else
+					cv:Icon(W.TEX.refresh, x + TW - 70, ty - 5, 18, { level = 6, plain = true, title = "Пересчитать",
+						lines = RecalcLines(st), action = Recalc(tl.si) })
+				end
 			end
 		end
 		local yy = ty - 28
@@ -172,6 +241,7 @@ local function DrawTiles(y, Wd, data)
 			local cy = yy - (chip + 3)
 			cv:Rect(cx, cy, chip, chip, 0.18, 0.15, 0.1, dim)
 			cv:Text("+" .. (#tl.raw - 9), cx, cy - chip / 2 + 6, "GameFontHighlightSmall", chip, "CENTER", GREY)
+		end
 		end
 	end
 	-- "+ Создать стек"
@@ -336,6 +406,16 @@ local function DrawTable(y, Wd, M, data, list)
 			-- not learned and not at the trainer: say so (the trainer price is shown in "Все рецепты")
 			local li = not known and CP.LearnInfo(x.rec.sk, x.prof, x.rec.name)
 			if li and not li.at then extra = extra .. "  |cffff8060не у учителя|r" end
+			-- reachable but not learned: a badge on the icon, as in "Все рецепты" - book (learn now) or lock (skill too low)
+			if not known and not early and not (li and not li.at) then
+				local rank = L and L.rank or 0
+				if (x.req or 0) > rank then
+					cv:Icon(W.TEX.lock, 40, y - 14, 14, { level = 6, gray = true, color = { 1, 0.15, 0.15 }, title = "Учится с " .. x.req .. ", у вас " .. rank })
+				else
+					local cost = li and li.cost and li.cost > 0 and CP.Money(li.cost)
+					cv:Icon(W.TEX.book, 40, y - 14, 14, { level = 6, title = "Выучить у учителя", lines = cost and { cost } or nil })
+				end
+			end
 			cv:Text(KHEX[kind] .. x.rec.name .. "|r" .. extra, 60, y - 8, "GameFontNormal", math.max(60, C.need - 110))
 			if isEdit then
 				local e = x.e
@@ -350,21 +430,41 @@ local function DrawTable(y, Wd, M, data, list)
 			end
 			y = y - h
 		end
+		-- recipes grouped by profession: professions in the order of their first craft, inside - crafting order;
+		-- stock is handed out in this row order
+		local recs, profIdx, nProf = {}, {}, 0
 		for _, si in ipairs(data.order) do
-			local draw = chosen[si]
-			local st = g.stacks[si]
 			for _, x in ipairs(data.trees[si].ents) do
-				if draw then Rec(x, st) end
-				local branch = draw and not Collapsed(st, x.rec.name)
-				-- the same material in a recipe — a single row
-				local sum, ord = {}, {}
-				for _, rg in ipairs(x.rec.reag) do
-					if not sum[rg.id] then sum[rg.id] = 0; ord[#ord + 1] = rg.id end
-					sum[rg.id] = sum[rg.id] + rg.count * x.e.n
-				end
-				for _, id in ipairs(ord) do Need(id, sum[id], 1, {}, x.rec.name, branch) end
+				if not profIdx[x.prof] then nProf = nProf + 1; profIdx[x.prof] = nProf end
+				recs[#recs + 1] = { si = si, x = x, i = #recs + 1 }
 			end
-			-- manual additions also reserve stock (as in the calculation); their rows go to "Разное"
+		end
+		table.sort(recs, function(a, b)
+			local pa, pb = profIdx[a.x.prof], profIdx[b.x.prof]
+			if pa ~= pb then return pa < pb end
+			return a.i < b.i
+		end)
+		local lastProf
+		for _, q in ipairs(recs) do
+			local x, draw = q.x, chosen[q.si]
+			local st = g.stacks[q.si]
+			if draw and x.prof ~= lastProf then
+				lastProf = x.prof
+				Head(CP.ProfText(x.prof))
+			end
+			if draw then Rec(x, st) end
+			local branch = draw and not Collapsed(st, x.rec.name)
+			-- the same material in a recipe — a single row
+			local sum, ord = {}, {}
+			for _, rg in ipairs(x.rec.reag) do
+				if not sum[rg.id] then sum[rg.id] = 0; ord[#ord + 1] = rg.id end
+				sum[rg.id] = sum[rg.id] + rg.count * x.e.n
+			end
+			for _, id in ipairs(ord) do Need(id, sum[id], 1, {}, x.rec.name, branch) end
+		end
+		-- manual additions also reserve stock (as in the calculation); their rows go to "Разное"
+		for _, si in ipairs(data.order) do
+			local st = g.stacks[si]
 			for id, n in pairs(st and st.add or {}) do
 				if n > 0 then Need(id, n, 1, {}, "добавлено вручную", false) end
 			end
@@ -517,7 +617,7 @@ local function DrawProspect(y, Wd, data, list)
 	for _, si in ipairs(JewelStacks(data, list)) do
 		local t = data.trees[si]
 		cv:Text("Стек " .. CP.StackNum(si), 10, y, "GameFontNormal", nil, nil, HEAD)
-		for _, c in ipairs({ { C.need, "Шанс" }, { C.have, "Даст" }, { C.make, "Есть" }, { C.short, "Нужно руды" } }) do
+		for _, c in ipairs({ { C.need, "Шанс" }, { C.have, "Даст" }, { C.make, "Есть" }, { C.short, "Просеять, раз" } }) do
 			cv:Text(c[2], c[1] - 45, y - 2, "GameFontDisableSmall", 90, "CENTER")
 		end
 		y = y - 18
@@ -546,14 +646,13 @@ local function DrawProspect(y, Wd, data, list)
 				local have = CP.Have(ore)
 				local lines = {}
 				if not can then lines[#lines + 1] = "|cffff6060Просеивание с " .. o.req .. ", у вас " .. rank .. "|r" end
-				if o.own then lines[#lines + 1] = "|cff66ccffВаш шанс: " .. CP.Pct(o.own) .. "|r (база " .. CP.Pct(o.pct) .. ")" end
 				local nameFs = cv:Text(CP.ItemName(ore), 58, y - 4, "GameFontHighlightSmall", nil, nil, can and { 0.91, 0.89, 0.83 } or { 1, 0.38, 0.38 })
 				local bx = 58 + nameFs:GetStringWidth() + 6 - 10
 				local area
 				area = cv:Area(10, y + 2, Wd - 20, 22, { hl = true, level = 5, link = "item:" .. ore, lines = lines[1] and lines or nil, prOre = ore,
 					hover = function(on) if on and area then CP.ProspectHover(area, ore, bx) end end })
 				cv:Icon(CP.ItemIcon(ore), 36, y, 18, { level = 2 })
-				Num(CP.Pct(o.own or o.pct), C.need, y - 4, o.own and { 0.4, 0.8, 1 } or { 0.78, 0.72, 0.56 })
+				Num(CP.Pct(o.pct), C.need, y - 4, { 0.78, 0.72, 0.56 })
 				if have >= 5 then
 					-- "~" in this font sits above the digits: draw it apart, a bit lower
 					local gives = cv:Text(tostring(math.floor(math.floor(have / 5) * o.per)), C.have - 45, y - 4, "GameFontHighlightSmall", 90, "CENTER", { 0.25, 0.85, 0.25 })
@@ -562,7 +661,7 @@ local function DrawProspect(y, Wd, data, list)
 					Num("-", C.have, y - 4, { 0.25, 0.85, 0.25 })
 				end
 				Num(have > 0 and have or "-", C.make, y - 4, have >= 5 and { 0.91, 0.89, 0.83 } or DIM)
-				Num(math.ceil(n.short / o.per) * 5, C.short, y - 4, GOLD)
+				Num(CP.ProspectNeed(o, n.short) / 5, C.short, y - 4, GOLD) -- prospects, 85% for this gem
 				y = y - 22
 			end
 			y = y - 4
@@ -576,7 +675,11 @@ local function DrawProspect(y, Wd, data, list)
 			local x = 14 + fs:GetStringWidth() + 6
 			cv:Icon(CP.ItemIcon(best.ore), x, y, 18, { link = "item:" .. best.ore })
 			x = x + 22
-			fs = cv:Text(CP.ItemName(best.ore) .. "  |cffffd100" .. best.need .. "|r  " .. (have >= best.need and "|cff40ff40" or "|cffff6060") .. "есть " .. have .. "|r  |cff9a9a9a- " .. table.concat(names, ", ") .. "|r",
+			-- ore over what the crafts of all stacks need (bars etc.): can be prospected without hurting them
+			local ac = CP.MergedAll().nodes[best.ore]
+			local now = math.floor(math.max(0, have - (ac and ac.gross or 0)) / 5)
+			local times = best.need / 5
+			fs = cv:Text(CP.ItemName(best.ore) .. "  просеять |cffffd100" .. times .. " раз|r  " .. (now >= times and "|cff40ff40" or "|cffff6060") .. "можно сейчас " .. now .. "|r  |cff9a9a9a- " .. table.concat(names, ", ") .. "|r",
 				x, y - 4, "GameFontHighlightSmall", Wd - x - 20, nil, best.can and { 0.91, 0.89, 0.83 } or { 1, 0.38, 0.38 })
 			y = y - math.max(22, fs:GetStringHeight() + 8)
 		end

@@ -89,19 +89,25 @@ local function Reminders()
 		local L = lines[prof]
 		if L and L.max > 0 and L.max < 450 and L.rank >= L.max - 25 then E(prof).up = L.max + 75 end
 	end
-	-- stack recipes learned at the trainer, not learned yet, skill enough (known only for scanned professions)
+	-- stack recipes and the intermediates their trees craft (smelting, settings...) learned at the trainer,
+	-- not learned yet, skill enough (known only for scanned professions)
 	local seen = {}
+	local function Check(prof, name)
+		local sk, L = CP.SKILL_ID[prof], lines[prof]
+		local t = sk and db.learn and db.learn[sk] and db.learn[sk][name]
+		if t and L and not t.used and not seen[prof .. "|" .. name] and db.profs[prof] and not CP.KnownRecipe(prof, name)
+			and (t.req or 0) <= L.rank then
+			seen[prof .. "|" .. name] = true
+			local e = E(prof)
+			e.recs[#e.recs + 1] = name
+		end
+	end
 	for _, si in ipairs(data.order) do
-		for _, x in ipairs(data.trees[si].ents) do
-			local prof, name = x.prof, x.rec.name
-			local sk, L = CP.SKILL_ID[prof], lines[prof]
-			local t = sk and db.learn and db.learn[sk] and db.learn[sk][name]
-			if t and L and not t.used and not seen[prof .. "|" .. name] and db.profs[prof] and not CP.KnownRecipe(prof, name)
-				and (t.req or 0) <= L.rank then
-				seen[prof .. "|" .. name] = true
-				local e = E(prof)
-				e.recs[#e.recs + 1] = name
-			end
+		local t = data.trees[si]
+		for _, x in ipairs(t.ents) do Check(x.prof, x.rec.name) end
+		for _, id in ipairs(t.ord) do
+			local n = t.nodes[id]
+			if n.made > 0 and n.prod then Check(n.prod.prof, n.prod.rec.name) end
 		end
 	end
 	table.sort(profs)
@@ -277,10 +283,13 @@ function CP.RefreshBar()
 					local names = {}
 					for _, n in ipairs(c.gems) do names[#names + 1] = CP.ItemName(n.id); skip[n.id] = true end
 					skip[ore] = true
-					local lines = { "Есть " .. have .. " из " .. need .. ".", "Просеять " .. c.need .. ": " .. table.concat(names, ", ") }
+					local lines = { "Есть " .. have .. " из " .. need .. ".", "Просеять " .. c.need / 5 .. " раз (в среднем " .. c.avg / 5 .. "): " .. table.concat(names, ", ") }
 					local veins = CP.VeinsFor and CP.VeinsFor(ore, need - have)
 					if veins then lines[#lines + 1] = "Жил обойти: около " .. veins end
 					if craft > 0 then lines[#lines + 1] = "На крафт: " .. craft end
+					-- ore over what the crafts of all stacks need (bars etc.): can be prospected without hurting them
+					local spare = math.max(0, have - craft)
+					lines[#lines + 1] = "Можно сейчас: " .. math.floor(spare / 5) .. " раз"
 					lines[#lines + 1] = "Правый щелчок — метки на карте."
 					list[#list + 1] = { tex = CP.ItemIcon(ore), count = veins or "", pct = math.min(1, have / math.max(1, need)),
 						border = have >= need and GREEN or RED, link = "item:" .. ore, lines = lines, where = ore }

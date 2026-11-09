@@ -92,6 +92,7 @@ local function recyclePin(pin)
 	pin.worldmap = false
 	pin.nodeID = 0
 	pin.keep = nil
+	pin.hv, pin.hiddenNode, pin.locked = nil, nil, nil -- patched: cached Hide.lua state and skill lock
 	pinCache[pin] = true
 end
 --[[
@@ -495,6 +496,7 @@ function Display:getMiniPin(coord, nodeID, nodeType, zone, index)
 		pin:EnableMouse(db.minimapTooltips)
 		pin.isCircle = false
 		applyNodeTexture(pin.texture, nodeType, nodeID) -- patched
+		pin.locked = nodeLocked(nodeType, nodeID) -- patched: pins are rebuilt when the skill changes
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin.x, pin.y = GatherMate:getXY(coord)
 		pin.x1, pin.y1 = GatherMate:PointToYards(pin.x,pin.y,zone)
@@ -567,14 +569,20 @@ function Display:addMiniPin(pin, refresh)
 		end
 	end
 	-- finally show and SetPoint the pin
-	if dist_2 <= 30*30 or (GatherMate.IsNodeHidden and GatherMate:IsNodeHidden(pin.nodeType, pin.zone, pin.coords)) then -- patched (+Hide.lua): ближе 30 ярдов значок прячется, остаётся жёлтая точка «Поиска минералов»
+	-- patched: Hide.lua state is re-asked only when it changed (hideVersion), not every frame
+	local hv = GatherMate.hideVersion
+	if hv and pin.hv ~= hv then
+		pin.hv = hv
+		pin.hiddenNode = GatherMate:IsNodeHidden(pin.nodeType, pin.zone, pin.coords)
+	end
+	if (dist_2 <= 30*30 and pin.nodeType == "Mining") or pin.hiddenNode then -- patched (+Hide.lua): руда ближе 30 ярдов прячется, остаётся жёлтая точка «Поиска минералов»; травы и прочее — нет
 		pin:Hide()
 	elseif db.nodeRange or alpha >= 1 then
 		pin:Show()
 		pin:ClearAllPoints()
 		pin:SetPoint("CENTER", Minimap, "CENTER", diffX * minimapWidth, -diffY * minimapHeight)
 		-- patched: вдали 0.4 (красные кольца 0.8), ближе к 30 ярдам плавно до 1 (orig: alpha)
-		local base = nodeLocked(pin.nodeType, pin.nodeID) and 0.8 or 0.4
+		local base = pin.locked and 0.8 or 0.4
 		local k = (mapRadius - dist_2^0.5) / max(mapRadius - 30, 1)
 		if k < 0 then k = 0 elseif k > 1 then k = 1 end
 		pin:SetAlpha(alpha * (base + (1 - base) * k))

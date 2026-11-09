@@ -5,7 +5,7 @@ local NL = LibStub("AceLocale-3.0"):GetLocale("GatherMateNodes")   -- for get th
 local Display = nil
 -- prevSpell, curSpell are markers for what has been cast now and the lastcast
 -- gatherevents if a flag for wether we are listening to events
-local prevSpell, curSpell, foundTarget, gatherEvents, ga
+local prevSpell, curSpell, foundTarget, gatherEvents, ga, gam, Obj -- patched: gam, Obj were globals
 
 --[[
 Convert for 2.4 spell IDs
@@ -38,6 +38,7 @@ local spells = { -- spellname to "database name"
 	[pickSpell] = "Treasure",
 }
 local tooltipLeftText1 = _G["GameTooltipTextLeft1"]
+local SAME_SPOT = 10 -- patched: yards; mining nodes closer than this are one spawn point
 local strfind, stringmatch = string.find, string.match
 local pii = math.pi
 local sin = math.sin
@@ -113,7 +114,7 @@ function Collector:ZoneChange()
 	local inInstance, instanceType = IsInInstance()
 	if inInstance and gatherEvents then
 		self:UnregisterGatherEvents()
-	elseif not gatherEvents then
+	elseif not inInstance and not gatherEvents then -- patched: was registering when logging in inside an instance
 		self:RegisterGatherEvents()
 	end
 end
@@ -261,6 +262,7 @@ function Collector:addItem(skill,what)
 	if GetMapInfo() == "ScarletEnclave" then return end
 	--self:GatherCompleted()
 	local zone = GatherMate:ResolveZone(GetRealZoneText()) -- patched (было: GetRealZoneText())
+	if not zone or not rawget(GatherMate.zoneData, zone) then return end -- patched: unknown zone would be stored as zone 0
 	local node_type = spells[skill]
 	if not node_type or not what then return end
 	-- db lock check
@@ -299,6 +301,13 @@ function Collector:addItem(skill,what)
 		elseif specialNode then -- handle special case zone mappings
 			skip = false
 			GatherMate:RemoveNodeByID(zone, node_type, coord)
+		-- patched: one spawn point rotates vein types (copper/tin, fel iron/adamantite...),
+		-- so another vein this close is the same point - keep only the last one mined
+		elseif node_type == "Mining" then
+			local nx, ny = GatherMate:getXY(coord)
+			if GatherMate:NodeDistanceSquared(x, y, nx, ny, zone) <= SAME_SPOT * SAME_SPOT then
+				GatherMate:RemoveNodeByID(zone, node_type, coord)
+			end
 		end
 	end
 	if not skip then

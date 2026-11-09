@@ -16,6 +16,11 @@ local hidden               -- SV: key -> unix time when the node shows again
 
 local function Key(zone, coord) return zone .. "|" .. coord end
 
+-- bumped on every change of what IsNodeHidden returns: Display re-asks a pin only when it changed,
+-- not every frame
+GatherMate.hideVersion = 0
+local function Bump() GatherMate.hideVersion = GatherMate.hideVersion + 1 end
+
 function GatherMate:IsNodeHidden(nodeType, zone, coord)
 	if nodeType ~= TYPE or not hidden then return false end
 	local k = Key(zone, coord)
@@ -51,6 +56,7 @@ end
 local function Hide(w)
 	hidden[Key(w.zone, w.coord)] = time() + Respawn(w.id, w.zone, w.coord)
 	watch[Key(w.zone, w.coord)] = nil
+	Bump()
 	Refresh()
 end
 
@@ -62,15 +68,17 @@ local function Here()
 	return zone, x, y
 end
 
--- nearest watched node to the player (the one being mined or hovered)
-local function Nearest(radius)
+-- nearest watched node to the player (the one being mined or hovered); onlyID - only nodes of this vein
+local function Nearest(radius, onlyID)
 	local zone, x, y = Here()
 	if not zone then return end
 	local best, bestID, bd
 	for coord, id in GatherMate:FindNearbyNode(zone, x, y, TYPE, radius, true) do
-		local nx, ny = GatherMate:getXY(coord)
-		local d = GatherMate:NodeDistanceSquared(x, y, nx, ny, zone)
-		if not bd or d < bd then best, bestID, bd = coord, id, d end
+		if not onlyID or id == onlyID then
+			local nx, ny = GatherMate:getXY(coord)
+			local d = GatherMate:NodeDistanceSquared(x, y, nx, ny, zone)
+			if not bd or d < bd then best, bestID, bd = coord, id, d end
+		end
 	end
 	if not best then return end
 	local k = Key(zone, best)
@@ -78,17 +86,18 @@ local function Nearest(radius)
 	if not w then
 		w = { zone = zone, coord = best, id = bestID, t = GetTime() }
 		watch[k] = w
+		Bump()
 	end
 	return w
 end
 
--- the vein is there: keep it shown, even if it was hidden
-local function Present()
-	local w = Nearest(NEAR + 5)
+-- the vein is there: keep it shown, even if it was hidden. id - the hovered vein: only a node of that vein
+local function Present(id)
+	local w = Nearest(NEAR + 5, id)
 	if not w then return end
-	w.present = true
+	if not w.present then w.present = true; Bump() end
 	local k = Key(w.zone, w.coord)
-	if hidden[k] then hidden[k] = nil; Refresh() end
+	if hidden[k] then hidden[k] = nil; Bump(); Refresh() end
 end
 
 local function Tick()
@@ -97,25 +106,65 @@ local function Tick()
 	for k, t in pairs(hidden) do
 		if t <= now then hidden[k] = nil; expired = true end
 	end
-	if expired then Refresh() end
+	if expired then Bump(); Refresh() end
 
 	local zone, x, y = Here()
 	if not zone then return end
+	-- on a taxi or as a ghost the vein is only passed by: don't start watching it
+	-- (on your own mount, flying too, it is watched: you fly up, see no ore, fly away)
+	local passing = UnitOnTaxi("player") or UnitIsDeadOrGhost("player")
 	local near = {}
 	for coord, id in GatherMate:FindNearbyNode(zone, x, y, TYPE, NEAR, true) do
 		local k = Key(zone, coord)
 		if not hidden[k] then
 			near[k] = true
-			if not watch[k] then
+			if not watch[k] and not passing then
 				watch[k] = { zone = zone, coord = coord, id = id, t = GetTime() }
+				Bump()
 			end
 		end
 	end
 	for k, w in pairs(watch) do
 		if not near[k] then
-			if w.present and not w.gathered then watch[k] = nil else Hide(w) end
+			if w.present and not w.gathered then watch[k] = nil; Bump() else Hide(w) end
 		end
 	end
+end
+
+-- one-time cleanup: mining nodes 10 yards or closer to each other are one
+-- spawn point (copper/tin, fel iron/adamantite...), keep one of them
+local DEDUP = 10
+local function DedupOnce()
+	local g = GatherMate.db.global
+	if g.dedupMining10 then return end
+	local mine = GatherMate.gmdbs[TYPE]
+	local done, removed = {}, 0
+	for _, z in pairs(GatherMate.zoneData) do
+		local id, w, h = z[3], z[1], z[2]
+		local nodes = id and mine[id]
+		if nodes and not done[id] and w > 0 and h > 0 then
+			done[id] = true
+			local kept, drop = {}, {}
+			for coord in pairs(nodes) do
+				local x, y = GatherMate:getXY(coord)
+				x, y = x * w, y * h
+				local dup = false
+				for i = 1, #kept, 2 do
+					local dx, dy = kept[i] - x, kept[i + 1] - y
+					if dx * dx + dy * dy <= DEDUP * DEDUP then dup = true; break end
+				end
+				if dup then
+					drop[#drop + 1] = coord
+				else
+					kept[#kept + 1] = x; kept[#kept + 1] = y
+				end
+			end
+			for i = 1, #drop do nodes[drop[i]] = nil end
+			removed = removed + #drop
+		end
+	end
+	g.dedupMining10 = true
+	DEFAULT_CHAT_FRAME:AddMessage("|cffffcc00GatherMate:|r убрано дублей руды: " .. removed)
 end
 
 local f = CreateFrame("Frame")
@@ -133,13 +182,15 @@ f:SetScript("OnEvent", function(_, ev, a1, a2)
 	if ev == "PLAYER_LOGIN" then
 		GatherMate.db.char.hiddenNodes = GatherMate.db.char.hiddenNodes or {}
 		hidden = GatherMate.db.char.hiddenNodes
+		DedupOnce()
+		Bump()
 		Refresh()
 	elseif not hidden then
 		return
 	elseif ev == "UNIT_SPELLCAST_SUCCEEDED" then
 		if a1 == "player" and a2 == miningSpell then
 			local w = Nearest(NEAR + 5)
-			if w then w.gathered = true end
+			if w and not w.gathered then w.gathered = true; Bump() end
 		end
 	elseif ev == "UI_ERROR_MESSAGE" then
 		if a1 and miningSpell and a1:find(miningSpell, 1, true) then
@@ -152,9 +203,8 @@ end)
 GameTooltip:HookScript("OnShow", function(self)
 	if not hidden or self:GetUnit() or MouseIsOver(MinimapCluster) then return end
 	local text = tipText:GetText()
-	if text and GatherMate:GetIDForNode(TYPE, text) then
-		Present()
-	end
+	local id = text and GatherMate:GetIDForNode(TYPE, text)
+	if id then Present(id) end
 end)
 
 -- /gmh: what the hider sees right now

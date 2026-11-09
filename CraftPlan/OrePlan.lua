@@ -264,6 +264,40 @@ local function OrePlan(O, off, useStock, toNext)
 		for _, g in ipairs(best.rec.reag) do Take(g.id, g.count, 0) end
 		Craft(best, false, true)
 	end
+	-- recipes for the leftovers that only lack OTHER materials (e.g. Точило стихий: dense stone + elemental earth):
+	-- how many crafts the leftovers allow while they still give skill, and what is missing for them
+	local blocked = {}
+	for _, c in ipairs(Candidates(lines)) do
+		if lines[c.prof] and not off[c.prof] and Usable(c) then
+			local n, ext = math.huge, false
+			for _, g in ipairs(c.rec.reag) do
+				if byprod[g.id] then n = math.min(n, math.floor(Free(g.id) / g.count + 1e-9))
+				elseif ok[g.id] then n = 0 break -- needs the ore or what is made of it: not a leftover recipe
+				else ext = true end
+			end
+			if ext and n ~= math.huge and n >= 1 then
+				local save, k = rank[c.prof], 0
+				while k < n and ChToGrey(c) > 0 do
+					rank[c.prof] = math.min(lines[c.prof].max, rank[c.prof] + Ch(c))
+					k = k + 1
+				end
+				local gain = rank[c.prof] - save
+				rank[c.prof] = save
+				if k >= 1 then
+					local miss = {}
+					for _, g in ipairs(c.rec.reag) do
+						if not byprod[g.id] then
+							local have = pool[g.id] ~= nil and pool[g.id] or Stock(g.id)
+							local m = g.count * k - math.floor(have + 1e-9)
+							if m > 0 then miss[#miss + 1] = { id = g.id, n = m } end
+						end
+					end
+					if miss[1] then blocked[#blocked + 1] = { c = c, n = k, gain = gain, miss = miss } end
+				end
+			end
+		end
+	end
+	table.sort(blocked, function(a, b) return a.gain > b.gain end)
 	-- per recipe: by profession, in the order of the first craft; skill from the first to the last craft
 	-- (the green part of the leftover gems is a separate line)
 	local steps, byC = {}, {}
@@ -295,7 +329,7 @@ local function OrePlan(O, off, useStock, toNext)
 	return { ore = O, steps = steps, anyUsable = anyUsable, start = start, rank = rank, profs = profs, learn = learn, left = left,
 		mined = mined, used = Stock(O) - (pool[O] or 0) + mined, have = Stock(O), prospects = prospects, smelt = smelt,
 		veins = vein and mined > 0 and math.ceil(mined / vein.per - 1e-9) or nil,
-		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre }
+		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre, blocked = blocked }
 end
 
 -- cached until the next change (dropped before any redraw)
@@ -321,10 +355,10 @@ function CP.HasOrePlanTab()
 end
 
 -- recipes of a plan as stack entries (intermediates are left to the material tree)
-local function PlanList(P)
+local function PlanList(P, sk)
 	local list, idx = {}, {}
 	for _, s in ipairs(P.steps) do
-		if not s.mid then
+		if not s.mid and (not sk or s.c.sk == sk) then
 			local k = s.c.sk .. "|" .. s.c.rec.name
 			if idx[k] then idx[k].n = idx[k].n + s.n
 			else idx[k] = { sk = s.c.sk, name = s.c.rec.name, n = s.n }; list[#list + 1] = idx[k] end
@@ -340,7 +374,7 @@ function CP.RecalcOreStack(si)
 	if not info or g.edit then return end
 	local off = {} -- every profession except the stack's ones (a profession learned later does not get in)
 	for p in pairs(CP.SkillLines()) do if not (info.only or {})[p] then off[p] = true end end
-	local list = PlanList(OrePlan(info.ore, off, info.stock, info.toNext))
+	local list = PlanList(OrePlan(info.ore, off, info.stock, info.toNext), info.prof and CP.SKILL_ID[info.prof])
 	if not list[1] then
 		CP.Print("с руды «" .. CP.ItemName(info.ore) .. "» навыка больше не получить — стек оставлен как есть.")
 		return
@@ -350,19 +384,58 @@ function CP.RecalcOreStack(si)
 	CP.Print("стек пересчитан по плану руды «" .. CP.ItemName(info.ore) .. "».")
 end
 
+-- a stack made by the plan no longer matches the plan for the current bags and skill (recipes or counts differ);
+-- the tile then highlights "Пересчитать". Memoized until CP.DropCache
+local staleMemo = {}
+CP.OnDrop(function() staleMemo = {} end)
+function CP.OreStackStale(si)
+	local hit = staleMemo[si]
+	if hit ~= nil then return hit end
+	local g = CP.Goal()
+	local st = g.stacks[si]
+	local info = st and st.orePlan
+	local stale = false
+	if info and not g.edit then
+		local off = {}
+		for p in pairs(CP.SkillLines()) do if not (info.only or {})[p] then off[p] = true end end
+		local list = PlanList(OrePlan(info.ore, off, info.stock, info.toNext), info.prof and CP.SKILL_ID[info.prof])
+		if list[1] then
+			local want, cur = {}, {}
+			for _, e in ipairs(list) do want[e.sk .. "|" .. e.name] = e.n end
+			for _, e in ipairs(st.list) do
+				if e.n > 0 then local k = e.sk .. "|" .. e.name; cur[k] = (cur[k] or 0) + e.n end
+			end
+			for k, n in pairs(want) do if cur[k] ~= n then stale = true break end end
+			if not stale then for k in pairs(cur) do if not want[k] then stale = true break end end end
+		end
+	end
+	staleMemo[si] = stale
+	return stale
+end
+
 -- one stack with the plan's recipes (intermediates are left to the material tree)
 function CP.OrePlanToStack(P)
 	local g = CP.Goal()
 	if g.edit then CP.Print("сначала сохраните или отмените правку стека.") return end
-	local list = PlanList(P)
-	if not list[1] then return end
-	-- remembered: the ore, the professions of the plan (only those ticked) and the stock setting —
-	-- "Пересчитать" rebuilds the stack for the same professions from the current bags and skill
-	local only = {}
-	for _, s in ipairs(P.steps) do if not s.mid then only[s.c.prof] = true end end
-	g.stacks[#g.stacks + 1] = { list = list, add = {}, time = time(), orePlan = { ore = P.ore, only = only, stock = CP.orePlanStock ~= false, toNext = CP.orePlanNext == true } }
-	CP.sel = { [#g.stacks] = true }
+	if not PlanList(P)[1] then return end
+	-- one stack per profession. Each remembers the ore, all professions of the plan (only those ticked), its own
+	-- profession and the stock setting: "Пересчитать" rebuilds the same joint plan from the current bags and skill
+	-- and takes this profession's part of it
+	local only, profs = {}, {}
+	for _, s in ipairs(P.steps) do
+		if not s.mid and not only[s.c.prof] then only[s.c.prof] = true; profs[#profs + 1] = s.c.prof end
+	end
+	table.sort(profs)
+	CP.sel = {}
+	for _, prof in ipairs(profs) do
+		local list = PlanList(P, CP.SKILL_ID[prof])
+		if list[1] then
+			g.stacks[#g.stacks + 1] = { list = list, add = {}, time = time(),
+				orePlan = { ore = P.ore, only = CopyTable(only), prof = prof, stock = CP.orePlanStock ~= false, toNext = CP.orePlanNext == true } }
+			CP.sel[#g.stacks] = true
+		end
+	end
 	CP.sub = "mat"
 	CP.Changed()
-	CP.Print("стек из плана по руде: " .. CP.ItemName(P.ore) .. ".")
+	CP.Print("стеки из плана по руде: " .. CP.ItemName(P.ore) .. " (" .. table.concat(profs, ", ") .. ").")
 end
