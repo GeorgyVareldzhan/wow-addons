@@ -328,7 +328,7 @@ end
 -- Skill bar 0–450: filled up to the skill (dark→light green gradient), a light segment for the gain,
 -- black after the learned max, a gold tick at the max. Above: skill, total, max — each at its point, in a row
 -- without overlapping (max is not repeated when the skill or the total is on it; total at max colors the max).
--- Below, from the skill point: gain parts in their colors — orange exact, yellow and green expected.
+-- Below, from the skill point: gain parts in their colors — orange exact, yellow and green with a 85% margin.
 -- q = { o, y, g, ym, gm } (CP.RoundGain rounds it); tip = { title, lines } — tooltip over the bar (optional)
 function Canvas:SkillBar(x, y, w, rank, max, q, tip)
 	local TOP = CP.TOP_SKILL

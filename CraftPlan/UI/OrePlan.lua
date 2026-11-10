@@ -11,7 +11,8 @@ local LABEL, HEAD, NAME, RED = { 0.91, 0.85, 0.66 }, { 0.78, 0.72, 0.56 }, { 0.9
 local SEL_BG, SEL_BORDER = { 0.23, 0.18, 0.07 }, { 0.79, 0.64, 0.15 }
 local COL_MID, COL_GREEN, COL_ORANGE, COL_YELLOW, COL_LEARN = { 0.6, 0.6, 0.6 }, { 0.25, 0.75, 0.25 }, { 1, 0.5, 0.25 }, { 1, 1, 0 }, { 0.4, 0.8, 1 }
 local CHECK_UP, CHECK_ON = "Interface\\Buttons\\UI-CheckBox-Up", "Interface\\Buttons\\UI-CheckBox-Check"
-local TIP_STOCK = { "С галкой — в дело идёт всё из сумок, банка и хранилища, в том числе другие материалы рецептов. Без — чисто руда." }
+local TIP_STOCK = { "С галкой — в дело идёт всё из сумок, банка и хранилища, в том числе другие материалы рецептов, и учитываются другие стеки: их материалы не трогаются, их руда добывается вместе с планом. Без — чисто руда." }
+local TIP_ORE = { "Всё с запасом 85%: навык жёлтых и зелёных созданий, камни просеивания, руда и камни из жил." }
 local TIP_NEXT = { "Качать только до навыка, с которого следующая руда даёт оранжевые рецепты." }
 
 local function Check(cv, x, y, on, label, color, action, tip)
@@ -110,6 +111,11 @@ local function DrawTotals(cv, P, X, y, RW, useStock)
 		x = x + cv:Text("~", x, y - 3, "GameFontHighlight"):GetStringWidth()
 		cv:Text(rest, x, y, "GameFontHighlight")
 	end
+	local tip = TIP_ORE
+	if (P.stackUse or 0) > 0 then
+		tip = { TIP_ORE[1], "На другие стеки: " .. P.stackUse .. " руды, из них добыть " .. P.stackOre .. "." }
+	end
+	cv:Area(X, y + 2, RW, 18, { lines = tip })
 end
 
 -- the plan's crafts, by profession

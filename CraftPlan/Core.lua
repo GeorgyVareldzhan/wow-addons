@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.4"
+CP.VERSION = "2.1.12"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
@@ -53,6 +53,33 @@ CP.PROF_ICON = {
 }
 
 CP.TOP_SKILL = 450 -- skill cap in 3.3.5 (the skill bar is drawn up to it)
+
+-- Random drops with a 85% margin (prospecting, veins). A drop entry { item, pct, min, max, avg } (Data/*) ->
+-- st = { m = expected pieces per try, v = variance per try } (pieces min..max equally likely when it drops).
+-- Sums over many tries — normal approximation: CP.Low85(n, st) — pieces n tries give with 85%,
+-- CP.Tries85(M, st) — tries that give M pieces with 85%
+CP.CONF = 0.85
+local Z85 = 1.0364 -- 85% one-sided quantile of the normal distribution
+function CP.DropStat(d)
+	local p, a, b = d[2] / 100, d[3] or 1, d[4] or d[3] or 1
+	if b < a then b = a end
+	local e2 = 0
+	for x = a, b do e2 = e2 + x * x end
+	e2 = e2 / (b - a + 1)
+	local m = p * (d[5] or (a + b) / 2)
+	return { m = m, v = math.max(0, p * e2 - m * m) }
+end
+function CP.Low85(n, st)
+	if n <= 0 or st.m <= 0 then return 0 end
+	return math.max(0, math.floor(n * st.m - Z85 * math.sqrt(n * st.v) + 1e-9))
+end
+function CP.Tries85(M, st)
+	if M <= 0 then return 0 end
+	if st.m <= 0 then return math.huge end
+	local zs = Z85 * math.sqrt(st.v)
+	local s = (zs + math.sqrt(zs * zs + 4 * st.m * M)) / (2 * st.m)
+	return math.ceil(s * s - 1e-9)
+end
 
 -- Recipe colors, as in the game
 CP.KIND_COLOR = {

@@ -72,7 +72,7 @@ remindBtn.title = "У учителя"
 remindBtn:Hide()
 -- computed once per change (CP.DropCache clears it): { list = tooltip lines, n, profs, news = { { key, text } } };
 -- the chat notification is a separate listener (Notify), the bar only shows the result
-local remindSeen, remindFirst = {}, true
+local remindSeen, remindFirst, remindT0 = {}, true, GetTime()
 local remindMemo
 CP.OnDrop(function() remindMemo = nil end)
 local function Reminders()
@@ -129,17 +129,15 @@ local function Reminders()
 	remindMemo = { list = list, n = n, profs = profs, news = news }
 	return remindMemo
 end
--- to the chat: on login everything waiting in one line, later only what is new
+-- to the chat: only what becomes new during the session; what waits on login is only on the "У учителя" button
 local function Notify()
 	local msgs = {}
 	for _, m in ipairs(Reminders().news) do
 		if not remindSeen[m.key] then remindSeen[m.key] = true; msgs[#msgs + 1] = m.text end
 	end
-	if msgs[1] then
-		if remindFirst then CP.Print("у учителя ждёт: " .. table.concat(msgs, "; "))
-		else for _, m in ipairs(msgs) do CP.Print(m) end end
-		remindFirst = false
-	end
+	if not remindFirst then for _, m in ipairs(msgs) do CP.Print(m) end
+	-- the first batch (skills and recipes load a bit after login) is silent; with none — the first 30 s
+	elseif msgs[1] or GetTime() - remindT0 > 30 then remindFirst = false end
 end
 CP.OnChange(Notify)
 -- click: trainers of these professions on the map (Questie; your faction), again — remove
@@ -276,7 +274,21 @@ function CP.RefreshBar()
 					local n = all.nodes[id]
 					if n.made == 0 and n.short > 0 and CP.ProspectTopOre(id, true) then gems[#gems + 1] = n end
 				end
-				for _, c in ipairs(CP.ProspectPlan(gems, true)) do
+				-- gem of an ore-plan stack -> that stack's ore; of a hand-made stack -> the ore already in the bags
+				local stacks = CP.Goal().stacks
+				local function PrefFor(gem)
+					local set
+					for _, si in ipairs(data.order) do
+						local st, t = stacks[si], data.trees[si]
+						if st and st.orePlan and st.orePlan.ore and t and t.nodes[gem] then
+							set = set or {}
+							set[st.orePlan.ore] = true
+						end
+					end
+					return set
+				end
+				local function Reserve(ore) return all.nodes[ore] and all.nodes[ore].gross or 0 end
+				for _, c in ipairs(CP.ProspectPlan(gems, true, PrefFor, Reserve)) do
 					local ore = c.ore
 					local craft = all.nodes[ore] and all.nodes[ore].gross or 0
 					local need, have = craft + c.need, CP.Have(ore)

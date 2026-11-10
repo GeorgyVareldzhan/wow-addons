@@ -100,15 +100,24 @@ function CP.ProspectOres(gem)
 	end
 	return out
 end
--- the ore with the highest chance for a gem (ore the skill allows first); onlyCan — only such ore
-function CP.ProspectTopOre(gem, onlyCan)
+-- the ore for a gem. Order: the skill allows it; one of `pref` (ores of the stacks' ore plans with this gem);
+-- enough of it for `need` pieces (85%) over `reserve(ore)` (ore the crafts take); the highest chance.
+-- onlyCan — only ore the skill allows
+function CP.ProspectTopOre(gem, onlyCan, pref, need, reserve)
 	local rank, best = JewelRank(), nil
 	for _, o in ipairs(CP.ProspectOres(gem) or {}) do
-		local can = rank >= o.req
-		if can or not onlyCan then
-			if not best or (can and not best.can) or (can == best.can and o.per > best.per) then
+		o.can = rank >= o.req
+		o.pref = o.can and pref and pref[o.ore] or false
+		o.enough = o.can and (need or 0) > 0 and CP.Have(o.ore) - (reserve and reserve(o.ore) or 0) >= CP.ProspectNeed(o, need) or false
+		if o.can or not onlyCan then
+			if not best or o.can ~= best.can then
+				if not best or o.can then best = o end
+			elseif o.pref ~= best.pref then
+				if o.pref then best = o end
+			elseif o.enough ~= best.enough then
+				if o.enough then best = o end
+			elseif o.per > best.per then
 				best = o
-				best.can = can
 			end
 		end
 	end
@@ -149,10 +158,11 @@ function CP.ProspectNeed(o, need)
 end
 -- which ore and how much closes the missing gems: each gem — its top ore; gems with the same ore share it
 -- (one prospect gives several gems). nodes: { id, short }. -> { { ore, need, can, gems = { node, ... } }, ... }
-function CP.ProspectPlan(nodes, onlyCan)
+-- prefFor(gem) -> set of the stacks' ore-plan ores or nil, reserve(ore) -> ore the crafts take (see CP.ProspectTopOre)
+function CP.ProspectPlan(nodes, onlyCan, prefFor, reserve)
 	local out, byOre = {}, {}
 	for _, n in ipairs(nodes) do
-		local o = CP.ProspectTopOre(n.id, onlyCan)
+		local o = CP.ProspectTopOre(n.id, onlyCan, prefFor and prefFor(n.id), n.short, reserve)
 		if o then
 			local c = byOre[o.ore]
 			if not c then c = { ore = o.ore, need = 0, avg = 0, can = o.can, gems = {} }; byOre[o.ore] = c; out[#out + 1] = c end

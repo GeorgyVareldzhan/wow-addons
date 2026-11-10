@@ -212,10 +212,11 @@ local function DrawTiles(y, Wd, data)
 		end
 		local yy = ty - 28
 		for _, p in ipairs(tl.profs) do
-			-- one sum, colored by its least reliable part: green / yellow (expected) or orange (exact)
+			-- one sum "+85%-max", colored by its least reliable part: green / yellow (85%) or orange (exact)
 			local rg = CP.RoundGain(p.gain)
-			local col = rg.g > 0 and "|cff40c040" or (rg.y > 0 and "|cffffff00" or "|cffff8040")
-			local txt = p.name .. "  |cff9a8a66" .. p.rank .. "|r" .. (rg.t > 0 and ("  " .. col .. "+" .. rg.t .. "|r") or "")
+			local col = rg.gm > 0 and "|cff40c040" or (rg.ym > 0 and "|cffffff00" or "|cffff8040")
+			local mx = rg.o + rg.ym + rg.gm
+			local txt = p.name .. "  |cff9a8a66" .. p.rank .. "|r" .. (mx > 0 and ("  " .. col .. "+" .. rg.t .. (mx > rg.t and ("-" .. mx) or "") .. "|r") or "")
 			cv:Icon(CP.PROF_ICON[p.name], x + 8, yy + 3, 22, { alpha = dim, level = 3 })
 			cv:Text(txt, x + 36, yy - 2, "GameFontHighlight", TW - 44):SetAlpha(dim)
 			yy = yy - 25
@@ -667,7 +668,10 @@ local function DrawProspect(y, Wd, data, list)
 			y = y - 4
 		end
 		-- total: for each missing gem the ore with the highest chance; gems with the same ore share it
-		for _, best in ipairs(CP.ProspectPlan(miss)) do
+		local st = CP.Goal().stacks[si]
+		local pref = st and st.orePlan and st.orePlan.ore and { [st.orePlan.ore] = true }
+		local function Reserve(ore) return t.nodes[ore] and t.nodes[ore].gross or 0 end
+		for _, best in ipairs(CP.ProspectPlan(miss, nil, function() return pref end, Reserve)) do
 			local have = CP.Have(best.ore)
 			local names = {}
 			for _, n in ipairs(best.gems) do names[#names + 1] = CP.ItemName(n.id) end
@@ -781,9 +785,11 @@ local function DrawPanel(y, Wd, data)
 		for _, x in ipairs(data.trees[si].ents) do if not seen[x.prof] then seen[x.prof] = true; profs[#profs + 1] = x.prof end end
 		for p, v in pairs(data.gain[si]) do
 			local q = gsum[p]
-			if not q then q = { o = 0, y = 0, g = 0 }; gsum[p] = q end
+			if not q then q = { o = 0, y = 0, g = 0, ym = 0, gm = 0, yl = {}, gl = {} }; gsum[p] = q end
 			q.o, q.y, q.g = q.o + v.o, q.y + v.y, q.g + v.g
-			q.ym, q.gm = (q.ym or 0) + (v.ym or 0), (q.gm or 0) + (v.gm or 0)
+			q.ym, q.gm = q.ym + (v.ym or 0), q.gm + (v.gm or 0)
+			for _, ch in ipairs(v.yl or {}) do q.yl[#q.yl + 1] = ch end
+			for _, ch in ipairs(v.gl or {}) do q.gl[#q.gl + 1] = ch end
 			if not seen[p] then seen[p] = true; profs[#profs + 1] = p end -- e.g. mining from smelting intermediates
 		end
 	end

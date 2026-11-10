@@ -245,14 +245,16 @@ local function VeinIndex()
 	if veinBase then return end
 	veinBase, veinOf = {}, {}
 	for _, v in pairs(CraftPlan_VeinData or {}) do
-		local per
-		for _, d in ipairs(v) do if d[1] == v.ore then per = d[2] / 100 * d[5] end end
+		local per, st
+		for _, d in ipairs(v) do if d[1] == v.ore then per, st = d[2] / 100 * d[5], CP.DropStat(d) end end
 		if per and per > 0 then
 			local b = veinBase[v.ore]
 			if not b or per < b.per then
-				local drops = {}
-				for _, d in ipairs(v) do if d[1] ~= v.ore then drops[d[1]] = d[2] / 100 * d[5] end end
-				veinBase[v.ore] = { per = per, name = v.name, drops = drops }
+				local drops, dropSt = {}, {}
+				for _, d in ipairs(v) do
+					if d[1] ~= v.ore then drops[d[1]] = d[2] / 100 * d[5]; dropSt[d[1]] = CP.DropStat(d) end
+				end
+				veinBase[v.ore] = { per = per, st = st, name = v.name, drops = drops, dropSt = dropSt }
 			end
 		end
 		for _, d in ipairs(v) do
@@ -265,12 +267,13 @@ local function VeinIndex()
 		end
 	end
 end
--- ordinary vein of an ore: { per = ore per node, name, drops = { [item] = expected pieces per node } }
+-- ordinary vein of an ore: { per = ore per node, st = its CP.DropStat, name, drops = { [item] = expected pieces per
+-- node }, dropSt = { [item] = CP.DropStat } }
 function CP.VeinBase(ore) VeinIndex(); return veinBase[ore] end
--- how many veins for n ore (nil — no data)
+-- how many veins give n ore with 85% (nil — no data)
 function CP.VeinsFor(ore, n)
 	local b = CP.VeinBase(ore)
-	return b and n > 0 and math.ceil(n / b.per - 1e-9) or nil
+	return b and n > 0 and CP.Tries85(n, b.st) or nil
 end
 -- veins an item drops from (not their own ore): { { name, pct, ore }, ... } by chance
 function CP.VeinSources(item)

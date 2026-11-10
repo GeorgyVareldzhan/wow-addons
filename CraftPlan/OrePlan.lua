@@ -1,5 +1,6 @@
 -- CraftPlan 2.0 — "План по руде": squeeze all skill out of one ore. Only orange and yellow crafts count (green is
--- left out — too much ore per point). Ore is mined as much as needed; the plan says how much.
+-- left out — too much ore per point). Ore is mined as much as needed; the plan says how much. Yellow (and the
+-- leftover green) crafts count with a 85% margin, as prospecting: the plan reaches its skill with CONF, not on average.
 -- "Используя всё из сумок" (on by default): bags, bank and the reagent storage go in, including other materials
 -- of recipes that also need this ore; off — pure ore, the stock is ignored.
 -- "До следующей руды" (off by default): each profession stops at the skill where a later ore starts giving
@@ -51,10 +52,10 @@ end
 local function DoDerive(O, useStock)
 	local lines = CP.SkillLines()
 	-- prospecting: only a jeweler with the spell and enough skill for this ore
-	local gemPer = {}
+	local gemPer, gemSt = {}, {}
 	local pdata = CP.ProspectData and CP.ProspectData(O)
 	if pdata and CP.CanProspect() and CP.JewelRank() >= CP.ProspectReq(O) then
-		for _, g in ipairs(pdata) do gemPer[g[1]] = g[2] / 100 * g[5] end
+		for _, g in ipairs(pdata) do gemPer[g[1]] = g[2] / 100 * g[5]; gemSt[g[1]] = CP.DropStat(g) end
 	end
 	local all = Candidates(lines)
 	-- what comes from this ore: the ore, gems of its prospecting and everything made only of them;
@@ -88,7 +89,7 @@ local function DoDerive(O, useStock)
 			end
 		end
 	end
-	return { lines = lines, gemPer = gemPer, ok = ok, extra = extra, R = R, byprod = byprod, vein = vein }
+	return { lines = lines, gemPer = gemPer, gemSt = gemSt, ok = ok, extra = extra, R = R, byprod = byprod, vein = vein }
 end
 -- without the stock the result does not depend on bags: memoized per ore
 local function Derive(O, useStock)
@@ -126,7 +127,7 @@ end
 local KIND_LETTER = { optimal = "o", medium = "y" }
 local function OrePlan(O, off, useStock, toNext)
 	local D = Derive(O, useStock)
-	local lines, gemPer, ok, extra, R, byprod, vein = D.lines, D.gemPer, D.ok, D.extra, D.R, D.byprod, D.vein
+	local lines, gemPer, gemSt, ok, extra, R, byprod, vein = D.lines, D.gemPer, D.gemSt, D.ok, D.extra, D.R, D.byprod, D.vein
 	local rank, start = {}, {}
 	for prof, L in pairs(lines) do rank[prof], start[prof] = L.rank, L.rank end
 	local function Stock(id) return useStock and CP.Have(id) or 0 end
@@ -152,6 +153,24 @@ local function OrePlan(O, off, useStock, toNext)
 	for id in pairs(ok) do pool[id] = Stock(id) end
 	for id in pairs(extra) do pool[id] = Stock(id) end
 	local mined, prospects, smelt, log, learn = 0, 0, 0, {}, {}
+	-- with the stock: the other stacks (all but this ore's own plan stacks) take their share of the stock first,
+	-- and the ore they lack is mined together with the plan (its veins drop by-products too)
+	local stackOre, stackUse = 0, 0
+	if useStock then
+		local data, g = CP.Compute(), CP.Goal()
+		for _, si in ipairs(data.order) do
+			local st, t = g.stacks[si], data.trees[si]
+			if t and not (st and st.orePlan and st.orePlan.ore == O) then
+				for id, n in pairs(t.nodes) do
+					local use = n.gross - n.made - n.short
+					if use > 0 and pool[id] then pool[id] = math.max(0, pool[id] - use) end
+				end
+				local n = t.nodes[O]
+				if n then stackOre, stackUse = stackOre + n.short, stackUse + n.gross end
+			end
+		end
+		mined = stackOre
+	end
 	-- price in ore: ore and bars always by ore (stock is ore too), gems from stock — free (already there or dropped along the way)
 	local function Cost(id, n, depth)
 		if id == O then return n end
@@ -173,15 +192,58 @@ local function OrePlan(O, off, useStock, toNext)
 		if k >= c.rec.g or (cap[c.prof] and k >= cap[c.prof]) then return 0 end
 		return Ch(c)
 	end
+	-- skill with a 85% margin (as prospecting): per profession the chance of every whole skill, dist[prof][k];
+	-- a craft moves each skill k by its own chance at k, and the plan goes by the skill reached with CONF
+	-- (rank = the highest k with P(skill >= k) >= CONF), so it crafts and mines more than for the average
+	local CONF = 0.85
+	local dist = {}
+	for prof in pairs(lines) do dist[prof] = { [math.floor(rank[prof] + 1e-9)] = 1 } end
+	local function ChAtK(c, k, green)
+		local mx = lines[c.prof].max
+		if k >= mx or (cap[c.prof] and k >= cap[c.prof]) then return 0 end
+		if not green and not KIND_LETTER[CP.KindAt(c.rec.y, c.rec.g, k)] then return 0 end
+		return CP.ChanceAt(c.rec, k, mx)
+	end
+	-- one craft of c over a skill distribution d -> the new distribution and its skill with CONF
+	local function Step(c, d, green)
+		local nd, keys = {}, {}
+		for k, v in pairs(d) do
+			local p = ChAtK(c, k, green)
+			nd[k] = (nd[k] or 0) + v * (1 - p)
+			if p > 0 then nd[k + 1] = (nd[k + 1] or 0) + v * p end
+		end
+		for k in pairs(nd) do keys[#keys + 1] = k end
+		table.sort(keys, function(a, b) return a > b end)
+		local tail, r = 0, keys[#keys]
+		for _, k in ipairs(keys) do
+			tail = tail + nd[k]
+			if tail >= CONF - 1e-9 then r = k break end
+		end
+		return nd, r
+	end
+	-- crafts of c in a row for +1 skill with CONF (nil — not within 500)
+	local function CraftsFor1(c, green)
+		local d, r0 = dist[c.prof], math.floor(rank[c.prof] + 1e-9)
+		for i = 1, 500 do
+			local r
+			d, r = Step(c, d, green)
+			if r > r0 then return i end
+		end
+	end
 	local function Craft(c, mid, green)
 		local ch = green and ChToGrey(c) or (Kind(c) ~= "x" and Ch(c) or 0)
 		if not c.known then learn[c] = true end
 		local from = rank[c.prof]
-		if ch > 0 then rank[c.prof] = math.min(lines[c.prof].max, rank[c.prof] + ch) end
+		if ch > 0 then
+			local nd, r = Step(c, dist[c.prof], green)
+			dist[c.prof] = nd
+			rank[c.prof] = math.max(rank[c.prof], r)
+		end
 		log[#log + 1] = { c = c, mid = mid, from = from, to = rank[c.prof], gain = ch, green = green }
 	end
 	local used = {} -- how much of each by-product was taken (the bags and vein drops are taken first)
-	local veinGot = {} -- by-products the mined veins gave
+	local veinGot = {} -- by-products the mined veins gave (85%, CP.Low85 over all the mined veins)
+	local gemGot = {} -- gems all the plan's prospects gave (85%)
 	local function Take(id, n, depth)
 		local free = math.min(pool[id] or 0, n)
 		pool[id] = (pool[id] or 0) - free
@@ -190,20 +252,25 @@ local function OrePlan(O, off, useStock, toNext)
 		if left <= 1e-9 then return end
 		if id == O then
 			mined = mined + left
-			if vein then -- the mined veins drop the rest too
-				local nodes = left / vein.per
-				for d, e in pairs(vein.drops) do
-					pool[d] = (pool[d] or 0) + nodes * e
-					veinGot[d] = (veinGot[d] or 0) + nodes * e
+			if vein then -- the mined veins drop the rest too (on average veins, 85% of what they drop)
+				local nodes = mined / vein.per
+				for d, st in pairs(vein.dropSt) do
+					local got = CP.Low85(nodes, st)
+					pool[d] = (pool[d] or 0) + got - (veinGot[d] or 0)
+					veinGot[d] = got
 				end
 			end
 			return
 		end
 		if gemPer[id] then
-			while left > 1e-9 do
+			while left > 1e-9 and prospects < 5000 do
 				Take(O, 5, depth + 1)
 				prospects = prospects + 1
-				for gem, per in pairs(gemPer) do pool[gem] = (pool[gem] or 0) + per end
+				for gem, st in pairs(gemSt) do
+					local got = CP.Low85(prospects, st)
+					pool[gem] = (pool[gem] or 0) + got - (gemGot[gem] or 0)
+					gemGot[gem] = got
+				end
 				local f = math.min(pool[id], left)
 				pool[id], left = pool[id] - f, left - f
 			end
@@ -234,8 +301,13 @@ local function OrePlan(O, off, useStock, toNext)
 			end
 		end
 		if not best then break end
-		for _, g in ipairs(best.rec.reag) do Take(g.id, g.count, 0) end
-		Craft(best, false)
+		-- the recipe in a row until it gives +1 with CONF (no "+0-1" steps)
+		local r0 = math.floor(rank[best.prof] + 1e-9)
+		for _ = 1, 500 do
+			for _, g in ipairs(best.rec.reag) do Take(g.id, g.count, 0) end
+			Craft(best, false)
+			if math.floor(rank[best.prof] + 1e-9) > r0 or Kind(best) == "x" then break end
+		end
 	end
 	-- then what is left from the BAGS and from the mined VEINS (stone, gems — not what the plan's prospecting gives):
 	-- into recipes that still give any skill, green too, down to grey. No new mining or prospecting for them
@@ -254,6 +326,14 @@ local function OrePlan(O, off, useStock, toNext)
 					end
 				end
 				local ch = gems and enough and raw < 1e8 and ChToGrey(c) or 0
+				-- only when the leftovers last for +1 with CONF
+				if ch > 0 then
+					local need, n = CraftsFor1(c, true), math.huge
+					for _, g in ipairs(c.rec.reag) do
+						if byprod[g.id] then n = math.min(n, math.floor(Free(g.id) / g.count + 1e-9)) end
+					end
+					if not need or n < need then ch = 0 end
+				end
 				if ch > 0 then
 					local sc = ch / math.max(0.05, raw)
 					if not best or sc > bs + 1e-12 then best, bs = c, sc end
@@ -261,8 +341,10 @@ local function OrePlan(O, off, useStock, toNext)
 			end
 		end
 		if not best then break end
-		for _, g in ipairs(best.rec.reag) do Take(g.id, g.count, 0) end
-		Craft(best, false, true)
+		for _ = 1, CraftsFor1(best, true) do
+			for _, g in ipairs(best.rec.reag) do Take(g.id, g.count, 0) end
+			Craft(best, false, true)
+		end
 	end
 	-- recipes for the leftovers that only lack OTHER materials (e.g. Точило стихий: dense stone + elemental earth):
 	-- how many crafts the leftovers allow while they still give skill, and what is missing for them
@@ -328,8 +410,8 @@ local function OrePlan(O, off, useStock, toNext)
 	for _, c in ipairs(R) do if Usable(c) then anyUsable = true break end end
 	return { ore = O, steps = steps, anyUsable = anyUsable, start = start, rank = rank, profs = profs, learn = learn, left = left,
 		mined = mined, used = Stock(O) - (pool[O] or 0) + mined, have = Stock(O), prospects = prospects, smelt = smelt,
-		veins = vein and mined > 0 and math.ceil(mined / vein.per - 1e-9) or nil,
-		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre, blocked = blocked }
+		veins = vein and mined > 0 and CP.Tries85(mined, vein.st) or nil,
+		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre, blocked = blocked, stackOre = stackOre, stackUse = stackUse }
 end
 
 -- cached until the next change (dropped before any redraw)

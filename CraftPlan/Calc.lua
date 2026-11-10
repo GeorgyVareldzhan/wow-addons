@@ -245,32 +245,54 @@ local function BuildStack(si, st, stock)
 	return t
 end
 
--- Skill gain parts { o = exact (orange), y = expected (yellow), g = expected (green) } rounded UP:
--- total = ceil(sum); parts floor, the missing points go to the part with the bigger fraction (parts sum = total)
-function CP.RoundGain(q)
-	if not q then return { o = 0, y = 0, g = 0, t = 0 } end
-	local t = math.ceil(q.o + q.y + q.g - 1e-9)
-	local y, g = math.floor(q.y + 1e-9), math.floor(q.g + 1e-9)
-	local rest = t - q.o - y - g
-	while rest > 0 do
-		if (q.y - y >= q.g - g and y < math.ceil(q.y - 1e-9)) or g >= math.ceil(q.g - 1e-9) then y = y + 1 else g = g + 1 end
-		rest = rest - 1
+-- Skill gain parts with a 85% margin (as prospecting). q = { o = orange crafts (exact), y/g = expected yellow/green,
+-- ym/gm = yellow/green attempts, yl/gl = their chances }. Each attempt gives +1 with its chance: the distribution of
+-- the points (Poisson binomial) -> the points reached with CONF. -> { o, y, g, t, ym, gm, ey, eg }: y/g — 85% per zone,
+-- t = o + 85% of yellow and green together, ey/eg — expected. Cached in q (its lists only grow)
+local function Low85(lists)
+	local d, n = { [0] = 1 }, 0
+	for _, l in ipairs(lists) do
+		for _, p in ipairs(l) do
+			n = n + 1
+			d[n] = 0
+			for k = n, 1, -1 do d[k] = d[k] * (1 - p) + d[k - 1] * p end
+			d[0] = d[0] * (1 - p)
+		end
 	end
-	return { o = q.o, y = y, g = g, t = t, ym = q.ym or 0, gm = q.gm or 0 }
+	local tail = 0
+	for k = n, 0, -1 do
+		tail = tail + d[k]
+		if tail >= CP.CONF - 1e-9 then return k end
+	end
+	return 0
+end
+function CP.RoundGain(q)
+	if not q then return { o = 0, y = 0, g = 0, t = 0, ym = 0, gm = 0, ey = 0, eg = 0 } end
+	local yl, gl = q.yl or {}, q.gl or {}
+	local c = q.rg
+	if c and c.ny == #yl and c.ng == #gl then return c end
+	local y, g = Low85({ yl }), Low85({ gl })
+	c = { o = q.o, y = y, g = g, t = q.o + Low85({ yl, gl }), ym = q.ym or 0, gm = q.gm or 0, ey = q.y or 0, eg = q.g or 0,
+		ny = #yl, ng = #gl }
+	q.rg = c
+	return c
 end
 
--- Gain parts for display: { text, color, tip }: "+25" orange (exact), "+6-7" yellow and "+1-3" green
--- (expected-max: max = attempts in that zone, if each gives +1)
+-- Gain parts for display: { text, color, tip }: "+25" orange (exact), "+0-1" yellow and green (85% - max:
+-- max = attempts in that zone, if each gives +1)
 CP.GAIN_COLOR = { o = { 1, 0.5, 0.25 }, y = { 1, 1, 0 }, g = { 0.25, 0.75, 0.25 } }
+local function Avg(v) return math.floor(v * 10 + 0.5) / 10 end
 function CP.GainParts(q)
 	local rg = CP.RoundGain(q)
 	local out = {}
 	if rg.o > 0 then out[#out + 1] = { text = "+" .. rg.o, color = CP.GAIN_COLOR.o, tip = "точно: оранжевые создания" } end
-	if rg.y > 0 or rg.ym > 0 then
-		out[#out + 1] = { text = "+" .. rg.y .. (rg.ym > rg.y and ("-" .. rg.ym) or ""), color = CP.GAIN_COLOR.y, tip = "жёлтые: в среднем " .. rg.y .. ", максимум " .. rg.ym }
+	if rg.ym > 0 then
+		out[#out + 1] = { text = "+" .. rg.y .. (rg.ym > rg.y and ("-" .. rg.ym) or ""), color = CP.GAIN_COLOR.y,
+			tip = "жёлтые: 85% - " .. rg.y .. ", в среднем " .. Avg(rg.ey) .. ", максимум " .. rg.ym }
 	end
-	if rg.g > 0 or rg.gm > 0 then
-		out[#out + 1] = { text = "+" .. rg.g .. (rg.gm > rg.g and ("-" .. rg.gm) or ""), color = CP.GAIN_COLOR.g, tip = "зелёные: в среднем " .. rg.g .. ", максимум " .. rg.gm }
+	if rg.gm > 0 then
+		out[#out + 1] = { text = "+" .. rg.g .. (rg.gm > rg.g and ("-" .. rg.gm) or ""), color = CP.GAIN_COLOR.g,
+			tip = "зелёные: 85% - " .. rg.g .. ", в среднем " .. Avg(rg.eg) .. ", максимум " .. rg.gm }
 	end
 	return out
 end
@@ -360,8 +382,8 @@ function CP.Compute()
 	-- count attempts (ym, gm): the max if each gives +1
 	local function AddGain(q, rk, ch, y, mid)
 		if rk < y then q.o = q.o + 1
-		elseif ch > 0 and rk < mid then q.y = q.y + ch; q.ym = q.ym + 1
-		elseif ch > 0 then q.g = q.g + ch; q.gm = q.gm + 1 end
+		elseif ch > 0 and rk < mid then q.y = q.y + ch; q.ym = q.ym + 1; q.yl[#q.yl + 1] = ch
+		elseif ch > 0 then q.g = q.g + ch; q.gm = q.gm + 1; q.gl[#q.gl + 1] = ch end
 	end
 	local slack = {} -- per step: [profession] = Slack(profession), filled on demand
 	for _ = 1, 20000 do
@@ -404,9 +426,9 @@ function CP.Compute()
 		end
 		if not (c.mid and ch <= 0) then -- a grey intermediate (e.g. smelting) gives nothing
 			local gg = gain[c.si][c.prof]
-			if not gg then gg = { o = 0, y = 0, g = 0, ym = 0, gm = 0 }; gain[c.si][c.prof] = gg end
+			if not gg then gg = { o = 0, y = 0, g = 0, ym = 0, gm = 0, yl = {}, gl = {} }; gain[c.si][c.prof] = gg end
 			local ge = c.e and egain[c.e]
-			if c.e and not ge then ge = { o = 0, y = 0, g = 0, ym = 0, gm = 0 }; egain[c.e] = ge end
+			if c.e and not ge then ge = { o = 0, y = 0, g = 0, ym = 0, gm = 0, yl = {}, gl = {} }; egain[c.e] = ge end
 			local mid = math.floor((c.rec.y + c.rec.g) / 2)
 			AddGain(gg, rk, ch, c.rec.y, mid)
 			if ge then AddGain(ge, rk, ch, c.rec.y, mid) end
