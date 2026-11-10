@@ -25,10 +25,14 @@ local PROCS = {
 	{ id = 1464,  buff = 46916, buffOnly = true },                 -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
 	{ id = 23922, buff = 50227, cond = "ShieldSlamProc", needShield = true },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
 	                                                               -- а в оборонительной — всегда, когда готов (раньше Смертельного удара)
-	{ id = 772,   stances = { BATTLE }, cond = "RendProc" },       -- Кровопускание в боевой: всегда, когда его нет на цели
+	{ id = 772,   stances = { BATTLE, DEFENSIVE }, cond = "RendProc" }, -- Кровопускание: в боевой — всегда, когда его нет на цели;
+	                                                               -- в оборонительной — только если его держим (TRACKED), иначе оно в «Ударах»
+	{ id = 1715,  stances = { BATTLE, BERSERKER }, cond = "HamstringProc" }, -- Подрезать сухожилия: держим (TRACKED, PvP), вашего нет на цели
 	{ id = 12294, cond = "MortalProc" },                           -- Смертельный удар: в берсерка — когда готов; в боевой — то же, но если нужно
 	                                                               -- Кровопускание, то только при ярости на оба; в оборонительной — Реванша нет,
 	                                                               -- Мощному удару щитом до готовности больше SLAM_WAIT с, ярости хватает
+	{ id = 23881, stances = { BERSERKER }, cond = "BloodthirstProc" }, -- Кровожадность: Оружие в стойке берсерка — когда готова
+	                                                               -- (в остальных случаях — в «Ударах»)
 	{ id = 1680,  stances = { BERSERKER }, cond = "WhirlwindReady" }, -- Вихрь (Whirlwind): когда готов
 	{ id = 6343,  stances = { BATTLE, DEFENSIVE }, cond = "PackThunder" }, -- Удар грома: рядом от 3 врагов, на цели его нет (ничьего)
 	{ id = 1160,  cond = "PackDemo" },                             -- Деморализующий крик: рядом от 3 врагов, на цели его нет (ничьего)
@@ -64,7 +68,7 @@ local REGULAR = {
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
 	{ id = 845 },                                           -- Рассекающий удар (Cleave)
 	{ id = 6343,  stances = { DEFENSIVE }, cond = "Crowd" },               -- Удар грома (Thunder Clap): только в оборонительной, как Рассекающий — от CLEAVE_ENEMIES врагов рядом
-	{ id = 772,   stances = { DEFENSIVE }, skipDebuff = true, saveExec = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»)
+	{ id = 772,   stances = { DEFENSIVE }, skipDebuff = true, longFight = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»); не на слабых мобах
 	{ id = 20252, stances = { BERSERKER } },                -- Перехват (Intercept)
 	{ id = 7386, alts = { 20243, 7386 }, stances = { DEFENSIVE }, cond = "NeedSunder", sunder = true, longFight = true }, -- Сокрушение / Раскол брони: только в оборонительной; на цели меньше 5 или скоро спадёт
 	{ id = 6673, alts = { "shout" }, anyTarget = true, cond = "NoShout", saveExec = true }, -- Боевой / Командирский крик: на вас нет ни одного
@@ -531,17 +535,18 @@ local MeleeEnemies
 do
 	local seen = {} -- GUID врага -> когда последний раз был в ближнем бою
 	local HOSTILE = COMBATLOG_OBJECT_REACTION_HOSTILE or 0x40
+	local RANGED = { [57755] = true, [64382] = true } -- Героический бросок, Сокрушающий бросок: попали — не значит, что враг рядом
 	local f = CreateFrame("Frame")
 	f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
 	f:RegisterEvent("PLAYER_REGEN_ENABLED")
-	f:SetScript("OnEvent", function(_, event, _, sub, srcGUID, _, srcFlags, dstGUID, _, dstFlags)
+	f:SetScript("OnEvent", function(_, event, _, sub, srcGUID, _, srcFlags, dstGUID, _, dstFlags, spellId)
 		if event == "PLAYER_REGEN_ENABLED" then wipe(seen) return end
 		if sub == "UNIT_DIED" then seen[dstGUID] = nil return end
 		local me = UnitGUID("player")
 		if dstGUID == me and (sub == "SWING_DAMAGE" or sub == "SWING_MISSED") then
 			if srcFlags and bit.band(srcFlags, HOSTILE) > 0 then seen[srcGUID] = GetTime() end
 		elseif srcGUID == me and (sub == "SWING_DAMAGE" or sub == "SWING_MISSED" or sub == "SPELL_DAMAGE" or sub == "SPELL_MISSED") then
-			if dstFlags and bit.band(dstFlags, HOSTILE) > 0 then seen[dstGUID] = GetTime() end
+			if dstFlags and bit.band(dstFlags, HOSTILE) > 0 and not RANGED[spellId] then seen[dstGUID] = GetTime() end
 		end
 	end)
 	MeleeEnemies = function()
@@ -740,6 +745,88 @@ local function NoShield()
 	return not (link and select(9, GetItemInfo(link)) == "INVTYPE_SHIELD")
 end
 
+-- Режим PvE / PvP: выбирается кнопкой у миникарты или /pa mode. Авто — PvP на арене, поле боя
+-- и с вражеским игроком в цели, иначе PvE
+local MODES = { "auto", "pve", "pvp" }
+local MODE_NAMES = { auto = "Авто", pve = "PvE", pvp = "PvP" }
+
+local function ModeSetting() -- выбор пользователя: auto / pve / pvp
+	local m = ProcAlertDB and ProcAlertDB.mode
+	return MODE_NAMES[m] and m or "auto"
+end
+
+local function Mode() -- действующий режим: pve или pvp
+	local m = ModeSetting()
+	if m ~= "auto" then return m end
+	local _, kind = IsInInstance()
+	if kind == "pvp" or kind == "arena" then return "pvp" end
+	if UnitExists("target") and UnitIsPlayer("target") and UnitCanAttack("player", "target") then return "pvp" end
+	return "pve"
+end
+
+
+-- Ветка талантов: где больше всего очков (1 — Оружие, 2 — Неистовство, 3 — Защита) или nil.
+-- Пересчитывается при смене талантов и спека
+local SPEC_KEYS = { "arms", "fury", "prot" }
+local Spec
+do
+	local cached
+	local w = CreateFrame("Frame")
+	for _, ev in ipairs({ "PLAYER_ENTERING_WORLD", "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED" }) do
+		w:RegisterEvent(ev)
+	end
+	w:SetScript("OnEvent", function() cached = nil end)
+	Spec = function()
+		if cached == nil then
+			cached = false
+			local best = 0
+			for i = 1, 3 do
+				local _, _, points = GetTalentTabInfo(i)
+				if points and points > best then best, cached = points, SPEC_KEYS[i] end
+			end
+		end
+		return cached or nil
+	end
+end
+
+-- Дебаффы, которые держим на цели (по ветке и режиму): висят — на цели с отсчётом, меньше
+-- REND_REFRESH с — мигают; нет на цели — иконка в срабатываниях. any — чей угодно (не только ваш)
+local TRACKED = {
+	arms = {
+		pve = { 772 },              -- Кровопускание
+		pvp = { 772, 12294, 1715 }, -- Кровопускание, Смертельный удар (-50% исцеления), Подрезать сухожилия
+	},
+}
+local function Tracking(spellID) -- держим ли этот дебафф сейчас
+	local bySpec = TRACKED[Spec() or ""]
+	local list = bySpec and bySpec[Mode()]
+	if not list then return false end
+	for _, id in ipairs(list) do
+		if id == spellID then return true end
+	end
+	return false
+end
+-- Названия отслеживаемых сейчас дебаффов (для мигания на цели) или nil, если для ветки не задано
+local TrackedNames
+do
+	local sets = {}
+	TrackedNames = function()
+		local spec, mode = Spec(), Mode()
+		local list = TRACKED[spec or ""] and TRACKED[spec][mode]
+		if not list then return nil end
+		local key = spec .. mode
+		if not sets[key] then
+			local set = {}
+			for _, id in ipairs(list) do
+				local n = GetSpellInfo(id)
+				if n then set[n] = true end
+			end
+			sets[key] = set
+		end
+		return sets[key]
+	end
+end
+
 local CONDS = {
 	ShieldSlamProc = function()
 		if MyBuff(50227) then return true end
@@ -747,17 +834,32 @@ local CONDS = {
 		local ss = Known(23922)
 		return ss and not CooldownOf(ss) and true or false
 	end,
+	BloodthirstProc = function()
+		if Spec() ~= "arms" then return false end -- другие ветки пока не настроены
+		local bt = Known(23881)
+		return bt and not CooldownOf(bt) and true or false
+	end,
 	WhirlwindReady = function()
 		local ww = Known(1680)
 		return ww and not CooldownOf(ww) and true or false
 	end,
-	RendProc = function()
+	RendProc = function() -- на слабых мобах (LowTarget) Кровопускание не нужно, кроме PvP
 		local rend = Known(772)
-		return rend and not HasMyDebuff(rend) and true or false
+		if not rend or HasMyDebuff(rend) then return false end
+		local tracked = Tracking(772)
+		if CurrentStance() == DEFENSIVE and not tracked then return false end
+		return Mode() == "pvp" or not LowTarget()
+	end,
+	HamstringProc = function()
+		local ham = Known(1715)
+		return ham and Tracking(1715) and not HasMyDebuff(ham) and true or false
 	end,
 	MortalProc = function()
 		local ms = Known(12294)
-		if not ms or CooldownOf(ms) then return false end
+		if not ms then return false end
+		-- держим «-50% исцеления» (PvP): нет на цели ни от кого — показываем, даже на перезарядке (с «часами»)
+		if Tracking(12294) and not UnitDebuff("target", ms) then return true end
+		if CooldownOf(ms) then return false end
 		local cost = RageCost(ms)
 		if cost and PlayerRage() < cost then return false end -- в любой стойке: только когда ярости хватает
 		local stance = CurrentStance()
@@ -765,7 +867,7 @@ local CONDS = {
 			-- Кровопускание нужно: Смертельный — только если ярости хватает на оба
 			-- (то же условие, что RendProc: CONDS внутри своей же таблицы ещё не виден)
 			local rend = Known(772)
-			if rend and not HasMyDebuff(rend) then
+			if rend and not LowTarget() and not HasMyDebuff(rend) then
 				return PlayerRage() >= (RageCost(ms) or 0) + (RageCost(rend) or 0)
 			end
 			return true
@@ -901,6 +1003,7 @@ local function DumpRage(name)
 		if n and r.rend then
 			local has, left = HasMyDebuff(n)
 			if has and not (left and left < REND_RESERVE) then n = nil end -- висит — запас на него не нужен
+			if LowTarget() then n = nil end -- на слабых мобах не нужно
 		end
 		local cost = n and RageCost(n)
 		if cost and cost > reserve then reserve = cost end
@@ -1375,9 +1478,10 @@ end)
 -- Какой крик вы применили последним — его и напоминать (Боевой или Командирский)
 local shoutWatcher = CreateFrame("Frame")
 shoutWatcher:RegisterEvent("UNIT_SPELLCAST_SUCCEEDED")
+local SHOUTS = { 6673, 469 } -- без новой таблицы на каждое заклинание
 shoutWatcher:SetScript("OnEvent", function(_, _, unit, spellName)
 	if unit ~= "player" then return end
-	for _, id in ipairs({ 6673, 469 }) do
+	for _, id in ipairs(SHOUTS) do
 		if spellName == GetSpellInfo(id) then
 			ProcAlertDB = ProcAlertDB or {}
 			ProcAlertDB.shout = id
@@ -1420,7 +1524,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				end
 				f = f or AddItem(procRow, spellID, name, texture, true)
 				f.icon:SetTexture(texture) -- у записей с alts иконка может смениться
-				f.spellName = name
+				if f.spellName ~= name then f.spellName = name f.key:SetText(FindKey(name) or "") end
 				f.removing = false
 				f.noMana = noMana
 				f.blocked = false
@@ -1522,7 +1626,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				if imba ~= f.imba then f.imba = imba Layout(regularRow) end -- «ИМБА» крупнее — ряд перестраивается
 				if r.needShield and NoShield() then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.icon:SetTexture(texture)
-				f.spellName = name
+				if f.spellName ~= name then f.spellName = name f.key:SetText(FindKey(name) or "") end -- alts: другая способность — другая клавиша
 				if r.sunder then -- стаки «3/5» и время до конца Раскола брони
 					local count, expires = SunderInfo()
 					f.rage:SetText(count .. "/5")
@@ -1537,6 +1641,112 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 	end
 	AuraTick(false)
 end)
+
+----------------------------------------------------------------------------------------------
+-- Кнопка режима у миникарты (сам режим — Mode() выше, перед CONDS)
+local MinimapButtonUpdate
+local function SetMode(m)
+	ProcAlertDB = ProcAlertDB or {}
+	ProcAlertDB.mode = m
+	if MinimapButtonUpdate then MinimapButtonUpdate() end
+end
+
+-- Кнопка у миникарты, как у Questie: щелчок — следующий режим, перетаскивание — по кругу миникарты
+;(function()
+local RADIUS = 80
+local btn = CreateFrame("Button", "ProcAlertMinimapButton", Minimap)
+btn:SetWidth(31)
+btn:SetHeight(31)
+btn:SetFrameStrata("MEDIUM")
+btn:SetFrameLevel(8)
+btn:SetHighlightTexture("Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+local bg = btn:CreateTexture(nil, "BACKGROUND")
+bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+bg:SetWidth(20)
+bg:SetHeight(20)
+bg:SetPoint("TOPLEFT", btn, "TOPLEFT", 7, -5)
+local icon = btn:CreateTexture(nil, "ARTWORK")
+icon:SetWidth(20)
+icon:SetHeight(20)
+icon:SetPoint("TOPLEFT", btn, "TOPLEFT", 7, -5)
+icon:SetTexCoord(0.05, 0.95, 0.05, 0.95)
+local border = btn:CreateTexture(nil, "OVERLAY")
+border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+border:SetWidth(53)
+border:SetHeight(53)
+border:SetPoint("TOPLEFT", btn, "TOPLEFT", 0, 0)
+local letter = btn:CreateFontString(nil, "OVERLAY") -- «A» — режим выбирается сам
+letter:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+letter:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, -2)
+letter:SetTextColor(1, 0.82, 0)
+
+local PVE_TEX = "Interface\\Icons\\INV_Misc_Head_Dragon_01"
+local function PvpTex()
+	return UnitFactionGroup("player") == "Horde" and "Interface\\Icons\\INV_BannerPVP_01" or "Interface\\Icons\\INV_BannerPVP_02"
+end
+
+local function Place()
+	local a = math.rad((ProcAlertDB and ProcAlertDB.minimapAngle) or 200)
+	btn:ClearAllPoints()
+	btn:SetPoint("CENTER", Minimap, "CENTER", math.cos(a) * RADIUS, math.sin(a) * RADIUS)
+end
+
+local shown -- что сейчас на кнопке: не перерисовывать без нужды
+MinimapButtonUpdate = function()
+	local setting, mode = ModeSetting(), Mode()
+	local key = setting .. mode
+	if shown == key then return end
+	shown = key
+	icon:SetTexture(mode == "pvp" and PvpTex() or PVE_TEX)
+	letter:SetText(setting == "auto" and "A" or "")
+	if GameTooltip:IsOwned(btn) then btn:GetScript("OnEnter")(btn) end
+end
+
+btn:SetScript("OnEnter", function(self)
+	GameTooltip:SetOwner(self, "ANCHOR_LEFT")
+	GameTooltip:AddLine("ProcAlert")
+	local setting = ModeSetting()
+	local text = MODE_NAMES[setting]
+	if setting == "auto" then text = text .. " (" .. MODE_NAMES[Mode()] .. ")" end
+	GameTooltip:AddDoubleLine("Режим:", text, 1, 1, 1, 1, 0.82, 0)
+	GameTooltip:AddLine("ЛКМ — следующий режим, ПКМ — предыдущий", 0.6, 0.6, 0.6)
+	GameTooltip:Show()
+end)
+btn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+btn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+btn:SetScript("OnClick", function(_, button)
+	local cur = 1
+	for i, m in ipairs(MODES) do if m == ModeSetting() then cur = i end end
+	local step = (button == "RightButton") and -1 or 1
+	SetMode(MODES[(cur - 1 + step) % #MODES + 1])
+end)
+
+btn:RegisterForDrag("LeftButton")
+btn:SetScript("OnDragStart", function(self)
+	self:SetScript("OnUpdate", function()
+		local mx, my = Minimap:GetCenter()
+		local px, py = GetCursorPosition()
+		local scale = Minimap:GetEffectiveScale()
+		ProcAlertDB = ProcAlertDB or {}
+		ProcAlertDB.minimapAngle = math.deg(math.atan2(py / scale - my, px / scale - mx)) % 360
+		Place()
+	end)
+end)
+btn:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
+
+-- в Авто режим меняется сам (цель, вход на арену) — сверяем кнопку раз в полсекунды
+local t = 0
+local watch = CreateFrame("Frame")
+watch:RegisterEvent("PLAYER_LOGIN")
+watch:SetScript("OnEvent", function() Place() MinimapButtonUpdate() end)
+watch:SetScript("OnUpdate", function(_, elapsed)
+	t = t + elapsed
+	if t < 0.5 then return end
+	t = 0
+	MinimapButtonUpdate()
+end)
+end)()
 
 ----------------------------------------------------------------------------------------------
 -- Команды
@@ -1652,10 +1862,16 @@ SlashCmdList["PROCALERT"] = function(msg)
 	elseif msg == "stance" then
 		ProcAlertDB.stanceLine = ProcAlertDB.stanceLine == false
 		Print("значок стойки слева от срабатываний: " .. onoff(ProcAlertDB.stanceLine) .. ".")
+	elseif msg:match("^mode") then
+		local m = msg:match("^mode%s+(%a+)$")
+		if m and MODE_NAMES[m] then SetMode(m) end
+		local text = MODE_NAMES[ModeSetting()]
+		if ModeSetting() == "auto" then text = text .. " (сейчас " .. MODE_NAMES[Mode()] .. ")" end
+		Print("режим: " .. text .. ". /pa mode auto | pve | pvp")
 	elseif msg == "test" then
 		Test()
 	else
-		Print("/pa test — пример; /pa normal — ряд обычных ударов (" .. onoff(RegularEnabled()) .. "); /pa def — защитные (" .. onoff(DefEnabled()) .. "); /pa rush — стойка, Рывок и Перехват (" .. onoff(RushEnabled()) .. "); /pa enemies — список врагов справа (" .. onoff(ProcAlertDB.enemies ~= false) .. "); /pa stance — значок стойки (" .. onoff(ProcAlertDB.stanceLine ~= false) .. "); /pa hs <число> или auto — ярость для Удара героя; /pa alert — звук важных срабатываний (" .. onoff(AlertEnabled()) .. "); /pa rage — полоска ярости (" .. onoff(RageBarEnabled()) .. "); /pa keys — клавиши ("
+		Print("/pa mode auto|pve|pvp — режим (" .. MODE_NAMES[ModeSetting()] .. "); /pa test — пример; /pa normal — ряд обычных ударов (" .. onoff(RegularEnabled()) .. "); /pa def — защитные (" .. onoff(DefEnabled()) .. "); /pa rush — стойка, Рывок и Перехват (" .. onoff(RushEnabled()) .. "); /pa enemies — список врагов справа (" .. onoff(ProcAlertDB.enemies ~= false) .. "); /pa stance — значок стойки (" .. onoff(ProcAlertDB.stanceLine ~= false) .. "); /pa hs <число> или auto — ярость для Удара героя; /pa alert — звук важных срабатываний (" .. onoff(AlertEnabled()) .. "); /pa rage — полоска ярости (" .. onoff(RageBarEnabled()) .. "); /pa keys — клавиши ("
 			.. onoff(KeysEnabled()) .. "); /pa sound — звук (" .. onoff(SoundEnabled()) .. "); /pa gap <число> — расстояние (" .. GetGap() .. ").")
 	end
 end
@@ -1680,8 +1896,8 @@ local TARGET_FACE = 64       -- портрет вашей цели (строка
 local TARGET_HP_W, TARGET_HP_H = 128, 8 -- полоска здоровья цели под портретом
 local CAST_H, TARGET_CAST_H = 8, 18 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
 local TARGET_CAST_ICON = 24  -- значок заклинания цели слева от полоски
--- прерывания для подсветки каста: Зуботычина, Удар щитом (стойку и щит сменит макрос)
-local KICK_IDS = { 6552, 72 }
+-- прерывания для подсветки каста: Зуботычина, Удар щитом, Оглушающий удар (стойку и щит сменит макрос)
+local KICK_IDS = { 6552, 72, 12809 }
 local function KickReady()
 	for _, id in ipairs(KICK_IDS) do
 		local name = Known(id)
@@ -1768,7 +1984,8 @@ log:SetScript("OnEvent", function(_, event, ...)
 			local name, _, icon, _, _, _, castTime = GetSpellInfo((select(9, ...)))
 			if name and castTime and castTime > 0 then
 				local now = GetTime()
-				e.cast = { name = name, icon = icon, start = now, ends = now + castTime / 1000 }
+				-- unknown: журнал боя не говорит, можно ли сбить, — без красной подсветки
+				e.cast = { name = name, icon = icon, start = now, ends = now + castTime / 1000, unknown = true }
 			end
 		end
 	elseif sub == "SPELL_CAST_SUCCESS" or sub == "SPELL_CAST_FAILED" then
@@ -1839,6 +2056,7 @@ local function Sync(unit)
 	if cn and cst and cen then
 		local c = e.cast or {}
 		c.name, c.icon, c.start, c.ends, c.locked, c.channel = cn, cicon, cst / 1000, cen / 1000, cni, chan
+		c.unknown = nil
 		e.cast = c
 	else
 		e.cast = nil
@@ -1924,7 +2142,7 @@ local function Row(i)
 	r.cast.icon = r.cast:CreateTexture(nil, "OVERLAY")
 	r.cast.icon:SetPoint("RIGHT", r.cast, "LEFT", -2, 0)
 	r.cast.text = r.cast:CreateFontString(nil, "OVERLAY")
-	r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+	r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE") -- название и секунды у цели (у мобов справа текста нет)
 	r.cast.text:SetPoint("CENTER", r.cast, "CENTER", 0, 0)
 	r.cast:Hide()
 	r.icons = {}
@@ -2021,7 +2239,8 @@ end
 -- (у цели размер не меняем: значки в одну линию со срабатываниями)
 local function Ending(e, name, now)
 	local d = e.debuffs[name]
-	return ENDING_ALERT[name] and d.expires and (d.expires - now) < REND_REFRESH
+	local set = TrackedNames() or ENDING_ALERT -- для ветки задан набор — мигает он
+	return set[name] and d.expires and (d.expires - now) < REND_REFRESH
 end
 local names = {} -- названия ослаблений строки (переиспользуется в Draw)
 
@@ -2150,9 +2369,11 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 			local p = (now - c.start) / math.max(0.01, c.ends - c.start)
 			if p < 0 then p = 0 elseif p > 1 then p = 1 end
 			r.cast:SetValue(c.channel and (1 - p) or p)
-			local hot = not c.locked and KickReady()
+			local hot = not c.locked and not c.unknown and KickReady()
 			if c.locked then
 				r.cast:SetStatusBarColor(0.55, 0.55, 0.55)
+			elseif c.unknown then -- из журнала боя: можно ли сбить, неизвестно
+				r.cast:SetStatusBarColor(0.9, 0.8, 0.3)
 			elseif hot then
 				r.cast:SetStatusBarColor(1, 0.1 * pulse, 0.05)
 			else
@@ -2164,7 +2385,6 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 				r.cast.icon:SetWidth(TARGET_CAST_ICON)
 				r.cast.icon:SetHeight(TARGET_CAST_ICON)
 				r.cast.icon:Show()
-				r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
 				r.cast.text:SetText(c.name .. "  " .. string.format("%.1f", c.ends - now))
 				r.castOv:Hide()
 				r.alarm:Hide()
@@ -2178,7 +2398,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 				SetPortraitToTexture(r.castOv.tex, c.icon or UNKNOWN_FACE) -- круглый, как портрет
 				r.castOv.text:SetText(string.format("%.1f", math.max(0, c.ends - now)))
 				r.castOv:Show()
-				if c.locked then
+				if c.locked or c.unknown then
 					r.alarm:Hide()
 				else
 					r.alarm:SetWidth(fs + 20)
