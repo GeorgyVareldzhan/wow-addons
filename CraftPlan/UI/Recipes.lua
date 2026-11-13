@@ -57,6 +57,11 @@ local trainerCheck = W.Check(f, "CraftPlanRecipesTrainer", "Только у уч
 	function() return DB().apTrainer end,
 	function(v) DB().apTrainer = v or nil; ResetScroll(); CP.RefreshRecipes() end,
 	"Только изученные и те, что учит учитель профессии. Рецепты с торговцев, добычи и заданий скрыты. Рецепты из стека на правке видны всегда.")
+-- "Группировать": headers as in the profession window (gems, plate, mail ...); off by default
+local groupCheck = W.Check(f, "CraftPlanRecipesGroup", "Группировать",
+	function() return DB().apGroup end,
+	function(v) DB().apGroup = v or nil; ResetScroll(); CP.RefreshRecipes() end,
+	"Разделы как в окне профессии. Изученные рецепты берут раздел из окна профессии (откройте его хотя бы раз), неизученные - по типу предмета. Щелчок по разделу сворачивает его.")
 local skillLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 skillLbl:SetText("Навык")
 
@@ -243,6 +248,34 @@ local function Row(i)
 	return r
 end
 
+local listKey, listMemo -- the list cache (List, below); declared here for the header click
+-- Group header rows (a separate pool; the slot i is either a recipe row or a header row)
+local HDRH = 24
+local hdrs = {}
+local function Hdr(i)
+	if hdrs[i] then return hdrs[i] end
+	local h = CreateFrame("Button", nil, f)
+	h:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight", "ADD")
+	h.pm = h:CreateTexture(nil, "ARTWORK")
+	h.pm:SetWidth(14)
+	h.pm:SetHeight(14)
+	h.pm:SetPoint("LEFT", h, "LEFT", 4, 0)
+	h.text = h:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	h.text:SetPoint("LEFT", h.pm, "RIGHT", 6, 0)
+	h.text:SetPoint("RIGHT", h, "RIGHT", -4, 0)
+	h.text:SetJustifyH("LEFT")
+	h:SetScript("OnClick", function(self)
+		local db = DB()
+		db.apCollapsed = db.apCollapsed or {}
+		listKey = nil -- collapsing is not in the cache key
+		local k = self.key
+		if db.apCollapsed[k] then db.apCollapsed[k] = nil else db.apCollapsed[k] = true end
+		CP.RefreshRecipes()
+	end)
+	hdrs[i] = h
+	return h
+end
+
 -- Row height: measured with a hidden string (unwrapped width / name width = lines), cached by name
 local measure = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
 measure:SetPoint("TOPLEFT", f, "TOPLEFT", 0, 0) -- anchored, single point (no wrapping), invisible
@@ -286,10 +319,46 @@ end
 
 -- The filtered, sorted list of one profession; cached for one key (profession, skill, filters, search) until
 -- CP.DropCache (learned recipes, the stack being edited, trainer data). Scrolling reuses it.
-local listKey, listMemo
 CP.OnDrop(function() listKey, listMemo = nil, nil end)
+-- Group of a recipe: the header from the profession window (db.cats, Core.lua DoScan); not seen there - the header
+-- most known recipes with the same item type/subtype have; else the subtype itself; no item data - "Прочее".
+local OTHER = "Прочее"
+local function ItemType(item)
+	if not item or item <= 0 then return nil end
+	local _, _, _, _, _, cls, sub = GetItemInfo(item)
+	if not cls then return nil end
+	return cls .. "|" .. (sub or ""), (sub and sub ~= "" and sub ~= cls) and sub or cls
+end
+local function Groups(prof, sk)
+	local cat = DB().cats and DB().cats[prof]
+	local rec, ord = cat and cat.rec or {}, cat and cat.ord or {}
+	local votes = {}
+	for _, r in ipairs(CP.Recipes(sk)) do
+		local h = rec[r.name]
+		local t = h and ItemType(r.item)
+		if t then
+			votes[t] = votes[t] or {}
+			votes[t][h] = (votes[t][h] or 0) + 1
+		end
+	end
+	local byType = {}
+	for t, v in pairs(votes) do
+		local best, n = nil, 0
+		for h, c in pairs(v) do if c > n or (c == n and h < best) then best, n = h, c end end
+		byType[t] = best
+	end
+	return function(r)
+		local h = rec[r.name]
+		if h then return h end
+		local t, label = ItemType(r.item)
+		if not t then return OTHER end
+		return byType[t] or label
+	end, ord
+end
+
 local function List(prof, rank)
-	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query
+	local group = DB().apGroup
+	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query .. (group and "|g" or "")
 	if listMemo and listKey == key then return listMemo end
 	local sk = CP.SKILL_ID[prof]
 	local set = KSET[DB().apKind or "skill"]
@@ -312,9 +381,36 @@ local function List(prof, rank)
 		if ra ~= rb then return ra < rb end
 		return a.rec.name < b.rec.name
 	end)
+	if group then
+		local GroupOf, ord = Groups(prof, sk)
+		local byG, names = {}, {}
+		for _, d in ipairs(out) do
+			local g = GroupOf(d.rec)
+			if not byG[g] then byG[g] = {}; names[#names + 1] = g end
+			local t = byG[g]
+			t[#t + 1] = d
+		end
+		-- order of the profession window; groups it never showed - after, by name; "Прочее" - last
+		table.sort(names, function(a, b)
+			local oa, ob = ord[a] or (a == OTHER and 100001 or 100000), ord[b] or (b == OTHER and 100001 or 100000)
+			if oa ~= ob then return oa < ob end
+			return a < b
+		end)
+		local col = DB().apCollapsed or {}
+		local flat = {}
+		for _, g in ipairs(names) do
+			local k = prof .. "|" .. g
+			flat[#flat + 1] = { hdr = g, key = k, n = #byG[g], collapsed = col[k] }
+			if not col[k] then
+				for _, d in ipairs(byG[g]) do flat[#flat + 1] = d end
+			end
+		end
+		out = flat
+	end
 	listKey, listMemo = key, out
 	return out
 end
+local function ItemHeight(d) return d.hdr and HDRH or RowHeight(d.rec) end
 
 local curProf, curRank -- the profession shown and its skill (set by CP.RefreshRecipes, used by FillRows)
 
@@ -366,6 +462,9 @@ function CP.RefreshRecipes()
 	trainerCheck:ClearAllPoints()
 	trainerCheck:SetPoint("TOPLEFT", f, "TOPLEFT", 20, y + 2)
 	trainerCheck:SetChecked(DB().apTrainer)
+	groupCheck:ClearAllPoints()
+	groupCheck:SetPoint("LEFT", trainerCheck.label, "RIGHT", 16, -1)
+	groupCheck:SetChecked(DB().apGroup)
 	y = y - 24
 	sc:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
 	curProf, curRank = cur, cur and lines[cur].rank
@@ -377,6 +476,7 @@ FillRows = function()
 	local cur, rank = curProf, curRank
 	if not cur then
 		for _, r in ipairs(rows) do r:Hide() end
+		for _, h in pairs(hdrs) do h:Hide() end
 		return
 	end
 	local db = DB()
@@ -387,7 +487,7 @@ FillRows = function()
 	if list.fitArea ~= area then
 		local fitLast, acc = 0, 0
 		for j = #list, 1, -1 do
-			acc = acc + RowHeight(list[j].rec)
+			acc = acc + ItemHeight(list[j])
 			if acc > area then break end
 			fitLast = fitLast + 1
 		end
@@ -397,11 +497,28 @@ FillRows = function()
 	local offset = FauxScrollFrame_GetOffset(sc)
 	local shown, ry = 0, 0
 	for i = 1, #list - offset do
-		local h = RowHeight(list[offset + i].rec)
+		local h = ItemHeight(list[offset + i])
 		if ry + h > area and i > 1 then break end
 		shown = i
-		local r = Row(i)
 		local d = list[offset + i]
+		if d.hdr then
+			if rows[i] then rows[i]:Hide(); rows[i].data = nil end
+			local hb = Hdr(i)
+			hb:ClearAllPoints()
+			hb:SetPoint("TOPLEFT", sc, "TOPLEFT", 0, -ry)
+			hb:SetPoint("RIGHT", sc, "RIGHT", 0, 0)
+			hb:SetHeight(HDRH)
+			ry = ry + HDRH
+			hb.key = d.key
+			hb.pm:SetTexture(d.collapsed and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
+			hb.text:SetText(d.hdr .. " |cff9a9a9a(" .. d.n .. ")|r")
+			hb:Show()
+			d = nil
+		elseif hdrs[i] then
+			hdrs[i]:Hide()
+		end
+		local r = d and Row(i)
+		if r then
 		r:ClearAllPoints()
 		r:SetPoint("TOPLEFT", sc, "TOPLEFT", 0, -ry)
 		r:SetPoint("RIGHT", sc, "RIGHT", 0, 0)
@@ -477,8 +594,10 @@ FillRows = function()
 		else
 			r:Hide()
 		end
+		end
 	end
 	for i = shown + 1, #rows do rows[i]:Hide() end
+	for i, hb in pairs(hdrs) do if i > shown then hb:Hide() end end -- sparse: slots are headers only sometimes
 end
 
 local function Highlight(on)

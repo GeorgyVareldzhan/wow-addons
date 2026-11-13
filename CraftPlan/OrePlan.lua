@@ -1,6 +1,6 @@
 -- CraftPlan 2.0 — "План по руде": squeeze all skill out of one ore. Only orange and yellow crafts count (green is
 -- left out — too much ore per point). Ore is mined as much as needed; the plan says how much. Yellow (and the
--- leftover green) crafts count with a 85% margin, as prospecting: the plan reaches its skill with CONF, not on average.
+-- leftover green) crafts count with a 95% margin (CP.SKILL_CONF): the plan reaches its skill with CONF, not on average.
 -- "Используя всё из сумок" (on by default): bags, bank and the reagent storage go in, including other materials
 -- of recipes that also need this ore; off — pure ore, the stock is ignored.
 -- "До следующей руды" (off by default): each profession stops at the skill where a later ore starts giving
@@ -192,10 +192,10 @@ local function OrePlan(O, off, useStock, toNext)
 		if k >= c.rec.g or (cap[c.prof] and k >= cap[c.prof]) then return 0 end
 		return Ch(c)
 	end
-	-- skill with a 85% margin (as prospecting): per profession the chance of every whole skill, dist[prof][k];
+	-- skill with a 95% margin (CP.SKILL_CONF): per profession the chance of every whole skill, dist[prof][k];
 	-- a craft moves each skill k by its own chance at k, and the plan goes by the skill reached with CONF
 	-- (rank = the highest k with P(skill >= k) >= CONF), so it crafts and mines more than for the average
-	local CONF = 0.85
+	local CONF = CP.SKILL_CONF
 	local dist = {}
 	for prof in pairs(lines) do dist[prof] = { [math.floor(rank[prof] + 1e-9)] = 1 } end
 	local function ChAtK(c, k, green)

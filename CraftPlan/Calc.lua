@@ -245,10 +245,10 @@ local function BuildStack(si, st, stock)
 	return t
 end
 
--- Skill gain parts with a 85% margin (as prospecting). q = { o = orange crafts (exact), y/g = expected yellow/green,
+-- Skill gain parts with a 95% margin (CP.SKILL_CONF) (as prospecting). q = { o = orange crafts (exact), y/g = expected yellow/green,
 -- ym/gm = yellow/green attempts, yl/gl = their chances }. Each attempt gives +1 with its chance: the distribution of
--- the points (Poisson binomial) -> the points reached with CONF. -> { o, y, g, t, ym, gm, ey, eg }: y/g — 85% per zone,
--- t = o + 85% of yellow and green together, ey/eg — expected. Cached in q (its lists only grow)
+-- the points (Poisson binomial) -> the points reached with CONF. -> { o, y, g, t, ym, gm, ey, eg }: y/g — 95% per zone,
+-- t = o + 95% of yellow and green together, ey/eg — expected. Cached in q (its lists only grow)
 local function Low85(lists)
 	local d, n = { [0] = 1 }, 0
 	for _, l in ipairs(lists) do
@@ -262,7 +262,7 @@ local function Low85(lists)
 	local tail = 0
 	for k = n, 0, -1 do
 		tail = tail + d[k]
-		if tail >= CP.CONF - 1e-9 then return k end
+		if tail >= CP.SKILL_CONF - 1e-9 then return k end
 	end
 	return 0
 end
@@ -278,7 +278,7 @@ function CP.RoundGain(q)
 	return c
 end
 
--- Gain parts for display: { text, color, tip }: "+25" orange (exact), "+0-1" yellow and green (85% - max:
+-- Gain parts for display: { text, color, tip }: "+25" orange (exact), "+0-1" yellow and green (95% - max:
 -- max = attempts in that zone, if each gives +1)
 CP.GAIN_COLOR = { o = { 1, 0.5, 0.25 }, y = { 1, 1, 0 }, g = { 0.25, 0.75, 0.25 } }
 local function Avg(v) return math.floor(v * 10 + 0.5) / 10 end
@@ -288,11 +288,11 @@ function CP.GainParts(q)
 	if rg.o > 0 then out[#out + 1] = { text = "+" .. rg.o, color = CP.GAIN_COLOR.o, tip = "точно: оранжевые создания" } end
 	if rg.ym > 0 then
 		out[#out + 1] = { text = "+" .. rg.y .. (rg.ym > rg.y and ("-" .. rg.ym) or ""), color = CP.GAIN_COLOR.y,
-			tip = "жёлтые: 85% - " .. rg.y .. ", в среднем " .. Avg(rg.ey) .. ", максимум " .. rg.ym }
+			tip = "жёлтые: 95% - " .. rg.y .. ", в среднем " .. Avg(rg.ey) .. ", максимум " .. rg.ym }
 	end
 	if rg.gm > 0 then
 		out[#out + 1] = { text = "+" .. rg.g .. (rg.gm > rg.g and ("-" .. rg.gm) or ""), color = CP.GAIN_COLOR.g,
-			tip = "зелёные: 85% - " .. rg.g .. ", в среднем " .. Avg(rg.eg) .. ", максимум " .. rg.gm }
+			tip = "зелёные: 95% - " .. rg.g .. ", в среднем " .. Avg(rg.eg) .. ", максимум " .. rg.gm }
 	end
 	return out
 end

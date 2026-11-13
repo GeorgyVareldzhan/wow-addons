@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.12"
+CP.VERSION = "2.1.15"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
@@ -59,6 +59,7 @@ CP.TOP_SKILL = 450 -- skill cap in 3.3.5 (the skill bar is drawn up to it)
 -- Sums over many tries — normal approximation: CP.Low85(n, st) — pieces n tries give with 85%,
 -- CP.Tries85(M, st) — tries that give M pieces with 85%
 CP.CONF = 0.85
+CP.SKILL_CONF = 0.95 -- skill from yellow and green crafts (Calc.lua RoundGain, OrePlan.lua)
 local Z85 = 1.0364 -- 85% one-sided quantile of the normal distribution
 function CP.DropStat(d)
 	local p, a, b = d[2] / 100, d[3] or 1, d[4] or d[3] or 1
@@ -329,12 +330,20 @@ local function DoScan(profName, rank, maxRank, expand)
 		end
 	end
 	local seen, full = {}, true
+	-- headers of the profession window: db.cats[prof] = { rec = { [recipe] = header }, ord = { [header] = position } }
+	local cats = DB().cats or {}
+	DB().cats = cats
+	local cat = cats[profName] or { rec = {}, ord = {} }
+	cats[profName] = cat
+	local hdr, pos = nil, 0
 	for i = 1, GetNumTradeSkills() do
 		local name, kind, _, expanded = GetTradeSkillInfo(i)
 		if kind == "header" then
 			if not expanded then full = false end
+			if name then hdr = name; pos = pos + 1; cat.ord[name] = pos end
 		elseif name then
 			seen[name] = true
+			if hdr then cat.rec[name] = hdr end
 		end
 	end
 	if not next(seen) then full = false end -- an empty list is the window not filled yet, not "nothing learned"

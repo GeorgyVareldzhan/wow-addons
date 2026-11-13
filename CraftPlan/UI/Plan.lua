@@ -212,7 +212,7 @@ local function DrawTiles(y, Wd, data)
 		end
 		local yy = ty - 28
 		for _, p in ipairs(tl.profs) do
-			-- one sum "+85%-max", colored by its least reliable part: green / yellow (85%) or orange (exact)
+			-- one sum "+95%-max", colored by its least reliable part: green / yellow (95%) or orange (exact)
 			local rg = CP.RoundGain(p.gain)
 			local col = rg.gm > 0 and "|cff40c040" or (rg.ym > 0 and "|cffffff00" or "|cffff8040")
 			local mx = rg.o + rg.ym + rg.gm
