@@ -172,6 +172,35 @@ local function NearestFlightMaster()
 	return best, bestD
 end
 
+-- Путь TomTom через Questie; если Questie не может (например, Даларан — не зона в списке
+-- клиента), ставим точку на карте континента по тем же координатам
+local CONTINENT_BY_INSTANCE = { [1] = 1, [0] = 2, [530] = 3, [571] = 4 }
+local function SetWaypoint(title, area, x, y)
+	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
+	if TrackerUtils and TrackerUtils.SetTomTomTarget
+		and pcall(TrackerUtils.SetTomTomTarget, TrackerUtils, title, area, x, y) then
+		return true
+	end
+	local ZoneDB = QuestieLoader and QuestieLoader:ImportModule("ZoneDB")
+	local HBD = QuestieCompat and QuestieCompat.HBD
+	if not (TomTom and TomTom.AddZWaypoint and ZoneDB and HBD) then return false end
+	local ui = ZoneDB:GetUiMapIdByAreaId(area)
+	if not ui then return false end
+	local wx, wy = HBD:GetWorldCoordinatesFromZone(x / 100, y / 100, ui)
+	local cont = ui
+	while cont and HBD.mapData[cont] and HBD.mapData[cont].mapType ~= 2 do cont = HBD.mapData[cont].parent end
+	local data = cont and HBD.mapData[cont]
+	local C = data and CONTINENT_BY_INSTANCE[data.instance]
+	local cx, cy
+	if wx and C then cx, cy = HBD:GetZoneCoordinatesFromWorld(wx, wy, cont) end
+	if not cx then return false end
+	local db = Questie and Questie.db and Questie.db.char
+	if db and db._tom_waypoint and TomTom.RemoveWaypoint then pcall(TomTom.RemoveWaypoint, TomTom, db._tom_waypoint) end
+	local uid = TomTom:AddZWaypoint(C, 0, cx * 100, cy * 100, title)
+	if db then db._tom_waypoint = uid end
+	return uid ~= nil
+end
+
 local function WaypointToFlight()
 	if not TomTom then Print("нужен аддон TomTom.") return end
 	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
@@ -179,7 +208,7 @@ local function WaypointToFlight()
 	if not best then Print(d) return end
 	if not (TrackerUtils and TrackerUtils.SetTomTomTarget) then Print("нужен Questie.") return end
 	local zone = TrackerUtils.GetZoneNameByID and TrackerUtils:GetZoneNameByID(best.area) or "?"
-	TrackerUtils:SetTomTomTarget(best.name .. " (полёты)", best.area, best.x, best.y)
+	if not SetWaypoint(best.name .. " (полёты)", best.area, best.x, best.y) then Print("не удалось поставить точку TomTom.") return end
 	Print(string.format("путь TomTom: %s, %s (%.0f, %.0f), примерно %d ярдов по прямой.", best.name, zone, best.x, best.y, math.floor(d + 0.5)))
 end
 
@@ -352,7 +381,7 @@ local function PinClick(self)
 	local fm = self.fm
 	local TrackerUtils = QuestieLoader and QuestieLoader:ImportModule("TrackerUtils")
 	if not (TomTom and TrackerUtils and TrackerUtils.SetTomTomTarget) then Print("нужны TomTom и Questie.") return end
-	TrackerUtils:SetTomTomTarget(fm.name .. " (полёты)", fm.area, fm.x, fm.y)
+	if not SetWaypoint(fm.name .. " (полёты)", fm.area, fm.x, fm.y) then Print("не удалось поставить точку TomTom.") return end
 	Print("путь TomTom: " .. fm.name .. ".")
 end
 local function GetPin()

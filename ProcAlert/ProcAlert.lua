@@ -33,6 +33,7 @@ local PROCS = {
 	{ id = 23881, stances = { BERSERKER }, cond = "BloodthirstProc" }, -- Кровожадность: Оружие в стойке берсерка — когда готова
 	                                                               -- (в остальных случаях — в «Ударах»)
 	{ id = 1680,  stances = { BERSERKER }, cond = "WhirlwindReady" }, -- Вихрь (Whirlwind): когда готов
+	{ id = 46924, stances = { BATTLE, BERSERKER }, cond = "BladestormReady", glow = "SweepActive" }, -- Вихрь клинков (талант): готов, в бою, цель рядом
 	-- cond — имя условия из CONDS (ниже); anyTarget — показывать и без враждебной цели;
 	-- alts — показать первую готовую из списка (иконка меняется)
 	{ id = 18499, anyTarget = true, cond = "Feared", sound = true, glow = "Feared" }, -- Ярость берсерка: на вас страх и т. п. (золотая рамка и звук)
@@ -105,7 +106,7 @@ local IMBA_SIZE = 52       -- размер иконок «ИМБА» (в ряд�
 local KICK_SIZE = 60       -- размер иконок прерываний
 local KICK_Y = 125         -- высота ряда прерываний над нижним рядом
 local ROW_SPACING = 14     -- расстояние между рядами по вертикали
-local DEFAULT_GAP = 18     -- расстояние между иконками в ряду; меняется командой /pa gap <число>
+local DEFAULT_GAP = 8      -- расстояние между иконками в ряду (как было у вас в /pa gap)
 local SLIDE_SPEED = 10     -- скорость сдвига (больше — быстрее)
 local POP_TIME = 0.25      -- длительность «пульса» при появлении сработавшей способности, сек
 local POP_SCALE = 1.5      -- во сколько раз иконка больше в начале «пульса»
@@ -137,6 +138,7 @@ local ACTIVE_BUFFS = {
 	55694, -- Безудержное восстановление
 }
 local DEF_HEALTH = 0.4     -- показывать, когда здоровья меньше этой доли
+local ER_HEALTH = 0.6      -- Безудержное восстановление — при здоровье меньше этой доли
 local DEF_X, DEF_Y = -220, 0 -- центр колонки «мои КД»: слева от персонажа, по центру экрана по высоте
 
 
@@ -169,7 +171,7 @@ local function DefEnabled() -- по умолчанию включено; /pa def
 end
 
 local function GetGap()
-	return (ProcAlertDB and ProcAlertDB.gap) or DEFAULT_GAP
+	return DEFAULT_GAP
 end
 
 -- Точка, вокруг которой центрируются ряды
@@ -289,6 +291,19 @@ local function ItemSize(row, f)
 	return f.imba and math.max(row.size, IMBA_SIZE) or row.size
 end
 
+-- Внутри связки Размашистые удары + Вихрь клинков (ключи -12328 / -46924) значки ближе друг к другу
+-- а от соседних срабатываний — дальше на COMBO_MARGIN: от рамки до соседа столько же, сколько между срабатываниями
+local COMBO_GAP = 4
+local COMBO_PAD = 9 -- на столько рамка связки выступает за значки
+local COMBO_MARGIN = COMBO_PAD -- от рамки до соседнего срабатывания — обычный промежуток
+local function IsCombo(f) return f and (f.spellID == -12328 or f.spellID == -46924) end
+local function PairGap(prev, f, gap)
+	local a, b = IsCombo(prev), IsCombo(f)
+	if a and b then return COMBO_GAP end
+	if a or b then return gap + COMBO_MARGIN end
+	return gap
+end
+
 local function Layout(row)
 	if row.ordered then
 		table.sort(row.items, function(a, b) return (regularOrder[a.spellID] or 0) < (regularOrder[b.spellID] or 0) end)
@@ -296,17 +311,18 @@ local function Layout(row)
 	local gap, total, maxSize = GetGap(), 0, row.size
 	for i, f in ipairs(row.items) do
 		local size = ItemSize(row, f)
-		total = total + size + (i > 1 and gap or 0)
+		total = total + size + (i > 1 and PairGap(row.items[i - 1], f, gap) or 0)
 		if not f.removing and size > maxSize then maxSize = size end
 	end
 	row.width = total -- по ней цель справа и значок стойки слева отодвигаются от ряда
 	row.maxSize = maxSize -- по нему ряд обычных ударов поднимается над срабатываниями
 	local x = -total / 2
-	for _, f in ipairs(row.items) do
+	for i, f in ipairs(row.items) do
 		local size = ItemSize(row, f)
+		if i > 1 then x = x + PairGap(row.items[i - 1], f, gap) end
 		f.targetX = x + size / 2
 		if not f.x then f.x = f.targetX end -- новая иконка сразу на своём месте
-		x = x + size + gap
+		x = x + size
 	end
 end
 
@@ -514,6 +530,42 @@ local function StanceAllows(stances)
 	end
 	return false
 end
+
+-- Сколько врагов рядом в ближнем бою: цель и те, кто за последние MELEE_WINDOW секунд бил вас
+-- с руки или кого били вы (по журналу боя). Полоски над головами не годятся: видны и дальние мобы
+local MELEE_WINDOW = 4
+local MeleeEnemies
+do
+	local seen = {} -- GUID врага -> когда последний раз был в ближнем бою
+	local HOSTILE = COMBATLOG_OBJECT_REACTION_HOSTILE or 0x40
+	local RANGED = { [57755] = true, [64382] = true } -- Героический бросок, Сокрушающий бросок: попали — не значит, что враг рядом
+	local f = CreateFrame("Frame")
+	f:RegisterEvent("COMBAT_LOG_EVENT_UNFILTERED")
+	f:RegisterEvent("PLAYER_REGEN_ENABLED")
+	f:SetScript("OnEvent", function(_, event, _, sub, srcGUID, _, srcFlags, dstGUID, _, dstFlags, spellId)
+		if event == "PLAYER_REGEN_ENABLED" then wipe(seen) return end
+		if sub == "UNIT_DIED" then seen[dstGUID] = nil return end
+		local me = UnitGUID("player")
+		if dstGUID == me and (sub == "SWING_DAMAGE" or sub == "SWING_MISSED") then
+			if srcFlags and bit.band(srcFlags, HOSTILE) > 0 then seen[srcGUID] = GetTime() end
+		elseif srcGUID == me and (sub == "SWING_DAMAGE" or sub == "SWING_MISSED" or sub == "SPELL_DAMAGE" or sub == "SPELL_MISSED") then
+			if dstFlags and bit.band(dstFlags, HOSTILE) > 0 and not RANGED[spellId] then seen[dstGUID] = GetTime() end
+		end
+	end)
+	MeleeEnemies = function()
+		local now, count = GetTime(), 0
+		local target = UnitExists("target") and UnitCanAttack("player", "target") and UnitGUID("target")
+		for guid, t in pairs(seen) do
+			if now - t > MELEE_WINDOW then
+				seen[guid] = nil
+			elseif guid ~= target then
+				count = count + 1
+			end
+		end
+		return count + (target and 1 or 0)
+	end
+end
+
 
 -- Любая текущая перезарядка способности, включая общую: начало и длительность или nil
 local function AnyCooldownOf(name)
@@ -754,7 +806,19 @@ do
 	end
 end
 
+-- Связка Размашистые удары + Вихрь клинков: оба готовы, боевая / берсерка, в бою, рядом от COMBO_ENEMIES врагов
+local COMBO_ENEMIES = 2
+local function ComboReady()
+	local ss, bs = Known(12328), Known(46924)
+	if not (ss and bs) then return false end
+	local st = CurrentStance()
+	if st ~= BATTLE and st ~= BERSERKER then return false end
+	if CooldownOf(ss) or CooldownOf(bs) or MyBuff(12328) or MyBuff(46924) then return false end
+	return UnitAffectingCombat("player") and HasEnemyTarget() and MeleeEnemies() >= COMBO_ENEMIES or false
+end
+
 local CONDS = {
+	SweepActive = function() return MyBuff(12328) and true or false end, -- висят Размашистые удары
 	ShieldSlamProc = function()
 		if MyBuff(50227) then return true end
 		if CurrentStance() ~= DEFENSIVE then return false end
@@ -765,6 +829,12 @@ local CONDS = {
 		if Spec() ~= "arms" then return false end -- другие ветки пока не настроены
 		local bt = Known(23881)
 		return bt and not CooldownOf(bt) and true or false
+	end,
+	BladestormReady = function()
+		local bs = Known(46924)
+		return bs and not CooldownOf(bs) and not MyBuff(46924) and UnitAffectingCombat("player") and not ComboReady()
+			and PlayerRage() >= (RageCost(bs) or 0) -- только когда ярости хватает
+			and CheckInteractDistance("target", 3) and true or false -- цель рядом (~10 м)
 	end,
 	WhirlwindReady = function()
 		local ww = Known(1680)
@@ -946,7 +1016,9 @@ local function UpdateDefensive()
 	for _, spellID in ipairs(DEFENSIVE_CDS) do
 		local name, texture = Known(spellID)
 		local f = kickRow.bySpell[spellID]
-		if name and active then
+		-- Глухая оборона на перезарядке не показывается
+		local hidden = spellID == 871 and not test and name and CooldownOf(name)
+		if name and active and not hidden then
 			f = f or AddItem(kickRow, spellID, name, texture, true)
 			f.removing = false
 			SetItemCooldown(f, CooldownOf(name))
@@ -956,6 +1028,22 @@ local function UpdateDefensive()
 		elseif f then
 			f.removing = true
 		end
+	end
+	-- Безудержное восстановление: при здоровье < ER_HEALTH в любой стойке, только когда его можно
+	-- включить (вы в исступлении, ярости хватает) и оно не на перезарядке
+	-- (в верхнем ряду, с защитными)
+	local er, erTex = Known(55694)
+	local f = kickRow.bySpell[55694]
+	local max = UnitHealthMax("player")
+	local erLow = max and max > 0 and not UnitIsDeadOrGhost("player") and UnitHealth("player") / max < ER_HEALTH
+	local erReady = er and (test or (DefEnabled() and erLow and IsUsableSpell(er) and not CooldownOf(er)
+		and PlayerRage() >= (RageCost(er) or 0)))
+	if f and f.expiresAt then return end -- /pa test
+	if erReady then
+		f = f or AddItem(kickRow, 55694, er, erTex, true)
+		f.removing = false
+	elseif f then
+		f.removing = true
 	end
 end
 
@@ -1486,6 +1574,65 @@ shoutWatcher:SetScript("OnEvent", function(_, _, unit, spellName)
 	end
 end)
 
+-- Связка от COMBO_ENEMIES врагов рядом: Размашистые удары + Вихрь клинков — два значка рядом в ряду
+-- срабатываний под общей золотой пульсирующей рамкой с подложкой; только когда ярости хватает на оба. Отдельные функции: у checker предел на внешние переменные
+local COMBO_SS, COMBO_BS = -12328, -46924
+local function ComboItem(key, name, tex, need, ready)
+	local f = procRow.bySpell[key]
+	if f and f.expiresAt then return end -- /pa test
+	if ready and name then
+		f = f or AddItem(procRow, key, name, tex, true)
+		f.removing = false
+		f.icon:SetTexture(tex)
+		f.noMana = PlayerRage() < need
+		f.rage:SetText(f.noMana and (PlayerRage() .. "/" .. need) or "")
+		f.badge:Hide()
+	elseif f then
+		f.removing = true
+	end
+end
+local function ComboProc()
+	local ss, ssTex = Known(12328)
+	local bs, bsTex = Known(46924)
+	local ssCost = ss and RageCost(ss) or 0
+	local both = ssCost + (bs and RageCost(bs) or 0)
+	local ready = ComboReady() and PlayerRage() >= both -- только когда ярости хватает на оба
+	ComboItem(COMBO_SS, ss, ssTex, ssCost, ready)
+	ComboItem(COMBO_BS, bs, bsTex, both, ready)
+end
+
+-- общая рамка связки: по положению двух значков, каждый кадр
+;(function()
+local PAD = COMBO_PAD
+local box = CreateFrame("Frame", nil, anchor)
+box:SetFrameLevel(anchor:GetFrameLevel())
+box:Hide()
+-- рамка с закруглёнными углами (как у подсказок), окрашена в золото; подложка — тёмно-золотая
+box:SetBackdrop({
+	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+	edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+	tile = true, tileSize = 16, edgeSize = 16,
+	insets = { left = 4, right = 4, top = 4, bottom = 4 },
+})
+box:SetBackdropColor(1, 0.82, 0, 0.4) -- золотая подложка
+box:SetScript("OnUpdate", function(self)
+	local a, b = procRow.bySpell[COMBO_SS], procRow.bySpell[COMBO_BS]
+	if not (a and b and a.x and b.x) then self:Hide() return end
+	local l = math.min(a.x, b.x) - PROC_SIZE / 2 - PAD
+	local r = math.max(a.x, b.x) + PROC_SIZE / 2 + PAD
+	self:ClearAllPoints()
+	self:SetPoint("CENTER", anchor, "CENTER", (l + r) / 2, procRow.y)
+	self:SetWidth(r - l)
+	self:SetHeight(PROC_SIZE + PAD * 2)
+	self:SetBackdropBorderColor(1, 0.82, 0, 1)
+	self:SetAlpha(math.min(a.alpha or 0, b.alpha or 0))
+end)
+local watch = CreateFrame("Frame") -- показываем рамку, когда появились оба значка
+watch:SetScript("OnUpdate", function()
+	if procRow.bySpell[COMBO_SS] and procRow.bySpell[COMBO_BS] then box:Show() end
+end)
+end)()
+
 -- Ярость, которая останется после смены стойки: талант «Тактическое превосходство» (по 5 за ранг)
 -- или сколько сохранялось по наблюдению (StanceKeep), что больше
 local TacticalKeep
@@ -1508,6 +1655,55 @@ do
 			end
 		end
 		return math.max(rank * 5, (ProcAlertDB and ProcAlertDB.stanceKeep) or 0)
+	end
+end
+
+-- Обезоруживание (только PvP — цель игрок): с оружием рядом, не обезоружена, готово. В оборонительной —
+-- без значка, в другой стойке — со значком оборонительной (если ярости хватит после смены стойки).
+-- Оружие — по осмотру (правая рука). Отдельная функция: у checker предел на внешние переменные
+local DISARM_KEY = -676
+local DisarmProc
+do
+	local inspected
+	local w = CreateFrame("Frame")
+	w:RegisterEvent("PLAYER_TARGET_CHANGED")
+	w:SetScript("OnEvent", function() inspected = nil end)
+	local function HasWeapon()
+		if UnitIsPlayer("target") then
+			if GetInventoryItemTexture("target", 16) then return true end
+			local guid = UnitGUID("target")
+			if inspected ~= guid and CanInspect("target") and CheckInteractDistance("target", 1)
+				and not (InspectFrame and InspectFrame:IsShown()) then
+				inspected = guid
+				NotifyInspect("target")
+			end
+		end
+		return false
+	end
+	DisarmProc = function(enemy)
+		local f = procRow.bySpell[DISARM_KEY]
+		if f and f.expiresAt then return end -- /pa test
+		local name, texture = Known(676)
+		local inDef = CurrentStance() == DEFENSIVE
+		local cost = name and (RageCost(name) or 15) or 0
+		local show = enemy and name and not CooldownOf(name) and not UnitDebuff("target", name)
+			and (inDef or (Known(STANCE_SPELLS[DEFENSIVE]) and math.min(PlayerRage(), TacticalKeep()) >= cost))
+			and CheckInteractDistance("target", 3) and HasWeapon()
+		if not show then
+			if f then f.removing = true end
+			return
+		end
+		f = f or AddItem(procRow, DISARM_KEY, name, texture, true)
+		f.removing = false
+		f.blocked = false
+		f.noMana = inDef and PlayerRage() < cost
+		f.rage:SetText(f.noMana and RageText(name) or "")
+		if inDef then
+			f.badge:Hide()
+		else
+			f.badge:SetTexture(select(3, GetSpellInfo(STANCE_SPELLS[DEFENSIVE])))
+			f.badge:Show()
+		end
 	end
 end
 
@@ -1556,6 +1752,7 @@ local function GapProc(enemy)
 	else
 		f.badge:Hide()
 	end
+	DisarmProc(enemy) -- Обезоруживание (отсюда: у checker предел на внешние переменные)
 end
 
 local checker = CreateFrame("Frame")
@@ -1608,6 +1805,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 	end
 
 	GapProc(enemy) -- Рывок / Перехват: всегда, светится, когда можно
+	ComboProc() -- связка Размашистые удары + Вихрь клинков от 2 врагов
 
 	-- Превосходство из стойки берсерка: цель уклонилась (5 с) или «Вкус крови» — значок боевой стойки
 	-- в углу: перейдите в боевую и бейте. Только если при смене стойки почти не потеряете ярость
@@ -1732,6 +1930,14 @@ local function Test()
 			f.buffExpires = f.expiresAt
 		end
 	end
+	-- связка Размашистые удары + Вихрь клинков (общая золотая рамка), если оба изучены
+	local ss, ssTex = Known(12328)
+	local bs, bsTex = Known(46924)
+	if ss and bs and not procRow.bySpell[COMBO_SS] and not procRow.bySpell[COMBO_BS] then
+		local f1 = AddItem(procRow, COMBO_SS, ss, ssTex, true)
+		local f2 = AddItem(procRow, COMBO_BS, bs, bsTex, true)
+		f1.expiresAt, f2.expiresAt = GetTime() + TEST_TIME + 2, GetTime() + TEST_TIME + 2
+	end
 	local delay, shown = 1, 0
 	for _, p in ipairs(PROCS) do
 		local spellID = p.id
@@ -1757,7 +1963,7 @@ local function Test()
 	end
 end
 
--- /pa — справка; /pa test, /pa sound, /pa keys, /pa normal, /pa gap <число>
+-- /pa — справка; /pa test, /pa sound, /pa keys, /pa normal
 SLASH_PROCALERT1 = "/pa"
 SlashCmdList["PROCALERT"] = function(msg)
 	msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -1773,17 +1979,6 @@ SlashCmdList["PROCALERT"] = function(msg)
 	elseif msg == "normal" then
 		ProcAlertDB.regular = not RegularEnabled()
 		Print("ряд обычных ударов: " .. onoff(ProcAlertDB.regular) .. ".")
-	elseif msg:match("^gap") then
-		local n = tonumber(msg:match("^gap%s+(%-?%d+)$"))
-		if n and n >= 0 and n <= 200 then
-			ProcAlertDB.gap = n
-			Layout(procRow)
-			Layout(regularRow)
-			Layout(kickRow)
-			Print("расстояние между иконками: " .. n .. ".")
-		else
-			Print("укажите число от 0 до 200, например /pa gap 18 (сейчас: " .. GetGap() .. ").")
-		end
 	elseif msg == "debug" then
 		-- что аддон видит по сработавшим способностям прямо сейчас
 		Print("стойка: " .. tostring(CurrentStance()) .. ", ярость: " .. PlayerRage())
@@ -1834,7 +2029,7 @@ SlashCmdList["PROCALERT"] = function(msg)
 		Test()
 	else
 		Print("/pa test — пример, /pa normal — ряд обычных ударов (" .. onoff(RegularEnabled()) .. "); /pa def — защитные (" .. onoff(DefEnabled()) .. "); /pa cds — мои КД (" .. onoff(ProcAlertDB.cds ~= false) .. "); /pa enemies — список врагов справа (" .. onoff(ProcAlertDB.enemies ~= false) .. "); /pa stance — значок стойки (" .. onoff(ProcAlertDB.stanceLine ~= false) .. "); /pa hs <число> или auto — ярость для Удара героя; /pa alert — звук важных срабатываний (" .. onoff(AlertEnabled()) .. "); /pa rage — полоска ярости (" .. onoff(RageBarEnabled()) .. "); /pa keys — клавиши ("
-			.. onoff(KeysEnabled()) .. "); /pa sound — звук (" .. onoff(SoundEnabled()) .. "); /pa gap <число> — расстояние (" .. GetGap() .. ").")
+			.. onoff(KeysEnabled()) .. "); /pa sound — звук (" .. onoff(SoundEnabled()) .. ").")
 	end
 end
 
@@ -1868,6 +2063,7 @@ local function KickReady()
 	return false
 end
 local ICON = 34
+local TARGET_DEBUFF_GAP = 6 -- промежуток между вашими ослаблениями в строке цели
 -- Главные ослабления — первыми (все значки одного размера ICON): замедление — моб не убежит,
 -- Кровопускание — от него «Вкус крови» и Превосходство, Раскол брони — стаки
 local PRIORITY = {
@@ -2272,9 +2468,9 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		for k = #names, 1, -1 do names[k] = nil end
 		for name in pairs(e.debuffs) do names[#names + 1] = name end
 		table.sort(names, ByPriority)
-		-- у цели значки размером со срабатывания и с тем же промежутком
+		-- у цели значки размером со срабатывания, промежуток TARGET_DEBUFF_GAP
 		local base = vertical and PROC_SIZE or ICON
-		local gap = vertical and GetGap() or 3
+		local gap = vertical and TARGET_DEBUFF_GAP or 3
 		local iconsW, maxSize = 0, 0
 		for k, name in ipairs(names) do
 			local size = (Ending(e, name, now) and not vertical) and REND_BIG or base
