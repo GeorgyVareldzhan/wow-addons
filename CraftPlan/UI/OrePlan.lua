@@ -12,7 +12,9 @@ local SEL_BG, SEL_BORDER = { 0.23, 0.18, 0.07 }, { 0.79, 0.64, 0.15 }
 local COL_MID, COL_GREEN, COL_ORANGE, COL_YELLOW, COL_LEARN = { 0.6, 0.6, 0.6 }, { 0.25, 0.75, 0.25 }, { 1, 0.5, 0.25 }, { 1, 1, 0 }, { 0.4, 0.8, 1 }
 local CHECK_UP, CHECK_ON = "Interface\\Buttons\\UI-CheckBox-Up", "Interface\\Buttons\\UI-CheckBox-Check"
 local TIP_STOCK = { "С галкой — в дело идёт всё из сумок, банка и хранилища, в том числе другие материалы рецептов, и учитываются другие стеки: их материалы не трогаются, их руда добывается вместе с планом. Без — чисто руда." }
+-- "выучить" — at the trainer, "купить" — a recipe from a vendor seen (the vendor window was opened)
 local TIP_ORE = { "Навык жёлтых и зелёных созданий - с запасом 95%. Камни просеивания, руда и камни из жил - с запасом 85%." }
+local TIP_SIDE = { "Рецептам плана нужны и слитки этой руды: переплавить из запаса, недостающее добыть." }
 local TIP_NEXT = { "Качать только до навыка, с которого следующая руда даёт оранжевые рецепты." }
 
 local function Check(cv, x, y, on, label, color, action, tip)
@@ -116,6 +118,18 @@ local function DrawTotals(cv, P, X, y, RW, useStock)
 		tip = { TIP_ORE[1], "На другие стеки: " .. P.stackUse .. " руды, из них добыть " .. P.stackOre .. "." }
 	end
 	cv:Area(X, y + 2, RW, 18, { lines = tip })
+	-- other ores the plan's recipes also need (their bars): from the stock, the rest is mined
+	for _, s in ipairs(P.sideOres or {}) do
+		y = y - 20
+		local line = "+ " .. CP.ItemName(s.ore) .. ": " .. s.used
+		if useStock then
+			line = line .. ", есть " .. s.have
+			if s.mined > 0 then line = line .. ", добыть |cffffd100" .. s.mined .. "|r" end
+		end
+		cv:Text(line, X, y, "GameFontHighlight", RW)
+		cv:Area(X, y + 2, RW, 18, { lines = TIP_SIDE })
+	end
+	return y
 end
 
 -- the plan's crafts, by profession
@@ -135,7 +149,20 @@ local function DrawSteps(cv, P, X, y, RW)
 		local col = s.mid and COL_MID or (s.green and COL_GREEN or (from < c.rec.y and COL_ORANGE or COL_YELLOW))
 		cv:Icon(CP.ItemIcon(c.rec.item > 0 and c.rec.item or nil), X + 4, y - 1, 20, { link = c.rec.item > 0 and ("item:" .. c.rec.item) or nil })
 		local fs = cv:Text(c.rec.name, X + 30, y - 4, "GameFontHighlightSmall", nil, nil, col)
-		if P.learn[c] then cv:Text("выучить", X + 30 + fs:GetStringWidth() + 8, y - 4, "GameFontHighlightSmall", nil, nil, COL_LEARN) end
+		if P.learn[c] then
+			local lx = X + 30 + fs:GetStringWidth() + 8
+			local lf = cv:Text(c.shop and "купить" or "выучить", lx, y - 4, "GameFontHighlightSmall", nil, nil, COL_LEARN)
+			local tip
+			if c.shop then
+				local sh = c.shop
+				tip = { "Торговец: " .. (sh.npc or "?") .. (sh.zone and (" (" .. sh.zone .. ")") or ""),
+					sh.ext and "Цена: особая валюта" or ("Цена: " .. CP.Money(sh.cost)) }
+			else
+				tip = { "У учителя" .. ((c.cost and c.cost > 0) and (": " .. CP.Money(c.cost)) or "") }
+			end
+			if c.req and c.req > 0 then tip[#tip + 1] = "С навыка " .. c.req end
+			cv:Area(lx - 2, y + 2, lf:GetStringWidth() + 4, 18, { lines = tip })
+		end
 		cv:Text("x" .. s.n, X + RW - 150, y - 4, "GameFontNormal", 50, "CENTER", GOLD)
 		cv:Text(from .. " - " .. math.floor(s.to + 1e-9), X + RW - 96, y - 4, "GameFontHighlightSmall", 90, "CENTER", HEAD)
 		y = y - 24
@@ -187,7 +214,7 @@ function CP.DrawOrePlan(cv, y, Wd)
 		cv:Text("Навыка с этой руды не получить.", X, y, "GameFontDisableSmall")
 		y = DrawNext(cv, P, X, y - 20)
 	else
-		DrawTotals(cv, P, X, y, RW, useStock)
+		y = DrawTotals(cv, P, X, y, RW, useStock)
 		y = DrawSteps(cv, P, X, y - 22, RW)
 		y = DrawNext(cv, P, X, y)
 		if P.left[1] then

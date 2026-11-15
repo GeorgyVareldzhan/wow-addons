@@ -32,6 +32,8 @@ end
 function CP.LearnReq(sk, name)
 	local l = DB().learn and DB().learn[sk] and DB().learn[sk][name]
 	if l and l.req then return l.req end
+	local s = CP.ShopInfo and CP.ShopInfo(sk, name)
+	if s and s.req then return s.req end
 	local prof = CP.SKILL_NAME[sk]
 	local item = prof and CP.RecipeItem and CP.RecipeItem(prof, name)
 	return item and CP.BookReq(item, prof) or nil

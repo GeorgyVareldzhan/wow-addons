@@ -231,6 +231,11 @@ local function Row(i)
 		if not d.known then
 			GameTooltip:AddLine("Не изучен" .. (d.req and (", учится с навыка " .. d.req) or "") .. ". Где учить:", 1, 0.5, 0.25)
 			local src = CP.RecipeSource and CP.RecipeSource(d.prof, d.rec.name) or { "Нет данных: перезапустите игру (новый файл Sources.lua)." }
+			local sh = CP.ShopInfo(d.rec.sk, d.rec.name)
+			if sh then
+				GameTooltip:AddLine("  Видели у торговца: " .. (sh.npc or "?") .. (sh.zone and (" (" .. sh.zone .. ")") or "") ..
+					(sh.ext and ", особая валюта" or (", " .. CP.Money(sh.cost))), 0.4, 0.8, 1, true)
+			end
 			for _, l in ipairs(src) do GameTooltip:AddLine("  " .. l, 1, 1, 1, true) end
 		end
 		GameTooltip:AddLine("Пороги: жёлтый с " .. d.rec.y .. ", серый с " .. d.rec.g .. ".", 0.8, 0.8, 0.8)
@@ -534,7 +539,8 @@ FillRows = function()
 			r.icon:SetAlpha(d.known and 1 or 0.6)
 			r.name:SetText(hex .. rec.name .. "|r")
 			local li = not d.known and CP.LearnInfo(rec.sk, d.prof, rec.name)
-			r.price:SetText((li and li.at and li.cost > 0) and CP.Money(li.cost) or "")
+			local sh = not d.known and not (li and li.at) and CP.ShopInfo(rec.sk, rec.name)
+			r.price:SetText(((li and li.at and li.cost > 0) and CP.Money(li.cost)) or ((sh and not sh.ext and sh.cost > 0) and CP.Money(sh.cost)) or "")
 			-- learn skill (not for grey), gain
 			local mid = math.floor((rec.y + rec.g) / 2)
 			local from = math.max(rank, d.req or 0)

@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.15"
+CP.VERSION = "2.1.18"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
@@ -426,12 +426,21 @@ function CP.KnownRecipe(prof, name)
 end
 
 ----------------------------------------------------------------------------------------------
+-- One chat line per scan: new recipes (not seen before) by profession, "учитель: Кузнечное дело +12."
+local function ReportNew(where, added)
+	local parts = {}
+	for sk, n in pairs(added) do parts[#parts + 1] = (CP.SKILL_NAME[sk] or "?") .. " +" .. n end
+	if not parts[1] then return end
+	table.sort(parts)
+	CP.Print(where .. ": новые рецепты - " .. table.concat(parts, ", ") .. ".")
+end
+
 -- Trainer: which skill a recipe is learned at and its cost. learn[skill][name] = { req, cost }
 local function ScanTrainer()
 	if not (IsTradeskillTrainer and IsTradeskillTrainer()) then return end
 	local db = DB()
 	db.learn = db.learn or {}
-	local changed = false
+	local changed, added = false, {}
 	for i = 1, GetNumTrainerServices() do
 		local name, _, kind = GetTrainerServiceInfo(i)
 		local ok, skill = pcall(GetTrainerServiceSkillLine, i)
@@ -443,11 +452,48 @@ local function ScanTrainer()
 			local cost = GetTrainerServiceCost(i) or 0
 			local old = t[name]
 			local used = kind == "used" or nil -- already learned (the reminder drops it before the profession window is opened)
+			if not old then added[sk] = (added[sk] or 0) + 1 end
 			if not (old and old.req == (req or 0) and old.cost == cost and old.used == used) then changed = true end
 			t[name] = { req = req or 0, cost = cost, used = used }
 		end
 	end
+	ReportNew("учитель", added)
 	if changed then CP.Changed() end
+end
+
+-- Vendor: recipe items of your professions it sells (the window must be open).
+-- db.shop[skill][recipe] = { cost, item, npc, zone, ext = paid with tokens, req = learn skill or nil };
+-- the last vendor seen wins. Counts as learnable in the ore plan ("купить"), see CP.ShopInfo
+local function ScanMerchant()
+	local db = DB()
+	db.shop = db.shop or {}
+	local lines = CP.SkillLines()
+	local npc, zone = UnitName("npc"), GetRealZoneText()
+	local changed, added = false, {}
+	for i = 1, GetMerchantNumItems() do
+		local name, _, price, _, _, _, ext = GetMerchantItemInfo(i)
+		local item = CP.ItemOfLink(GetMerchantItemLink(i))
+		local taught, plain = CP.RecipeNameFromItem(name)
+		local rec = taught and CP.FindByName(nil, taught)
+		if not rec and plain and plain ~= taught then rec = CP.FindByName(nil, plain) end
+		local prof = rec and CP.SKILL_NAME[rec.sk]
+		if prof and lines[prof] and item then
+			local t = db.shop[rec.sk] or {}
+			db.shop[rec.sk] = t
+			local old = t[rec.name]
+			local req = CP.BookReq(item, prof) or (old and old.req)
+			if not old then added[rec.sk] = (added[rec.sk] or 0) + 1 end
+			if not (old and old.cost == price and old.npc == npc and old.req == req) then changed = true end
+			t[rec.name] = { cost = price or 0, item = item, npc = npc, zone = zone, ext = ext and true or nil, req = req }
+		end
+	end
+	ReportNew("торговец " .. (npc or "?"), added)
+	if changed then CP.Changed() end
+end
+-- the vendor entry of a recipe, or nil
+function CP.ShopInfo(sk, name)
+	local s = DB().shop and DB().shop[sk]
+	return s and s[name]
 end
 
 -- Skill a recipe is learned at: the trainer, otherwise "Требуется: … (N)" in the recipe item's tooltip
@@ -539,7 +585,8 @@ end
 
 local events = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "BAG_UPDATE", "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE", "SKILL_LINES_CHANGED",
-	"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "TRAINER_SHOW", "TRAINER_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT" }) do
+	"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "TRAINER_SHOW", "TRAINER_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT",
+	"MERCHANT_SHOW", "MERCHANT_UPDATE" }) do
 	events:RegisterEvent(e)
 end
 events:SetScript("OnEvent", function(_, event)
@@ -578,6 +625,9 @@ events:SetScript("OnEvent", function(_, event)
 		CP.ScanTradeSkillSoon()
 	elseif event == "TRAINER_SHOW" or event == "TRAINER_UPDATE" then
 		pcall(ScanTrainer)
+	elseif event == "MERCHANT_SHOW" or event == "MERCHANT_UPDATE" then
+		local ok, err = pcall(ScanMerchant)
+		if not ok then CP.Print("|cffff4040ошибка:|r " .. tostring(err)) end
 	else
 		CP.Changed()
 	end
