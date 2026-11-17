@@ -602,7 +602,7 @@ FillRows = function()
 		end
 		end
 	end
-	for i = shown + 1, #rows do rows[i]:Hide() end
+	for i, rw in pairs(rows) do if i > shown then rw:Hide() end end -- sparse too: header slots have no row
 	for i, hb in pairs(hdrs) do if i > shown then hb:Hide() end end -- sparse: slots are headers only sometimes
 end
 

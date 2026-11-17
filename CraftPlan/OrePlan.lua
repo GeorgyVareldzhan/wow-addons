@@ -72,27 +72,18 @@ local function DoDerive(O, useStock)
 	-- what the veins drop along with the ore (stone, gems, crystals): comes with every mined ore (Data/VeinData.lua)
 	local vein = CP.VeinBase and CP.VeinBase(O)
 	if vein then for id in pairs(vein.drops) do ok[id] = true; byprod[id] = true end end
-	-- other ores ("side"): what is made only of another ore S (its bars) — a recipe of this ore that also needs it
-	-- gets it by smelting S from the stock, the rest of S is mined too. side[item] = S, sideRec[item] = the recipe
-	local side, sideRec = {}, {}
-	for _, S in ipairs(ORES) do
-		if S ~= O and not ok[S] then
-			local mk = { [S] = true }
-			if not side[S] then side[S] = S end
-			local more = true
-			while more do
-				more = false
-				for _, c in ipairs(all) do
-					local it = c.rec.item
-					if it > 0 and not mk[it] and not ok[it] and c.rec.reag[1] then
-						local every = true
-						for _, g in ipairs(c.rec.reag) do if not mk[g.id] then every = false break end end
-						if every then
-							mk[it], more = true, true
-							if not side[it] then side[it], sideRec[it] = S, c end
-						end
-					end
-				end
+	-- other ores and what is made only of them (their bars): never taken from the stock
+	local other = {}
+	for id in pairs(ORE_SET) do if id ~= O then other[id] = true end end
+	local more = true
+	while more do
+		more = false
+		for _, c in ipairs(all) do
+			local it = c.rec.item
+			if it > 0 and not other[it] and not ok[it] and #c.rec.reag > 0 then
+				local only = true
+				for _, g in ipairs(c.rec.reag) do if not other[g.id] then only = false break end end
+				if only then other[it] = true; more = true end
 			end
 		end
 	end
@@ -104,7 +95,7 @@ local function DoDerive(O, useStock)
 				local some, every = false, true
 				for _, g in ipairs(c.rec.reag) do
 					if ok[g.id] then some = true
-					elseif not ((useStock and CP.Have(g.id) > 0) or side[g.id]) then every = false break end
+					elseif other[g.id] or not (useStock and CP.Have(g.id) > 0) then every = false break end
 				end
 				if some and every then
 					inR[c] = true
@@ -116,8 +107,7 @@ local function DoDerive(O, useStock)
 			end
 		end
 	end
-	return { lines = lines, gemPer = gemPer, gemSt = gemSt, ok = ok, extra = extra, R = R, byprod = byprod, vein = vein,
-		side = side, sideRec = sideRec }
+	return { lines = lines, gemPer = gemPer, gemSt = gemSt, ok = ok, extra = extra, R = R, byprod = byprod, vein = vein }
 end
 -- without the stock the result does not depend on bags: memoized per ore
 local function Derive(O, useStock)
@@ -156,7 +146,6 @@ local KIND_LETTER = { optimal = "o", medium = "y" }
 local function OrePlan(O, off, useStock, toNext)
 	local D = Derive(O, useStock)
 	local lines, gemPer, gemSt, ok, extra, R, byprod, vein = D.lines, D.gemPer, D.gemSt, D.ok, D.extra, D.R, D.byprod, D.vein
-	local side, sideRec = D.side, D.sideRec
 	local rank, start = {}, {}
 	for prof, L in pairs(lines) do rank[prof], start[prof] = L.rank, L.rank end
 	local function Stock(id) return useStock and CP.Have(id) or 0 end
@@ -181,10 +170,6 @@ local function OrePlan(O, off, useStock, toNext)
 	local pool = {}
 	for id in pairs(ok) do pool[id] = Stock(id) end
 	for id in pairs(extra) do pool[id] = Stock(id) end
-	for id, S in pairs(side) do
-		if extra[id] then pool[id] = Stock(id); pool[S] = pool[S] or Stock(S) end
-	end
-	local sideMined = {} -- [other ore] = how much of it to mine (what the stock lacks)
 	local mined, prospects, smelt, log, learn = 0, 0, 0, {}, {}
 	-- with the stock: the other stacks (all but this ore's own plan stacks) take their share of the stock first,
 	-- and the ore they lack is mined together with the plan (its veins drop by-products too)
@@ -204,22 +189,9 @@ local function OrePlan(O, off, useStock, toNext)
 		end
 		mined = stackOre
 	end
-	-- price of a side item in its ore (one ore of S counts as one ore of O); from the stock — free
-	local function SideCost(id, n, depth)
-		local left = n - math.min(pool[id] or 0, n)
-		if left <= 1e-9 then return 0 end
-		if id == side[id] then return left end
-		local pr = sideRec[id]
-		if not pr or depth > 4 then return 1e9 end
-		local t = math.ceil(left / (pr.rec.made or 1))
-		local s = 0
-		for _, g in ipairs(pr.rec.reag) do s = s + SideCost(g.id, g.count * t, depth + 1) end
-		return s
-	end
 	-- price in ore: ore and bars always by ore (stock is ore too), gems from stock — free (already there or dropped along the way)
 	local function Cost(id, n, depth)
 		if id == O then return n end
-		if extra[id] and side[id] then return SideCost(id, n, depth) end
 		if extra[id] or (byprod[id] and not gemPer[id]) then return (pool[id] or 0) >= n - 1e-9 and 0 or 1e9 end
 		local free = gemPer[id] and math.min(pool[id] or 0, n) or 0
 		local left = n - free
@@ -322,11 +294,7 @@ local function OrePlan(O, off, useStock, toNext)
 			end
 			return
 		end
-		if side[id] == id then -- another ore the stock lacks: mined along with the plan
-			sideMined[id] = (sideMined[id] or 0) + left
-			return
-		end
-		local pr = prodOf[id] or (side[id] and sideRec[id])
+		local pr = prodOf[id]
 		if not pr or depth > 6 then return end
 		local made = pr.rec.made or 1
 		for _ = 1, math.ceil(left / made) do
@@ -456,22 +424,12 @@ local function OrePlan(O, off, useStock, toNext)
 		if (pool[gem] or 0) >= 1 then left[#left + 1] = { id = gem, n = math.floor(pool[gem]) } end
 	end
 	table.sort(left, function(a, b) return a.n > b.n end)
-	-- other ores: used (stock + mined) and mined, in ORES order
-	local sideOres = {}
-	for _, S in ipairs(ORES) do
-		if side[S] == S and pool[S] then
-			local m = sideMined[S] or 0
-			local used = Stock(S) - pool[S] + m
-			if used > 1e-9 then sideOres[#sideOres + 1] = { ore = S, used = math.ceil(used - 1e-9), mined = math.ceil(m - 1e-9), have = Stock(S) } end
-		end
-	end
 	local anyUsable = false
 	for _, c in ipairs(R) do if Usable(c) then anyUsable = true break end end
 	return { ore = O, steps = steps, anyUsable = anyUsable, start = start, rank = rank, profs = profs, learn = learn, left = left,
 		mined = mined, used = Stock(O) - (pool[O] or 0) + mined, have = Stock(O), prospects = prospects, smelt = smelt,
 		veins = vein and mined > 0 and CP.Tries85(mined, vein.st) or nil,
-		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre, blocked = blocked, stackOre = stackOre, stackUse = stackUse,
-		sideOres = sideOres }
+		canProspect = next(gemPer) ~= nil, cap = cap, nextOre = nextOre, blocked = blocked, stackOre = stackOre, stackUse = stackUse }
 end
 
 -- cached until the next change (dropped before any redraw)

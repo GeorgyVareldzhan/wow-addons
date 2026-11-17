@@ -74,6 +74,18 @@ local function applyNodeTexture(texture, nodeType, nodeID)
 	end
 end
 
+-- patched: white + black rings around minimap node icons, visible on any ground
+local BG_SCALE = 1.5
+local function setPinBg(pin, on)
+	if on then
+		pin.bg:SetWidth(pin:GetWidth() * BG_SCALE) -- explicit: OnSizeChanged does not fire for hidden frames
+		pin.bg:SetHeight(pin:GetHeight() * BG_SCALE)
+		pin.bg:Show()
+	else
+		pin.bg:Hide()
+	end
+end
+
 local profession_to_skill = {}
 local have_prof_skill = {}
 
@@ -435,6 +447,17 @@ function Display:getMapPin()
 	local texture = pin:CreateTexture(nil, "OVERLAY")
 	pin.texture = texture
 	texture:SetAllPoints(pin)
+	local bg = pin:CreateTexture(nil, "BACKGROUND") -- patched: see setPinBg
+	pin.bg = bg
+	bg:SetTexture("Interface\\AddOns\\GatherMate\\Artwork\\node_bg")
+	bg:SetPoint("CENTER", pin, "CENTER")
+	bg:SetWidth(16 * BG_SCALE)
+	bg:SetHeight(16 * BG_SCALE)
+	bg:Hide()
+	pin:SetScript("OnSizeChanged", function(self, w, h) -- the disc follows any pin resize (zoom, scale)
+		self.bg:SetWidth(w * BG_SCALE)
+		self.bg:SetHeight(h * BG_SCALE)
+	end)
 	texture:SetTexture(trackingCircle)
 	texture:SetTexCoord(0, 1, 0, 1)
 	pin:RegisterForClicks("LeftButtonUp", "RightButtonUp");
@@ -466,6 +489,7 @@ function Display:addWorldPin(coord, nodeID, nodeType, zone, index)
 		pin:SetAlpha(nodeLocked(nodeType, nodeID) and 0.8 or db.alpha) -- patched
 		pin:EnableMouse(true)
 		applyNodeTexture(pin.texture, nodeType, nodeID) -- patched
+		setPinBg(pin, false) -- patched
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin:Show()
 		pin:ClearAllPoints()
@@ -497,6 +521,7 @@ function Display:getMiniPin(coord, nodeID, nodeType, zone, index)
 		pin.isCircle = false
 		applyNodeTexture(pin.texture, nodeType, nodeID) -- patched
 		pin.locked = nodeLocked(nodeType, nodeID) -- patched: pins are rebuilt when the skill changes
+		setPinBg(pin, not pin.locked) -- patched
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin.x, pin.y = GatherMate:getXY(coord)
 		pin.x1, pin.y1 = GatherMate:PointToYards(pin.x,pin.y,zone)
@@ -516,6 +541,7 @@ function Display:addMiniPin(pin, refresh)
 		pin.texture:SetVertexColor(t.Red, t.Green, t.Blue, t.Alpha)
 		pin:SetHeight(10 / minimapScale)
 		pin:SetWidth(10 / minimapScale)
+		setPinBg(pin, false) -- patched
 		pin.isCircle = true
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 	-- if distance > 100, set back to the node texture
@@ -523,6 +549,7 @@ function Display:addMiniPin(pin, refresh)
 		pin:SetHeight(12 * db.scale / minimapScale)
 		pin:SetWidth(12 * db.scale / minimapScale)
 		applyNodeTexture(pin.texture, pin.nodeType, pin.nodeID) -- patched
+		setPinBg(pin, not nodeLocked(pin.nodeType, pin.nodeID)) -- patched
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin.isCircle = false
 	end

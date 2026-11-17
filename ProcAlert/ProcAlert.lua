@@ -17,14 +17,13 @@ local STANCE_SPELLS = { [BATTLE] = 2457, [DEFENSIVE] = 71, [BERSERKER] = 2458 }
 -- buff — эффект таланта на вас, открывающий удар; пока он висит, под иконкой отсчёт секунд,
 -- в конце иконка мигает. buffOnly — показывать удар только при этом эффекте.
 local PROCS = {
-	{ id = 7384,  stances = { BATTLE }, buff = 60503 },            -- Превосходство; эффект «Вкус крови» (Taste for Blood)
+	{ id = 7384,  stances = { BATTLE }, buff = 60503, glow = "KickOnCdCast" }, -- Превосходство; эффект «Вкус крови» (Taste for Blood); ИМБА — цель кастует, а прерывание на перезарядке
 	{ id = 5308,  stances = { BATTLE, BERSERKER }, buff = 52437, sound = true, soundBuff = true }, -- Казнь; эффект «Внезапная смерть» (Sudden Death)
 	{ id = 6572,  stances = { DEFENSIVE } },                       -- Реванш (Revenge): после блока, парирования или уклонения
 	-- needShield — без щита показывать со значком щита (первое нажатие макроса наденет сет)
 	-- sound — звук при появлении, даже если общий звук выключен (/pa alert); soundBuff — только при этом эффекте
 	{ id = 1464,  buff = 46916, buffOnly = true },                 -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
-	{ id = 23922, buff = 50227, cond = "ShieldSlamProc", needShield = true },         -- Мощный удар щитом: бесплатно по эффекту «Щит и меч» (Sword and Board),
-	                                                               -- а в оборонительной — всегда, когда готов (раньше Смертельного удара)
+	{ id = 23922, cond = "ShieldSlamProc" },                      -- Мощный удар щитом: в любой стойке, щит надет, готов и ярости хватает
 	{ id = 772,   stances = { BATTLE, DEFENSIVE }, cond = "RendProc" }, -- Кровопускание: в боевой — всегда, когда его нет на цели;
 	                                                               -- в оборонительной — только если его держим (TRACKED), иначе оно в «Ударах»
 	{ id = 12294, cond = "MortalProc" },                           -- Смертельный удар: в берсерка — когда готов; в боевой — то же, но если нужно
@@ -53,13 +52,12 @@ local KICKS = {
 }
 
 local REGULAR = {
-	-- imba — «ИМБА»: всегда первыми в ряду, золотая пульсирующая рамка
+	-- imba — «ИМБА»: нажать срочно, прямо сейчас (или просто очень сильно); всегда первыми в ряду, золотая пульсирующая рамка
 	{ id = 871,   cond = "ShieldWallProc", imba = true, needShield = true, anyStance = true }, -- Глухая оборона: здоровья < 40%; в любой стойке — макрос встанет в «деф»
-	{ id = 2565,  stances = { DEFENSIVE }, cond = "ShieldBlockProc", imba = true, needShield = true }, -- Блок щитом: цель бьёт вас, готов, ещё не висит (нужен щит)
+	{ id = 2565,  stances = { DEFENSIVE }, cond = "ShieldBlockProc", needShield = true }, -- Блок щитом: цель бьёт вас, готов, ещё не висит (нужен щит)
 	{ id = 1719,  stances = { BERSERKER }, cond = "RecklessProc", imba = true },    -- Безрассудство (Recklessness): в бою, готово, ещё не висит
 	-- Смертельный удар и Вихрь — в «Срабатываниях»
 	{ id = 23881 },                                         -- Кровожадность (Bloodthirst)
-	{ id = 23922 },                                         -- Мощный удар щитом (Shield Slam)
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
 	{ id = 772,   stances = { DEFENSIVE }, skipDebuff = true, longFight = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»); не на слабых мобах
 	{ id = 7386, alts = { 20243, 7386 }, stances = { DEFENSIVE }, cond = "NeedSunder", sunder = true, longFight = true }, -- Сокрушение / Раскол брони: только в оборонительной; на цели меньше 5 или скоро спадёт
@@ -818,12 +816,19 @@ local function ComboReady()
 end
 
 local CONDS = {
+	KickOnCdCast = function() -- цель кастует, а Зуботычина или Удар щитом на перезарядке
+		if not (UnitCastingInfo("target") or UnitChannelInfo("target")) then return false end
+		for _, id in ipairs({ 6552, 72 }) do
+			local n = Known(id)
+			if n and CooldownOf(n) then return true end
+		end
+		return false
+	end,
 	SweepActive = function() return MyBuff(12328) and true or false end, -- висят Размашистые удары
 	ShieldSlamProc = function()
-		if MyBuff(50227) then return true end
-		if CurrentStance() ~= DEFENSIVE then return false end
 		local ss = Known(23922)
-		return ss and not CooldownOf(ss) and true or false
+		if not ss or CooldownOf(ss) then return false end
+		return IsUsableSpell(ss) and PlayerRage() >= (RageCost(ss) or 20) and true or false -- без щита клиент считает удар неприменимым
 	end,
 	BloodthirstProc = function()
 		if Spec() ~= "arms" then return false end -- другие ветки пока не настроены
@@ -1713,6 +1718,33 @@ end
 -- (далеко, ближе 8 м, перезарядка, бой, стойка); можно — золотая пульсирующая рамка; не хватает
 -- ярости — синеватый. Отдельная функция: у checker предел на внешние переменные
 local GAP_KEY = -100
+-- Сокрушающий бросок против Божественного щита и Ледяной глыбы: в боевой — без значка, иначе значок боевой стойки
+local SHATTER_KEY = -64382
+local SHATTER_BUFFS = { (GetSpellInfo(642)), (GetSpellInfo(45438)) } -- Божественный щит, Ледяная глыба
+local function ShatterTarget()
+	for _, b in ipairs(SHATTER_BUFFS) do if UnitBuff("target", b) then return true end end
+	return false
+end
+local function ShatterProc(enemy)
+	local f = procRow.bySpell[SHATTER_KEY]
+	if f and f.expiresAt then return end
+	local name, texture = Known(64382)
+	local inBattle = CurrentStance() == BATTLE
+	local cost = name and (RageCost(name) or 25) or 0
+	local show = enemy and name and ShatterTarget() and not CooldownOf(name)
+		and IsSpellInRange(name, "target") ~= 0
+		and (inBattle or (Known(STANCE_SPELLS[BATTLE]) and math.min(PlayerRage(), TacticalKeep()) >= cost))
+	if not show then if f then f.removing = true end return end
+	f = f or AddItem(procRow, SHATTER_KEY, name, texture, true)
+	f.removing = false
+	f.blocked = false
+	f.imba = true
+	f.noMana = inBattle and PlayerRage() < cost
+	f.rage:SetText(f.noMana and RageText(name) or "")
+	if inBattle then f.badge:Hide() else
+		f.badge:SetTexture(select(3, GetSpellInfo(STANCE_SPELLS[BATTLE]))) f.badge:Show() end
+end
+
 local function GapProc(enemy)
 	local f = procRow.bySpell[GAP_KEY]
 	if f and f.expiresAt then return end -- /pa test
@@ -1752,6 +1784,7 @@ local function GapProc(enemy)
 	else
 		f.badge:Hide()
 	end
+	ShatterProc(enemy) -- Сокрушающий бросок против Божественного щита и Ледяной глыбы
 	DisarmProc(enemy) -- Обезоруживание (отсюда: у checker предел на внешние переменные)
 end
 
@@ -1824,6 +1857,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 		elseif ready then
 			f = f or AddItem(procRow, key, opName, opTex, true)
 			f.removing = false
+			f.imba = CONDS.KickOnCdCast() or nil
 			f.badge:SetTexture(select(3, GetSpellInfo(STANCE_SPELLS[BATTLE])))
 			f.badge:Show()
 			local tfb, tfbExp = MyBuff(60503)
@@ -1992,6 +2026,13 @@ SlashCmdList["PROCALERT"] = function(msg)
 					(start and start > 0) and (start + duration - GetTime()) or 0, duration or 0,
 					tostring(RageCost(name)), tostring(StanceAllows(p.stances))))
 			end
+		end
+		local ss = Known(23922)
+		if ss then
+			local link = GetInventoryItemLink("player", 17)
+			Print(string.format("%s: условие=%s враг=%s usable=%s щит=%s",
+				ss, tostring(CONDS.ShieldSlamProc()), tostring(HasEnemyTarget()),
+				tostring((IsUsableSpell(ss))), tostring(link and select(9, GetItemInfo(link)))))
 		end
 	elseif msg:match("^hs") then
 		local n = tonumber(msg:match("^hs%s+(%d+)$"))
