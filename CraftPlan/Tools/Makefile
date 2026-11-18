@@ -39,18 +39,3 @@ backup:
 	dst="$(DEST)/$$v"; mkdir -p "$$dst"; \
 	rsync -a --exclude Tools --exclude .cache --exclude __pycache__ ../ "$$dst/"; \
 	echo "$(NAME) $$v -> $$dst"
-
-# Экипировка из арморки Sirus: CHAR=Имя — другой персонаж (по умолчанию Чигурх)
-CHAR ?=
-GEAR_ARG = $(if $(CHAR),--char "$(CHAR)")
-.PHONY: gear gear-json gear-print help-gear
-help: help-gear
-help-gear:
-	@echo "make gear     — Gear/gear.md: надетое с чарами и камнями, наборы (данные CraftPlan, иначе арморка); CHAR=Имя"
-	@echo "make gear-json / gear-print — JSON в Gear/ или в терминал"
-gear:
-	$(PY) gear.py $(GEAR_ARG)
-gear-json:
-	$(PY) gear.py --json $(GEAR_ARG)
-gear-print:
-	$(PY) gear.py --stdout $(GEAR_ARG)

@@ -27,7 +27,6 @@ read_globals = {
 	"FauxScrollFrame_OnVerticalScroll", "FauxScrollFrame_SetOffset", "FauxScrollFrame_Update",
 	"FishPlanDB", "GameTooltip", "GameTooltip_ShowCompareItem", "GatherMate", "GetContainerItemInfo",
 	"GetContainerItemLink", "GetContainerNumSlots", "GetCursorInfo", "GetCursorPosition",
-	"GetEquipmentSetInfo", "GetEquipmentSetItemIDs", "GetInventoryItemLink", "GetNumEquipmentSets",
 	"GetCVarBool", "GetItemCount", "GetItemIcon", "GetItemInfo", "GetMerchantItemInfo",
 	"GetMerchantItemLink", "GetMerchantItemMaxStack", "GetMerchantNumItems", "GetMinimapShape",
 	"GetMoney", "GetNumSkillLines", "GetNumTradeSkills", "GetNumTrainerServices", "GetRealZoneText",
