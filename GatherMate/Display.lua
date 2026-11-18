@@ -74,7 +74,7 @@ local function applyNodeTexture(texture, nodeType, nodeID)
 	end
 end
 
--- patched: white + black rings around minimap node icons, visible on any ground
+-- patched: a 3 px ring around minimap node icons, black at the icon fading to white outside: visible on any ground
 local BG_SCALE = 1.5
 local function setPinBg(pin, on)
 	if on then
