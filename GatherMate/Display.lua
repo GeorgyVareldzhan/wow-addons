@@ -661,6 +661,38 @@ function Display:UpdateMaps()
 	self:UpdateWorldMap(true)
 end
 
+-- patched: the position is read from the world map. With the map open on another zone (flew over a border,
+-- browsing the map) it was not read and the pins froze - "flew along" with the player. Now: map hidden - put it
+-- back to the player's zone; map open elsewhere - peek at the player's zone and return the map where it was
+-- (as MapPlus does), at most 4 times a second.
+local peekAt = 0
+local function playerPos()
+	local x, y = GetPlayerMapPosition("player")
+	if specialZones[zone] then return x, y end
+	local cont = continentData[GetCurrentMapContinent()]
+	if x ~= 0 and y ~= 0 and GetCurrentMapZone() ~= 0 and cont and cont[GetCurrentMapZone()] == zone then return x, y end
+	if not WorldMapFrame:IsShown() then
+		SetMapToCurrentZone()
+	else
+		local now = GetTime()
+		if now < peekAt then return nil end
+		peekAt = now + 0.25
+		local prevArea, prevLevel, prevCont = GetCurrentMapAreaID(), GetCurrentMapDungeonLevel(), GetCurrentMapContinent()
+		SetMapToCurrentZone()
+		x, y = GetPlayerMapPosition("player")
+		if prevArea and prevArea > 0 then
+			SetMapByID(prevArea - 1) -- in 3.3.5 the id is 1 less than GetCurrentMapAreaID (as MapPlus, Questie)
+			if prevLevel and prevLevel > 0 then SetDungeonMapLevel(prevLevel) end
+		else
+			SetMapZoom(prevCont)
+		end
+		if x ~= 0 and y ~= 0 then return x, y end
+		return nil
+	end
+	x, y = GetPlayerMapPosition("player")
+	if x ~= 0 and y ~= 0 then return x, y end
+end
+
 function Display:UpdateIconPositions()
 	if not db.showMinimap or not Minimap:IsVisible() or inInstance or not zone then return end
 	
@@ -677,11 +709,8 @@ function Display:UpdateIconPositions()
 	if minimapPinCount == 0 then return end
 	
 	-- get current player position
-	local x, y = GetPlayerMapPosition("player")
-	-- if position is 0, the player changed the worldmap to another zone, just keep the old values
-	if (x == 0 or y == 0 or GetCurrentMapZone() == 0) and not specialZones[zone] then
-		x, y = lastX, lastY
-	end
+	local x, y = playerPos() -- patched (было: GetPlayerMapPosition, при карте на другой зоне - старые x, y)
+	if not x then x, y = lastX, lastY end
 	
 	-- for rotating minimap support
 	local facing
@@ -743,11 +772,8 @@ function Display:UpdateMiniMap(force)
 	end
 	
 	-- get current player position
-	local x, y = GetPlayerMapPosition("player")
-	-- if position is 0, the player changed the worldmap to another zone, just keep the old values
-	if (x == 0 or y == 0 or GetCurrentMapZone() == 0) and not specialZones[zone] then
-		x, y = lastX, lastY
-	end
+	local x, y = playerPos() -- patched (было: GetPlayerMapPosition, при карте на другой зоне - старые x, y)
+	if not x then x, y = lastX, lastY end
 	
 	-- get data from the API for calculations
 	local zoom = Minimap:GetZoom()

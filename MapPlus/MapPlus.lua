@@ -1,12 +1,11 @@
 -- MapPlus: дополнения к карте мира.
 -- Кнопка «Путь к ближайшей полётке» — стрелка TomTom к ближайшему распорядителю полётов (ниже).
--- Туман войны: галочка на карте мира дорисовывает районы, где вы ещё не были, — чуть темнее
--- исследованных. Только картинка: исследование районов и достижения не засчитываются.
+-- Туман войны: галочка на карте мира дорисовывает районы, где вы ещё не были, той же яркостью,
+-- что и исследованные. Только картинка: исследование районов и достижения не засчитываются.
 -- Районы — из MapPlusFogData (Data.lua), рисуем так же, как сам интерфейс рисует исследованные
 -- (WorldMapFrame_Update): текстура режется на куски 256x256 с номерами 1, 2, 3…
 
 local TILE = 256
-local UNEXPLORED_COLOR = { 0.6, 0.6, 0.6 } -- неисследованные районы темнее
 
 local function DB()
 	MapPlusDB = MapPlusDB or {}
@@ -26,7 +25,9 @@ local function GetTexture()
 	used = used + 1
 	local t = textures[used]
 	if not t then
-		t = WorldMapDetailFrame:CreateTexture(nil, "ARTWORK")
+		-- слой ниже исследованных районов (их рисует интерфейс в ARTWORK), но выше основы карты
+		-- (BACKGROUND): в одном слое куски перекрывали соседние районы прямоугольниками
+		t = WorldMapDetailFrame:CreateTexture(nil, "BORDER")
 		textures[used] = t
 	end
 	return t
@@ -62,7 +63,7 @@ local function DrawOverlay(path, width, height, offsetX, offsetY)
 			t:SetTexCoord(0, pixelW / fileW, 0, pixelH / fileH)
 			t:SetPoint("TOPLEFT", WorldMapDetailFrame, "TOPLEFT", offsetX + TILE * (k - 1), -(offsetY + TILE * (j - 1)))
 			t:SetTexture(path .. ((j - 1) * wide + k))
-			t:SetVertexColor(UNEXPLORED_COLOR[1], UNEXPLORED_COLOR[2], UNEXPLORED_COLOR[3])
+			t:SetVertexColor(1, 1, 1)
 			t:Show()
 		end
 	end
@@ -108,7 +109,7 @@ end)
 check:SetScript("OnEnter", function(self)
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 	GameTooltip:AddLine("Убрать туман войны")
-	GameTooltip:AddLine("Показать районы, где вы ещё не были (они чуть темнее). Исследование и достижения от этого не засчитываются.", 1, 1, 1, true)
+	GameTooltip:AddLine("Показать районы, где вы ещё не были. Исследование и достижения от этого не засчитываются.", 1, 1, 1, true)
 	GameTooltip:Show()
 end)
 check:SetScript("OnLeave", function() GameTooltip:Hide() end)

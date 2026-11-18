@@ -9,4 +9,6 @@
 !/Questie-335/
 .cache/
 __pycache__/
-/CraftPlan/Tools/*.json
+/CraftPlan/Tools/**/*.json
+/CraftPlan/Tools/**/*.md
+/CraftPlan/Tools/**/*.txt

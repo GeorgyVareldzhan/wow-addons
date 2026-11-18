@@ -2,7 +2,7 @@
 ## Title: MapPlus
 ## Notes: Карта мира: галочка «Убрать туман войны» и кнопка «Путь к ближайшей полётке»
 ## Notes-ruRU: Карта мира: галочка «Убрать туман войны» и кнопка «Путь к ближайшей полётке»
-## Version: 0.1.5
+## Version: 0.1.7
 ## X-Sirus-Category: 11
 ## OptionalDeps: Questie-335, TomTom
 ## SavedVariables: MapPlusDB

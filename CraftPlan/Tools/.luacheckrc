@@ -9,7 +9,6 @@ ignore = {
 
 -- Глобальные, которые аддон создаёт или меняет
 globals = {
-	"BINDING_HEADER_CRAFTPLAN", "BINDING_NAME_CRAFTPLAN_COLLAPSE", "BINDING_NAME_CRAFTPLAN_MAP",
 	"CraftPlan", "CraftPlan_ProspectData", "CraftPlan_Trainers", "CraftPlan_VeinData", "CraftPlanDB",
 	"CraftPlanItemType", "CraftPlanRouteData", "CraftPlanSubName", "CraftPlanThresholds",
 	"SLASH_CRAFTPLAN1", "SLASH_WHERETOGET1", "SlashCmdList", "StaticPopupDialogs",
@@ -28,6 +27,7 @@ read_globals = {
 	"FauxScrollFrame_OnVerticalScroll", "FauxScrollFrame_SetOffset", "FauxScrollFrame_Update",
 	"FishPlanDB", "GameTooltip", "GameTooltip_ShowCompareItem", "GatherMate", "GetContainerItemInfo",
 	"GetContainerItemLink", "GetContainerNumSlots", "GetCursorInfo", "GetCursorPosition",
+	"GetEquipmentSetInfo", "GetEquipmentSetItemIDs", "GetInventoryItemLink", "GetNumEquipmentSets",
 	"GetCVarBool", "GetItemCount", "GetItemIcon", "GetItemInfo", "GetMerchantItemInfo",
 	"GetMerchantItemLink", "GetMerchantItemMaxStack", "GetMerchantNumItems", "GetMinimapShape",
 	"GetMoney", "GetNumSkillLines", "GetNumTradeSkills", "GetNumTrainerServices", "GetRealZoneText",

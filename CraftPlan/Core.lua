@@ -4,11 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.26"
-
-BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
-BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"
-BINDING_NAME_CRAFTPLAN_COLLAPSE = "Свернуть/развернуть полосу"
+CP.VERSION = "2.1.30"
 
 function CP.Print(msg)
 	DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffCraftPlan:|r " .. msg)
@@ -268,9 +264,55 @@ end
 function CP.Have(id) return CP.BagCount(id) + CP.BankCount(id) end
 
 -- Bags: written to SavedVariables on logout/reload (db.bags = { [id] = count }, db.bagsTime) — for planning outside the game
-local function SaveBags()
-	DB().bags = CountBags()
+-- On Sirus the bags and the worn items are already gone at PLAYER_LOGOUT: they are saved while playing too
+-- (SaveSoon), and at logout only what is still there (atLogout: an empty read keeps the saved data)
+local function SaveBags(atLogout)
+	local bags = CountBags()
+	if atLogout and not next(bags) then return end
+	DB().bags = bags
 	DB().bagsTime = time()
+end
+
+-- Gear for Tools/gear.py (outside the game): links carry enchant and gems, equipment sets live on the server.
+-- db.gear = { [slot 1-19] = link }, db.gearTime; db.equipSets = { { name, icon, items = { [slot] = itemID } } }
+-- (itemID 0 - empty, 1 - ignored slot); db.bagGear = { link, ... } - wearable items in the bags
+local function WearLinks(bag, into)
+	for slot = 1, GetContainerNumSlots(bag) or 0 do
+		local link = GetContainerItemLink(bag, slot)
+		if link and IsEquippableItem(link) then into[#into + 1] = link end
+	end
+	return into
+end
+local function SaveGear(atLogout)
+	local db = DB()
+	local gear, any = {}, false
+	for slot = 1, 19 do
+		gear[slot] = GetInventoryItemLink("player", slot)
+		any = any or gear[slot] ~= nil
+	end
+	if any or not atLogout then db.gear, db.gearTime = gear, time() end
+	local sets = {}
+	for i = 1, GetNumEquipmentSets() do
+		local name, icon = GetEquipmentSetInfo(i)
+		if name then sets[#sets + 1] = { name = name, icon = icon, items = GetEquipmentSetItemIDs(name) } end
+	end
+	if sets[1] or not atLogout then db.equipSets = sets end
+	local bags = {}
+	for bag = 0, NUM_BAG_SLOTS do WearLinks(bag, bags) end
+	if bags[1] or not atLogout then db.bagGear = bags end
+end
+-- while playing: 2 s after the last change of bags, worn items or sets
+local saveTimer = CreateFrame("Frame")
+saveTimer:Hide()
+saveTimer:SetScript("OnUpdate", function(self)
+	if GetTime() < self.at then return end
+	self:Hide()
+	SaveBags()
+	SaveGear()
+end)
+local function SaveSoon()
+	saveTimer.at = GetTime() + 2
+	saveTimer:Show()
 end
 
 -- Bank: remember its contents while it is open
@@ -586,7 +628,7 @@ end
 local events = CreateFrame("Frame")
 for _, e in ipairs({ "PLAYER_LOGIN", "BAG_UPDATE", "TRADE_SKILL_SHOW", "TRADE_SKILL_UPDATE", "SKILL_LINES_CHANGED",
 	"BANKFRAME_OPENED", "BANKFRAME_CLOSED", "PLAYERBANKSLOTS_CHANGED", "TRAINER_SHOW", "TRAINER_UPDATE", "PLAYER_REGEN_ENABLED", "PLAYER_LOGOUT",
-	"MERCHANT_SHOW", "MERCHANT_UPDATE" }) do
+	"MERCHANT_SHOW", "MERCHANT_UPDATE", "PLAYER_ENTERING_WORLD", "PLAYER_EQUIPMENT_CHANGED", "EQUIPMENT_SETS_CHANGED" }) do
 	events:RegisterEvent(e)
 end
 events:SetScript("OnEvent", function(_, event)
@@ -606,7 +648,10 @@ events:SetScript("OnEvent", function(_, event)
 		if CP.OnLogin then CP.OnLogin() end
 		CP.Changed()
 	elseif event == "PLAYER_LOGOUT" then
-		SaveBags()
+		SaveBags(true)
+		SaveGear(true)
+	elseif event == "PLAYER_ENTERING_WORLD" or event == "PLAYER_EQUIPMENT_CHANGED" or event == "EQUIPMENT_SETS_CHANGED" then
+		SaveSoon()
 	elseif event == "BANKFRAME_OPENED" then
 		CP.bankIsOpen = true
 		ScanBank()
@@ -615,6 +660,7 @@ events:SetScript("OnEvent", function(_, event)
 		CP.bankIsOpen = false -- don't read: the bank is no longer available and would be saved as empty
 	elseif event == "PLAYERBANKSLOTS_CHANGED" or event == "BAG_UPDATE" then
 		ScanBankSoon()
+		if event == "BAG_UPDATE" then SaveSoon() end
 		CP.Changed()
 	elseif event == "TRADE_SKILL_SHOW" then
 		CP.DropSkillLines()
