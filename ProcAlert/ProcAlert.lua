@@ -294,7 +294,10 @@ end
 local COMBO_GAP = 4
 local COMBO_PAD = 9 -- на столько рамка связки выступает за значки
 local COMBO_MARGIN = COMBO_PAD -- от рамки до соседнего срабатывания — обычный промежуток
-local function IsCombo(f) return f and (f.spellID == -12328 or f.spellID == -46924) end
+-- Связка Кровавая ярость / Ярость берсерка + Безудержное восстановление (верхний ряд)
+local ER_PAIR, ER_COMBO = -1002687, -1055694
+local COMBO_KEYS = { [-12328] = true, [-46924] = true, [ER_PAIR] = true, [ER_COMBO] = true }
+local function IsCombo(f) return f and COMBO_KEYS[f.spellID] end
 local function PairGap(prev, f, gap)
 	local a, b = IsCombo(prev), IsCombo(f)
 	if a and b then return COMBO_GAP end
@@ -1041,14 +1044,46 @@ local function UpdateDefensive()
 	local f = kickRow.bySpell[55694]
 	local max = UnitHealthMax("player")
 	local erLow = max and max > 0 and not UnitIsDeadOrGhost("player") and UnitHealth("player") / max < ER_HEALTH
-	local erReady = er and (test or (DefEnabled() and erLow and IsUsableSpell(er) and not CooldownOf(er)
-		and PlayerRage() >= (RageCost(er) or 0)))
+	local erUsable, erNoMana
+	if er then erUsable, erNoMana = IsUsableSpell(er) end
+	local erReady = er and (test or (DefEnabled() and erLow and (erUsable or erNoMana) and not CooldownOf(er)))
 	if f and f.expiresAt then return end -- /pa test
 	if erReady then
 		f = f or AddItem(kickRow, 55694, er, erTex, true)
 		f.removing = false
+		local cost = RageCost(er) or 15
+		f.noMana = not test and PlayerRage() < cost -- исступление есть, ярость ещё копится — синеватое
+		f.rage:SetText(f.noMana and (PlayerRage() .. "/" .. cost) or "")
 	elseif f then
 		f.removing = true
+	end
+	-- Здоровье < DEF_HEALTH, исступления нет: связка Кровавая ярость + Безудержное восстановление,
+	-- а если Кровавая ярость на перезарядке — Ярость берсерка + Безудержное восстановление
+	local pair, pairTex, gain
+	if er and not test and DefEnabled() and LowHealth() and not CooldownOf(er) then
+		local usable, noMana = IsUsableSpell(er)
+		if not (usable or noMana) then
+			local br, brTex = Known(2687)
+			if br and not CooldownOf(br) then pair, pairTex, gain = br, brTex, 10
+			else
+				local bz, bzTex = Known(18499)
+				if bz and not CooldownOf(bz) then pair, pairTex, gain = bz, bzTex, 0 end
+			end
+		end
+	end
+	local a, b = kickRow.bySpell[ER_PAIR], kickRow.bySpell[ER_COMBO]
+	if pair then
+		a = a or AddItem(kickRow, ER_PAIR, pair, pairTex, true)
+		a.removing = false
+		if a.spellName ~= pair then a.spellName = pair a.icon:SetTexture(pairTex) a.key:SetText(FindKey(pair) or "") end
+		b = b or AddItem(kickRow, ER_COMBO, er, erTex, true)
+		b.removing = false
+		local cost = RageCost(er) or 15
+		b.noMana = PlayerRage() + gain < cost -- Кровавая ярость сразу даёт 10 ярости
+		b.rage:SetText(b.noMana and (PlayerRage() .. "/" .. cost) or "")
+	else
+		if a then a.removing = true end
+		if b then b.removing = true end
 	end
 end
 
@@ -1607,7 +1642,7 @@ local function ComboProc()
 end
 
 -- общая рамка связки: по положению двух значков, каждый кадр
-;(function()
+local function ComboBox(row, size, keyA, keyB)
 local PAD = COMBO_PAD
 local box = CreateFrame("Frame", nil, anchor)
 box:SetFrameLevel(anchor:GetFrameLevel())
@@ -1621,22 +1656,24 @@ box:SetBackdrop({
 })
 box:SetBackdropColor(1, 0.82, 0, 0.4) -- золотая подложка
 box:SetScript("OnUpdate", function(self)
-	local a, b = procRow.bySpell[COMBO_SS], procRow.bySpell[COMBO_BS]
+	local a, b = row.bySpell[keyA], row.bySpell[keyB]
 	if not (a and b and a.x and b.x) then self:Hide() return end
-	local l = math.min(a.x, b.x) - PROC_SIZE / 2 - PAD
-	local r = math.max(a.x, b.x) + PROC_SIZE / 2 + PAD
+	local l = math.min(a.x, b.x) - size / 2 - PAD
+	local r = math.max(a.x, b.x) + size / 2 + PAD
 	self:ClearAllPoints()
-	self:SetPoint("CENTER", anchor, "CENTER", (l + r) / 2, procRow.y)
+	self:SetPoint("CENTER", anchor, "CENTER", (l + r) / 2, row.y)
 	self:SetWidth(r - l)
-	self:SetHeight(PROC_SIZE + PAD * 2)
+	self:SetHeight(size + PAD * 2)
 	self:SetBackdropBorderColor(1, 0.82, 0, 1)
 	self:SetAlpha(math.min(a.alpha or 0, b.alpha or 0))
 end)
 local watch = CreateFrame("Frame") -- показываем рамку, когда появились оба значка
 watch:SetScript("OnUpdate", function()
-	if procRow.bySpell[COMBO_SS] and procRow.bySpell[COMBO_BS] then box:Show() end
+	if row.bySpell[keyA] and row.bySpell[keyB] then box:Show() end
 end)
-end)()
+end
+ComboBox(procRow, PROC_SIZE, COMBO_SS, COMBO_BS)
+ComboBox(kickRow, KICK_SIZE, ER_PAIR, ER_COMBO)
 
 -- Ярость, которая останется после смены стойки: талант «Тактическое превосходство» (по 5 за ранг)
 -- или сколько сохранялось по наблюдению (StanceKeep), что больше
@@ -2275,6 +2312,11 @@ local function Sync(unit)
 			d.icon, d.count, d.expires, d.spellId = icon, count, (expires and expires > 0) and expires or nil, spellId
 			d.sync = syncN
 			if duration and duration > 0 then Learned()[name] = duration end
+		elseif caster == nil and debuffs[name] then
+			-- сервер не сообщил, чьё ослабление, а журнал боя записал его как ваше — не убираем
+			local d = debuffs[name]
+			d.count, d.sync = count, syncN
+			if expires and expires > 0 then d.expires = expires end
 		end
 	end
 	for name, d in pairs(debuffs) do -- остальные (из журнала боя) на метке уже не висят
@@ -2449,6 +2491,10 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 	if elapsedSum < 0.1 then return end
 	elapsedSum = 0
 	local now = GetTime()
+	-- живая враждебная цель — в списке всегда, ещё до первого удара (таймер TIMEOUT её не убирает)
+	if UnitExists("target") and not UnitIsDead("target") and UnitCanAttack("player", "target") then
+		Enemy(UnitGUID("target"), UnitName("target"))
+	end
 	for _, unit in ipairs(UNITS) do Sync(unit) end
 	-- новые полоски Sirus (C_NamePlate): у каждой своя метка «nameplateN» — точные здоровье,
 	-- ослабления и портрет для мобов с видимой полоской. Нужно только для столбика справа:
@@ -2478,9 +2524,14 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		end
 	end
 	-- вне боя список не нужен: прячем (данные остаются до конца боя, после него — очищаются)
+	-- вне боя — только цель
 	if not Enabled() or not UnitAffectingCombat("player") then
-		for _, e in ipairs(list) do if e.face then e.face:Hide() end end
-		list = {}
+		local keep = {}
+		for _, e in ipairs(list) do
+			if Enabled() and e.guid == target then keep[1] = e
+			elseif e.face then e.face:Hide() end
+		end
+		list = keep
 	end
 	table.sort(list, BySeen)
 
