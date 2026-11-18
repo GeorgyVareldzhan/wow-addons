@@ -13,12 +13,6 @@ local SIZE = 32 -- bar icon size (UI/Bar.lua)
 
 -- Chances per prospect: Data/ProspectData.lua (Sirus knowledge base, Tools/sirusdb.py); skill needed to prospect
 local DATA = CraftPlan_ProspectData or {}
-local PROSPECT = {} -- [ore] = { gem, ... } by chance
-for ore, list in pairs(DATA) do
-	local t = {}
-	for _, g in ipairs(list) do t[#t + 1] = g[1] end
-	PROSPECT[ore] = t
-end
 local PROSPECT_REQ = { [2770] = 20, [2771] = 50, [2772] = 125, [3858] = 175, [10620] = 250,
 	[23424] = 275, [23425] = 325, [36909] = 350, [36912] = 400, [36910] = 450 }
 

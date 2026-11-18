@@ -73,11 +73,11 @@ function CP.VendorsOf(item)
 	for npc in pairs(ok and set or {}) do
 		local f = QuestieDB.QueryNPCSingle(npc, "friendlyToFaction")
 		if f and f:find(faction, 1, true) then
-			local zone, area1, spot
-			for area, pts in pairs(QuestieDB.QueryNPCSingle(npc, "spawns") or {}) do
-				zone = TrackerUtils and TrackerUtils.GetZoneNameByID and TrackerUtils:GetZoneNameByID(area)
-				area1, spot = area, pts[1]
-				break
+			local zone, spot
+			local area1, pts = next(QuestieDB.QueryNPCSingle(npc, "spawns") or {}) -- первая зона спавна
+			if area1 then
+				zone = TrackerUtils and TrackerUtils.GetZoneNameByID and TrackerUtils:GetZoneNameByID(area1)
+				spot = pts[1]
 			end
 			local name = QuestieDB.QueryNPCSingle(npc, "name") or "?"
 			list[#list + 1] = { text = name .. (zone and (" (" .. zone .. ")") or ""), name = name, area = area1, spot = spot }

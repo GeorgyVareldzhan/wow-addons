@@ -1,4 +1,4 @@
-Макросы Чигурх (ProxyEU Neverest x3 - 3.3.5a+), из macros-cache.txt от 2026-11-18 11:30, макросов: 12
+Макросы Чигурх (ProxyEU Neverest x3 - 3.3.5a+), из macros-cache.txt от 2026-11-18 12:01, макросов: 12
 
 === 1 ===
 #showtooltip Кровопускание
@@ -10,7 +10,7 @@
 /cast [mod:shift,stance:3] Боевая стойка; [mod:shift] Стойка берсерка; [stance:2] Боевая стойка; Оборонительная стойка
 /equipset [mod:shift][stance:2] Урон; Защита
 
-=== 3 ===  (иконка Ability_Warrior_FocusedRage)
+=== 3 ===
 #showtooltip
 /castsequence [mod:shift] reset=10 Кровавая ярость, Безудержное восстановление
 /castsequence [mod:alt] reset=10 Ярость берсерка, Безудержное восстановление
