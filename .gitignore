@@ -4,11 +4,12 @@
 !/CraftPlan/
 !/FishPlan/
 !/GatherMate/
+!/GearPlan/
 !/MapPlus/
 !/ProcAlert/
 !/Questie-335/
 .cache/
 __pycache__/
-/CraftPlan/Tools/**/*.json
-/CraftPlan/Tools/**/*.md
-/CraftPlan/Tools/**/*.txt
+*.json
+*.md
+*.txt
