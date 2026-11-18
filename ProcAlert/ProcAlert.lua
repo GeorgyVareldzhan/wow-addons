@@ -2121,16 +2121,17 @@ end
 local X, Y = 240, 90         -- левый верхний угол столбика остальных врагов от центра экрана
 -- строка вашей цели: справа от «Срабатываний», на их высоте — перед глазами и не на головах мобов.
 -- Место постоянное (не ездит, когда срабатываний становится больше или меньше)
-local TARGET_X = 130         -- левый край от центра ряда срабатываний; при широком ряде — правее него
-local SIDE_MARGIN = 20       -- столько от края ряда срабатываний до цели справа и до значка стойки слева
+local TARGET_X = 190         -- левый край от центра ряда срабатываний; при широком ряде — правее него
+local TARGET_GAP = 80        -- от края широкого ряда срабатываний до цели
 local TARGET_Y = PROC_SIZE / 2 -- верх строки: значки ослаблений — на одной линии со срабатываниями, их размера
 local MAX_ROWS = 6
 local ROW_H = 60              -- портрет + здоровье + каст
 local FACE = 40              -- портрет моба (вместо имени)
 local TARGET_FACE = 64       -- портрет вашей цели (строка по центру)
 local TARGET_HP_W, TARGET_HP_H = 128, 8 -- полоска здоровья цели под портретом
-local CAST_H, TARGET_CAST_H = 8, 18 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
-local TARGET_CAST_ICON = 24  -- значок заклинания цели слева от полоски
+local CAST_H, TARGET_CAST_H = 12, 26 -- полоска каста под здоровьем: у мобов справа и у цели (с названием)
+local TARGET_CAST_W = 220 -- у цели полоска каста шире полоски здоровья
+local TARGET_CAST_ICON = 32  -- значок заклинания цели слева от полоски
 -- прерывания для подсветки каста: Зуботычина, Удар щитом, Оглушающий удар (стойку и щит сменит макрос)
 local KICK_IDS = { 6552, 72, 12809 }
 local function KickReady()
@@ -2142,6 +2143,8 @@ local function KickReady()
 end
 local ICON = 34
 local TARGET_DEBUFF_GAP = 6 -- промежуток между вашими ослаблениями в строке цели
+local TARGET_DEBUFF_SIZE = 64 -- ослабления цели крупнее срабатываний, в два ряда
+local OTHER_SIZE, OTHER_GAP = 30, 3 -- чужие ослабления на цели — мелкие, под вашими
 -- Главные ослабления — первыми (все значки одного размера ICON): замедление — моб не убежит,
 -- Кровопускание — от него «Вкус крови» и Превосходство, Раскол брони — стаки
 local PRIORITY = {
@@ -2303,6 +2306,9 @@ local function Sync(unit)
 	e.faceUnit = e.faceUnit or unit -- портрет снять при отрисовке, пока моб доступен по этой метке
 	syncN = syncN + 1
 	local debuffs = e.debuffs
+	local others = e.others or {}
+	e.others, e.othersAt = others, GetTime()
+	local on = 0
 	for i = 1, 40 do
 		local name, _, icon, count, _, duration, expires, caster, _, _, spellId = UnitDebuff(unit, i)
 		if not name then break end
@@ -2317,8 +2323,15 @@ local function Sync(unit)
 			local d = debuffs[name]
 			d.count, d.sync = count, syncN
 			if expires and expires > 0 then d.expires = expires end
+		else -- чужое (другие игроки, сам моб) — показываем мельче
+			on = on + 1
+			local o = others[on] or {}
+			others[on] = o
+			o.name, o.icon, o.count, o.spellId = name, icon, count, spellId
+			o.expires = (expires and expires > 0) and expires or nil
 		end
 	end
+	for k = on + 1, #others do others[k] = nil end
 	for name, d in pairs(debuffs) do -- остальные (из журнала боя) на метке уже не висят
 		if d.sync ~= syncN then debuffs[name] = nil end
 	end
@@ -2383,10 +2396,11 @@ local function Row(i)
 	r.cast.icon = r.cast:CreateTexture(nil, "OVERLAY")
 	r.cast.icon:SetPoint("RIGHT", r.cast, "LEFT", -2, 0)
 	r.cast.text = r.cast:CreateFontString(nil, "OVERLAY")
-	r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE") -- название и секунды у цели (у мобов справа текста нет)
+	r.cast.text:SetFont("Fonts\\FRIZQT__.TTF", 14, "OUTLINE") -- название и секунды у цели (у мобов справа текста нет)
 	r.cast.text:SetPoint("CENTER", r.cast, "CENTER", 0, 0)
 	r.cast:Hide()
 	r.icons = {}
+	r.oicons = {} -- чужие ослабления (только у цели)
 	rows[i] = r
 	return r
 end
@@ -2412,7 +2426,7 @@ local function DebuffTooltip(f)
 		for i = 1, 40 do
 			local name, _, _, _, _, _, _, caster = UnitDebuff(unit, i)
 			if not name then break end
-			if name == f.debuffName and caster == "player" then
+			if name == f.debuffName and (caster == "player") ~= (f.other ~= nil) then
 				GameTooltip:SetUnitDebuff(unit, i)
 				return
 			end
@@ -2424,15 +2438,16 @@ local function DebuffTooltip(f)
 		GameTooltip:AddLine(f.debuffName, 1, 0.82, 0)
 	end
 	local e = enemies[f.guid]
-	local d = e and e.debuffs[f.debuffName]
+	local d = f.other or (e and e.debuffs[f.debuffName])
 	if d and d.expires then
 		GameTooltip:AddLine(string.format("Осталось: %d с", math.max(0, math.ceil(d.expires - GetTime()))), 1, 1, 1)
 	end
 	GameTooltip:Show()
 end
 
-local function Icon(r, k)
-	local f = r.icons[k]
+local function Icon(r, k, pool)
+	pool = pool or r.icons
+	local f = pool[k]
 	if f then return f end
 	f = CreateFrame("Frame", nil, r)
 	f:EnableMouse(true)
@@ -2446,7 +2461,7 @@ local function Icon(r, k)
 	f.count = f:CreateFontString(nil, "OVERLAY")
 	f.count:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
 	f.count:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", 1, 0)
-	r.icons[k] = f
+	pool[k] = f
 	return f
 end
 
@@ -2561,21 +2576,32 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		for name in pairs(e.debuffs) do names[#names + 1] = name end
 		table.sort(names, ByPriority)
 		-- у цели значки размером со срабатывания, промежуток TARGET_DEBUFF_GAP
-		local base = vertical and PROC_SIZE or ICON
+		local base = vertical and TARGET_DEBUFF_SIZE or ICON
 		local gap = vertical and TARGET_DEBUFF_GAP or 3
-		local iconsW, maxSize = 0, 0
+		local iconsW = 0
 		for k, name in ipairs(names) do
 			local size = (Ending(e, name, now) and not vertical) and REND_BIG or base
 			iconsW = iconsW + size + (k > 1 and gap or 0)
-			if size > maxSize then maxSize = size end
 		end
 
 		-- ширина строки и место портрета
-		local width, x, iconsTop
-		if vertical then -- цель: без портрета — ослабления в ряд со срабатываниями, под ними здоровье
-			width = math.max(iconsW, TARGET_HP_W)
-			x = (width - iconsW) / 2
+		local width, x, iconsTop, iconsH, perRow
+		local othersTop, othersPer, othersN = 0, 1, 0
+		if vertical then -- цель: без портрета — ослабления в два ряда (от 4 в ряд, первый длиннее), под ними здоровье
+			local n = #names
+			perRow = math.max(4, math.ceil(n / 2)) -- не меньше 4 в ряд: до 4 — один ряд
+			local rowsN = n > perRow and 2 or (n > 0 and 1 or 0)
+			width = math.max(perRow * (base + gap) - gap, TARGET_HP_W)
+			x = 0
 			iconsTop = 0
+			local myH = rowsN > 0 and (rowsN * (base + gap) - gap) or 0
+			othersTop = myH > 0 and (myH + 8) or 0
+			othersPer = math.max(1, math.floor((width + OTHER_GAP) / (OTHER_SIZE + OTHER_GAP)))
+			local on = (e.others and e.othersAt and now - e.othersAt < 1) and #e.others or 0
+			othersN = on
+			local oRows = math.ceil(on / othersPer)
+			local oH = oRows > 0 and (oRows * (OTHER_SIZE + OTHER_GAP) - OTHER_GAP) or 0
+			iconsH = math.max(PROC_SIZE, (oRows > 0 and othersTop or myH) + oH)
 		else
 			width = fs + 6 + iconsW
 			face:ClearAllPoints()
@@ -2595,7 +2621,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		r.hp:SetHeight(vertical and TARGET_HP_H or 5)
 		r.hp:ClearAllPoints()
 		if vertical then
-			r.hp:SetPoint("TOP", r, "TOPLEFT", width / 2, -(PROC_SIZE + 8))
+			r.hp:SetPoint("TOP", r, "TOPLEFT", width / 2, -(iconsH + 8))
 		else
 			r.hp:SetPoint("TOP", face, "BOTTOM", 0, -2)
 		end
@@ -2612,7 +2638,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		local pulse = 0.35 + 0.65 * math.abs(math.sin(now * 8))
 		if c and c.ends > now then
 			local ch = vertical and TARGET_CAST_H or CAST_H
-			r.cast:SetWidth(vertical and TARGET_HP_W or fs)
+			r.cast:SetWidth(vertical and TARGET_CAST_W or fs)
 			r.cast:SetHeight(ch)
 			r.cast:ClearAllPoints()
 			r.cast:SetPoint("TOP", r.hp, "BOTTOM", 0, -2)
@@ -2689,8 +2715,12 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 				end
 			end
 			f:ClearAllPoints()
-			if vertical then -- ряд под портретом, значки выровнены по центру ряда
-				f:SetPoint("TOPLEFT", r, "TOPLEFT", x, iconsTop - (maxSize - size) / 2)
+			if vertical then -- два ряда, каждый по центру строки
+				local second = k > perRow
+				local cnt = second and (#names - perRow) or perRow
+				local idx = second and (k - perRow - 1) or (k - 1)
+				local left = (width - (cnt * (size + gap) - gap)) / 2
+				f:SetPoint("TOPLEFT", r, "TOPLEFT", left + idx * (size + gap), iconsTop - (second and (size + gap) or 0))
 			else -- справа от портрета, по центру портрета по высоте
 				f:SetPoint("TOPLEFT", r, "TOPLEFT", x, -2 - fs / 2 + size / 2)
 			end
@@ -2711,6 +2741,34 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 			f:Show()
 		end
 		for k = #names + 1, #r.icons do r.icons[k]:Hide() end
+		-- чужие ослабления на цели: мелкие, рядами под вашими, по центру
+		for k = 1, othersN do
+			local o = e.others[k]
+			local f = Icon(r, k, r.oicons)
+			if not f.small then
+				f.small = true
+				f:SetWidth(OTHER_SIZE)
+				f:SetHeight(OTHER_SIZE)
+				f.time:ClearAllPoints()
+				f.time:SetPoint("CENTER", f, "CENTER", 0, 0)
+				f.time:SetFont("Fonts\\FRIZQT__.TTF", 12, "OUTLINE")
+				f.count:SetFont("Fonts\\FRIZQT__.TTF", 10, "OUTLINE")
+			end
+			local row, col = math.floor((k - 1) / othersPer), (k - 1) % othersPer
+			local cnt = math.min(othersPer, othersN - row * othersPer)
+			local left = (width - (cnt * (OTHER_SIZE + OTHER_GAP) - OTHER_GAP)) / 2
+			f:ClearAllPoints()
+			f:SetPoint("TOPLEFT", r, "TOPLEFT", left + col * (OTHER_SIZE + OTHER_GAP), -othersTop - row * (OTHER_SIZE + OTHER_GAP))
+			f.guid, f.debuffName, f.spellId, f.other = e.guid, o.name, o.spellId, o
+			f.tex:SetTexture(o.icon)
+			local left2 = o.expires and (o.expires - now)
+			f.time:SetText(left2 and string.format("%d", math.ceil(left2)) or "")
+			f.time:SetTextColor(1, 1, 1)
+			f.count:SetText((o.count and o.count > 1) and o.count or "")
+			f:SetAlpha(1)
+			f:Show()
+		end
+		for k = othersN + 1, #r.oicons do r.oicons[k]:Hide() end
 		r:Show()
 		return width
 	end
@@ -2719,7 +2777,7 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 	local width = Draw(tr, targetEntry, true)
 	if width then
 		tr:ClearAllPoints()
-		tr:SetPoint("TOPLEFT", anchor, "CENTER", math.max(TARGET_X, (procRow.width or 0) / 2 + SIDE_MARGIN), TARGET_Y)
+		tr:SetPoint("TOPLEFT", anchor, "CENTER", math.max(TARGET_X, (procRow.width or 0) / 2 + TARGET_GAP), TARGET_Y)
 	end
 	for i = 1, MAX_ROWS do
 		local e = list[i]
