@@ -2,7 +2,7 @@
 ## Title: CraftPlan
 ## Notes: Стеки крафта: что собрать, купить и создать, прирост навыка
 ## Notes-ruRU: Стеки крафта: что собрать, купить и создать, прирост навыка
-## Version: 2.1.21
+## Version: 2.1.26
 ## X-Sirus-Category: 15
 ## SavedVariables: WhereToGetDB
 ## SavedVariablesPerCharacter: CraftPlanDB
@@ -12,6 +12,7 @@ Data\Recipes.lua
 Data\ProspectData.lua
 Data\VeinData.lua
 Data\TrainerData.lua
+Data\ItemTypes.lua
 Core.lua
 Calc.lua
 Sources.lua

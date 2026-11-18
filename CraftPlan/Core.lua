@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.21"
+CP.VERSION = "2.1.26"
 
 BINDING_HEADER_CRAFTPLAN = "CraftPlan (профессии)"
 BINDING_NAME_CRAFTPLAN_MAP = "Открыть/закрыть окно CraftPlan"

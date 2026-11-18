@@ -62,6 +62,11 @@ local groupCheck = W.Check(f, "CraftPlanRecipesGroup", "Группировать
 	function() return DB().apGroup end,
 	function(v) DB().apGroup = v or nil; ResetScroll(); CP.RefreshRecipes() end,
 	"Разделы как в окне профессии. Изученные рецепты берут раздел из окна профессии (откройте его хотя бы раз), неизученные - по типу предмета. Щелчок по разделу сворачивает его.")
+-- sort: by skill (default), item level, required level
+local SORTS = { { "skill", "По навыку" }, { "ilvl", "Ур. предмета" }, { "req", "Треб. уровень" } }
+local sortDrop = W.Dropdown(f, "CraftPlanRecipesSort", 100, SORTS,
+	function() return DB().apSort or "skill" end,
+	function(k) DB().apSort = (k ~= "skill") and k or nil; ResetScroll(); CP.RefreshRecipes() end)
 local skillLbl = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 skillLbl:SetText("Навык")
 
@@ -217,10 +222,28 @@ local function Row(i)
 	r.iconBtn:SetAllPoints(r.icon)
 	r.iconBtn:SetFrameLevel(r:GetFrameLevel() + 2)
 	r.iconBtn:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-	r.iconBtn:SetScript("OnClick", function(self, button) r:GetScript("OnClick")(r, button) end)
+	r.iconBtn:SetScript("OnClick", function(self, button)
+		local d = r.data
+		local item = d and d.rec.item or 0
+		-- Ctrl: try on, as everywhere in the game
+		if item > 0 and button == "LeftButton" and IsModifiedClick("DRESSUP") then
+			local _, link = GetItemInfo(item)
+			if link then DressUpItemLink(link) end
+			return
+		end
+		r:GetScript("OnClick")(r, button)
+	end)
+	-- the game calls UpdateTooltip of the tooltip owner every 0.2 s: Shift pressed or released redraws with/without
+	-- the comparison with what is worn, as on any item
+	r.iconBtn.UpdateTooltip = function(self)
+		if (IsModifiedClick("COMPAREITEMS") or GetCVarBool("alwaysCompareItems")) ~= self.cmp then
+			self:GetScript("OnEnter")(self)
+		end
+	end
 	r.iconBtn:SetScript("OnEnter", function(self)
 		local d = r.data
 		if not d then return end
+		self.cmp = IsModifiedClick("COMPAREITEMS") or GetCVarBool("alwaysCompareItems")
 		GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 		if d.rec.item > 0 then GameTooltip:SetHyperlink("item:" .. d.rec.item) else GameTooltip:AddLine(d.rec.name) end
 		GameTooltip:AddLine(" ")
@@ -246,9 +269,22 @@ local function Row(i)
 			GameTooltip:AddDoubleLine("  " .. CP.ItemName(rg.id), have .. " / " .. rg.count, 1, 1, 1, ok and 0.25 or 1, ok and 1 or 0.4, ok and 0.25 or 0.4)
 		end
 		GameTooltip:AddLine("Щелчок или «+» — в стек на правке, правый — убрать (Shift — по 10).", 0.5, 0.8, 1, true)
+		if d.rec.item > 0 and IsEquippableItem(d.rec.item) then
+			GameTooltip:AddLine("Shift — сравнить с надетым, Ctrl+щелчок — примерить.", 0.5, 0.8, 1, true)
+		end
 		GameTooltip:Show()
+		if self.cmp and d.rec.item > 0 then
+			GameTooltip_ShowCompareItem(GameTooltip)
+		else
+			ShoppingTooltip1:Hide(); ShoppingTooltip2:Hide()
+			if ShoppingTooltip3 then ShoppingTooltip3:Hide() end
+		end
 	end)
-	r.iconBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+	r.iconBtn:SetScript("OnLeave", function()
+		GameTooltip:Hide()
+		ShoppingTooltip1:Hide(); ShoppingTooltip2:Hide()
+		if ShoppingTooltip3 then ShoppingTooltip3:Hide() end
+	end)
 	rows[i] = r
 	return r
 end
@@ -328,11 +364,37 @@ CP.OnDrop(function() listKey, listMemo = nil, nil end)
 -- Group of a recipe: the header from the profession window (db.cats, Core.lua DoScan); not seen there - the header
 -- most known recipes with the same item type/subtype have; else the subtype itself; no item data - "Прочее".
 local OTHER = "Прочее"
+local NOITEM = "\0" -- type key of recipes without an item (sockets, spurs): they vote among themselves
+-- class/subclass/slot of recipe products from the client tables (Data/ItemTypes.lua): known without seeing the item
+local function Code(item)
+	local v = CraftPlanItemType and CraftPlanItemType[item]
+	if v then return math.floor(v / 100), v % 100 end
+end
 local function ItemType(item)
-	if not item or item <= 0 then return nil end
-	local _, _, _, _, _, cls, sub = GetItemInfo(item)
+	if not item or item <= 0 then return NOITEM end
+	local code = Code(item)
+	if code then return code, CraftPlanSubName[code] or OTHER end
+	local _, _, _, _, _, cls, sub = GetItemInfo(item) -- not in the tables (server items): only if seen
 	if not cls then return nil end
 	return cls .. "|" .. (sub or ""), (sub and sub ~= "" and sub ~= cls) and sub or cls
+end
+-- equippable non-weapons are split further by slot: "Разное - Кольца", "Латные - Голова"
+local SLOTS = { -- equip location, InventoryType, name
+	{ "INVTYPE_HEAD", 1, "Голова" }, { "INVTYPE_NECK", 2, "Шея" }, { "INVTYPE_SHOULDER", 3, "Плечи" },
+	{ "INVTYPE_CLOAK", 16, "Спина" }, { "INVTYPE_CHEST", 5, "Грудь" }, { "INVTYPE_ROBE", 20, "Грудь" },
+	{ "INVTYPE_BODY", 4, "Рубашка" }, { "INVTYPE_TABARD", 19, "Гербовая накидка" }, { "INVTYPE_WRIST", 9, "Запястья" },
+	{ "INVTYPE_HAND", 10, "Кисти рук" }, { "INVTYPE_WAIST", 6, "Пояс" }, { "INVTYPE_LEGS", 7, "Ноги" },
+	{ "INVTYPE_FEET", 8, "Ступни" }, { "INVTYPE_FINGER", 11, "Кольца" }, { "INVTYPE_TRINKET", 12, "Аксессуары" },
+	{ "INVTYPE_SHIELD", 14, "Щиты" }, { "INVTYPE_HOLDABLE", 23, "Левая рука" }, { "INVTYPE_RELIC", 28, "Реликвии" },
+}
+local SLOT_NAME, SLOT_ORD, SLOT_OF = {}, {}, {}
+for i, s in ipairs(SLOTS) do SLOT_NAME[s[1]], SLOT_ORD[s[1]], SLOT_OF[s[2]] = s[3], i, s[1] end
+local function Slot(item)
+	if not item or item <= 0 then return nil end
+	local code, inv = Code(item)
+	local loc
+	if code then loc = SLOT_OF[inv] else loc = select(9, GetItemInfo(item)) end
+	return loc and SLOT_NAME[loc] and loc
 end
 local function Groups(prof, sk)
 	local cat = DB().cats and DB().cats[prof]
@@ -352,18 +414,69 @@ local function Groups(prof, sk)
 		for h, c in pairs(v) do if c > n or (c == n and h < best) then best, n = h, c end end
 		byType[t] = best
 	end
-	return function(r)
+	local function Base(r)
 		local h = rec[r.name]
 		if h then return h end
 		local t, label = ItemType(r.item)
 		if not t then return OTHER end
+		if t == NOITEM then return byType[t] or "Улучшения" end -- sockets, spurs: they improve an item
 		return byType[t] or label
-	end, ord
+	end
+	local ord2 = setmetatable({}, { __index = ord })
+	return function(r)
+		local g = Base(r)
+		local loc = Slot(r.item)
+		if not loc then return g end
+		if g == SLOT_NAME[loc] then return g end -- "Щиты", not "Щиты - Щиты"
+		local name = g .. " - " .. SLOT_NAME[loc]
+		-- right after the base header's place, slots in body order
+		ord2[name] = (ord[g] or (g == OTHER and 100001 or 100000)) + SLOT_ORD[loc] / 100
+		return name
+	end, ord2
+end
+
+-- Item level / required level come only from the game (GetItemInfo), for items the client has seen.
+-- The rest are asked from the server through a hidden tooltip, a few at a time; when the answers are in,
+-- the list is rebuilt.
+local askTip
+local asked, queue, pending, lastAsk = {}, {}, false, 0
+local pump = CreateFrame("Frame")
+pump:Hide()
+local acc = 0
+pump:SetScript("OnUpdate", function(self, e)
+	acc = acc + e
+	if acc < 0.2 then return end
+	acc = 0
+	if #queue > 0 then
+		askTip = askTip or CreateFrame("GameTooltip", "CraftPlanAskTip", UIParent, "GameTooltipTemplate")
+		for _ = 1, math.min(3, #queue) do
+			askTip:SetOwner(UIParent, "ANCHOR_NONE")
+			askTip:SetHyperlink("item:" .. table.remove(queue, 1))
+			askTip:Hide()
+		end
+		pending, lastAsk = true, GetTime()
+	elseif pending and GetTime() - lastAsk > 1.5 then
+		pending = false
+		self:Hide()
+		listKey, listMemo = nil, nil
+		if f:IsShown() then CP.RefreshRecipes() end
+	end
+end)
+local function Levels(item)
+	if not item or item <= 0 then return nil end
+	local _, _, _, il, rl = GetItemInfo(item)
+	if il then return il, rl end
+	if not asked[item] then
+		asked[item] = true
+		queue[#queue + 1] = item
+		pump:Show()
+	end
 end
 
 local function List(prof, rank)
 	local group = DB().apGroup
-	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query .. (group and "|g" or "")
+	local mode = DB().apSort
+	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query .. (group and "|g" or "") .. "|" .. (mode or "")
 	if listMemo and listKey == key then return listMemo end
 	local sk = CP.SKILL_ID[prof]
 	local set = KSET[DB().apKind or "skill"]
@@ -379,7 +492,18 @@ local function List(prof, rank)
 			end
 		end
 	end
+	if mode then
+		for _, d in ipairs(out) do
+			local il, rl = Levels(d.rec.item)
+			d.lv = (mode == "ilvl") and il or rl
+		end
+	end
 	table.sort(out, function(a, b)
+		-- item level / required level, when chosen (no data — after); ties and default: the skill order
+		if mode and a.lv ~= b.lv then
+			if not a.lv or not b.lv then return a.lv ~= nil end
+			return a.lv < b.lv
+		end
 		-- by the skill at which the recipe turns yellow, then by the learn skill (unknown — last)
 		if a.rec.y ~= b.rec.y then return a.rec.y < b.rec.y end
 		local ra, rb = a.req or 9999, b.req or 9999
@@ -470,6 +594,9 @@ function CP.RefreshRecipes()
 	groupCheck:ClearAllPoints()
 	groupCheck:SetPoint("LEFT", trainerCheck.label, "RIGHT", 16, -1)
 	groupCheck:SetChecked(DB().apGroup)
+	sortDrop:ClearAllPoints()
+	sortDrop:SetPoint("LEFT", groupCheck.label, "RIGHT", -6, -2)
+	sortDrop.Refresh()
 	y = y - 24
 	sc:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
 	curProf, curRank = cur, cur and lines[cur].rank
