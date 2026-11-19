@@ -75,7 +75,7 @@ local function applyNodeTexture(texture, nodeType, nodeID)
 end
 
 -- patched: a 3 px ring around minimap node icons, black at the icon fading to white outside: visible on any ground
-local BG_SCALE = 1.5
+local BG_SCALE = 11 / 6 -- icon 12px + ring 5px each side
 local function setPinBg(pin, on)
 	if on then
 		pin.bg:SetWidth(pin:GetWidth() * BG_SCALE) -- explicit: OnSizeChanged does not fire for hidden frames
