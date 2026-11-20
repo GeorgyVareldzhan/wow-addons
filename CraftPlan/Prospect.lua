@@ -173,6 +173,39 @@ function CP.CanProspect()
 	return spell and GetSpellInfo(spell) and true or false
 end
 function CP.IsProspectGem(id) Index(); return byGem[id] ~= nil end
+
+-- How much of this ore is still missing for the whole active plan: crafts (bars...) plus prospecting for the
+-- missing gems (85%, as the bar's ore icons: UI/Bar.lua) minus bags and bank. nil — the plan does not use it
+function CP.OreShort(ore)
+	local data, all = CP.Compute(), CP.MergedAll()
+	local craft = all.nodes[ore] and all.nodes[ore].gross or 0
+	local pros = 0
+	if CP.CanProspect() then
+		local gems = {}
+		for _, id in ipairs(all.ord) do
+			local n = all.nodes[id]
+			if n.made == 0 and n.short > 0 and CP.ProspectTopOre(id, true) then gems[#gems + 1] = n end
+		end
+		local stacks = CP.Goal().stacks
+		local function PrefFor(gem)
+			local set
+			for _, si in ipairs(data.order) do
+				local st, t = stacks[si], data.trees[si]
+				if st and st.orePlan and st.orePlan.ore and t and t.nodes[gem] then
+					set = set or {}
+					set[st.orePlan.ore] = true
+				end
+			end
+			return set
+		end
+		local function Reserve(o) return all.nodes[o] and all.nodes[o].gross or 0 end
+		for _, c in ipairs(CP.ProspectPlan(gems, true, PrefFor, Reserve)) do
+			if c.ore == ore then pros = c.need end
+		end
+	end
+	if craft + pros == 0 then return nil end
+	return math.max(0, craft + pros - CP.Have(ore))
+end
 -- every gem prospecting gives (shared list — don't change it)
 function CP.ProspectGemList() Index(); return gemList end
 

@@ -4,7 +4,7 @@
 CraftPlan = CraftPlan or {}
 local CP = CraftPlan
 
-CP.VERSION = "2.1.33"
+CP.VERSION = "2.1.40"
 
 function CP.Print(msg)
 	DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffCraftPlan:|r " .. msg)

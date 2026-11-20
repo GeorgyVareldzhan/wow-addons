@@ -505,6 +505,20 @@ function CP.Merge(trees, list)
 	return out
 end
 
+-- For MapPlus (ore per hour under the TomTom arrow): how many of the item named so are still missing in the whole
+-- active plan (after bags and bank; ore — with prospecting for gems); nil — the plan does not use it
+function CP.ShortByName(name)
+	-- ore: crafts plus prospecting (CP.OreShort, Prospect.lua)
+	for _, id in ipairs(CP.ORES or {}) do
+		if CP.ItemName(id) == name and CP.OreShort then return CP.OreShort(id), id end
+	end
+	local t = CP.MergedAll()
+	for _, id in ipairs(t.ord) do
+		if CP.ItemName(id) == name then return t.nodes[id].short, id end
+	end
+	return nil
+end
+
 -- How many kinds and pieces are missing
 function CP.Shortage(t)
 	local kinds, pieces = 0, 0

@@ -19,6 +19,7 @@ globals = {
 -- Только читаем: API и фреймы игры, другие аддоны, свои глобальные из других файлов и имена фреймов.
 -- Новое имя, которого здесь нет, luacheck покажет — опечатка или его надо дописать сюда
 read_globals = {
+	"MapPlusDB", "date", -- UI/Trips.lua: журнал поездок MapPlus
 	"BANK_CONTAINER", "BuyMerchantItem", "BuyTrainerService", "ChatEdit_GetActiveWindow",
 	"ChatEdit_InsertLink", "CLASS_TRAINER_SKILLS_DISPLAYED", "ClassTrainerFrame",
 	"ClassTrainerFrame_Update", "ClassTrainerTrainButton", "ClearCursor", "CloseDropDownMenus",

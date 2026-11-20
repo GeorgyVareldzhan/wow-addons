@@ -543,6 +543,36 @@ local function ItemHeight(d) return d.hdr and HDRH or RowHeight(d.rec) end
 
 local curProf, curRank -- the profession shown and its skill (set by CP.RefreshRecipes, used by FillRows)
 
+-- collapse / expand all groups of the shown profession (only with "Группировать")
+local function AnyOpen()
+	for _, d in ipairs(List(curProf, curRank)) do
+		if d.hdr and not d.collapsed then return true end
+	end
+	return false
+end
+local allBtn = CreateFrame("Button", nil, f)
+allBtn:SetWidth(16)
+allBtn:SetHeight(16)
+allBtn:SetHighlightTexture("Interface\\Buttons\\UI-PlusButton-Hilight", "ADD")
+allBtn:SetScript("OnClick", function(self)
+	local db = DB()
+	db.apCollapsed = db.apCollapsed or {}
+	local close = self.open
+	for _, d in ipairs(List(curProf, curRank)) do
+		if d.hdr then db.apCollapsed[d.key] = close or nil end
+	end
+	listKey = nil -- collapsing is not in the cache key
+	ResetScroll()
+	CP.RefreshRecipes()
+	if GameTooltip:IsOwned(self) then self:GetScript("OnEnter")(self) end
+end)
+allBtn:SetScript("OnEnter", function(self)
+	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+	GameTooltip:AddLine(self.open and "Свернуть все" or "Развернуть все")
+	GameTooltip:Show()
+end)
+allBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
 function CP.RefreshRecipes()
 	if not f:IsShown() then return end
 	local db = DB()
@@ -600,6 +630,16 @@ function CP.RefreshRecipes()
 	y = y - 24
 	sc:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
 	curProf, curRank = cur, cur and lines[cur].rank
+	allBtn:ClearAllPoints()
+	allBtn:SetPoint("LEFT", sortDrop, "RIGHT", -12, 2)
+	if DB().apGroup and cur then
+		allBtn.open = AnyOpen()
+		allBtn:SetNormalTexture(allBtn.open and "Interface\\Buttons\\UI-MinusButton-Up" or "Interface\\Buttons\\UI-PlusButton-Up")
+		allBtn:SetPushedTexture(allBtn.open and "Interface\\Buttons\\UI-MinusButton-Down" or "Interface\\Buttons\\UI-PlusButton-Down")
+		allBtn:Show()
+	else
+		allBtn:Hide()
+	end
 	FillRows()
 end
 
