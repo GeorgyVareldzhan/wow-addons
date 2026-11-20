@@ -155,6 +155,14 @@ end
 --[[
 	create X,Y from an ID
 ]]
+-- patched: название зоны открытой карты — из списка игры сейчас, а не из continentData (его строят
+-- при загрузке, а на Sirus номера зон потом сдвигаются: карта Шолазара читалась как другая зона)
+function GatherMate:MapZoneName()
+	local c, z = GetCurrentMapContinent(), GetCurrentMapZone()
+	if not (c and c > 0 and z and z > 0) then return nil end
+	return (select(z, GetMapZones(c)))
+end
+
 function GatherMate:getXY(id)
 	return floor(id / 10000) / 10000, (id % 10000) / 10000
 end

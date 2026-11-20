@@ -51,8 +51,7 @@ function GatherMate:ResolveZone(zone)
 	local zd = self.zoneData
 	if zone and zone ~= "" and rawget(zd, zone) then return zone end
 	if WorldMapFrame and WorldMapFrame:IsShown() then return zone end -- карта может показывать другую зону
-	local cont = self.continentData and rawget(self.continentData, GetCurrentMapContinent())
-	local mapZone = cont and cont[GetCurrentMapZone()]
+	local mapZone = self:MapZoneName() -- patched: список зон игры сейчас
 	if mapZone and rawget(zd, mapZone) then return mapZone end
 	return zone
 end
@@ -669,8 +668,7 @@ local peekAt = 0
 local function playerPos()
 	local x, y = GetPlayerMapPosition("player")
 	if specialZones[zone] then return x, y end
-	local cont = continentData[GetCurrentMapContinent()]
-	if x ~= 0 and y ~= 0 and GetCurrentMapZone() ~= 0 and cont and cont[GetCurrentMapZone()] == zone then return x, y end
+	if x ~= 0 and y ~= 0 and GatherMate:MapZoneName() == zone then return x, y end -- patched: список зон игры сейчас
 	if not WorldMapFrame:IsShown() then
 		SetMapToCurrentZone()
 	else
@@ -861,7 +859,7 @@ function Display:UpdateWorldMap(force)
 	if not WorldMapFrame:IsVisible() then return end
 	if not db.showWorldMap then clearpins(worldmapPins) return end
 
-	local zname = continentData[GetCurrentMapContinent()][GetCurrentMapZone()]
+	local zname = GatherMate:MapZoneName() -- patched: было continentData (номера зон с загрузки)
 	if not zname then clearpins(worldmapPins) return end -- player is not viewing a zone map of a continent
 
 	if not rememberForce and lastDrawnWorldMap == zname then return end -- already drawn last time, and not forced

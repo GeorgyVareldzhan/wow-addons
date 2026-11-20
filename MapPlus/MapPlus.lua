@@ -241,12 +241,15 @@ SlashCmdList["MAPPLUS"] = function(msg)
 	msg = (msg or ""):lower():gsub("^%s+", ""):gsub("%s+$", "")
 	if msg == "fly" then
 		WaypointToFlight()
+	elseif msg == "ore" then
+		MapPlusOreReset()
+		DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffMapPlus:|r начата новая поездка (счёт руды в час заново).")
 	elseif msg == "fog" then
 		DB().noFog = not FogRemoved()
 		check:SetChecked(FogRemoved())
 		UpdateFog()
 		DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffMapPlus:|r туман войны " .. (FogRemoved() and "убран" or "показан") .. ".")
 	else
-		DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffMapPlus:|r /mapplus fog — убрать или вернуть туман войны (или галочка под картой мира), /mapplus fly — путь к ближайшей полётке.")
+		DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffMapPlus:|r /mapplus fog — убрать или вернуть туман войны (или галочка под картой мира), /mapplus fly — путь к ближайшей полётке, /mapplus ore — счёт руды в час заново.")
 	end
 end

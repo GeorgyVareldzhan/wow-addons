@@ -6,13 +6,14 @@ LUABAL ?= $(BACKUP)/tools/luabal.py
 NAME   := $(shell basename "$$(cd .. && pwd)")
 DEST   ?= $(BACKUP)/$(NAME)
 
-.PHONY: help lint bal version backup
+.PHONY: help lint bal version backup trips
 
 help:
 	@echo "make lint     — синтаксис (luac 5.1) и luacheck (.luacheckrc рядом) в одноразовом docker"
 	@echo "make bal      — быстрая проверка баланса блоков Lua, без docker"
 	@echo "make version  — версия из .toc"
 	@echo "make backup   — копия аддона в ~/WoW-backups/$(NAME)/<версия>/"
+	@echo "make trips    — журнал поездок за рудой из сохранений в Tools/trips.md"
 
 # Lua 5.1 и luacheck ставятся только внутри контейнера, папка аддона — только для чтения
 lint:
@@ -38,3 +39,6 @@ backup:
 	dst="$(DEST)/$$v"; mkdir -p "$$dst"; \
 	rsync -a --exclude Tools --exclude .cache --exclude __pycache__ ../ "$$dst/"; \
 	echo "$(NAME) $$v -> $$dst"
+
+trips:
+	@$(PY) -I trips.py

@@ -9,7 +9,7 @@ ignore = {
 
 -- Глобальные, которые аддон создаёт или меняет
 globals = {
-	"MapPlusDB", "MapPlusFogData", "SLASH_MAPPLUS1", "SlashCmdList",
+	"MapPlusDB", "MapPlusFogData", "MapPlusOreReset", "MapPlusOreContinue", "MapPlusOrePassed", "MapPlusOreProgress", "MapPlusOreFound", "MapPlusOreFinish", "MapPlusRouteMined", "SLASH_MAPPLUS1", "SlashCmdList",
 }
 
 -- Только читаем: API и фреймы игры, другие аддоны, свои глобальные из других файлов и имена фреймов.
@@ -17,7 +17,10 @@ globals = {
 read_globals = {
 	"CreateFrame", "DEFAULT_CHAT_FRAME", "GameTooltip", "GetCurrentMapAreaID",
 	"GetCurrentMapContinent", "GetCurrentMapDungeonLevel", "GetMapInfo", "GetMapOverlayInfo",
-	"GetNumMapOverlays", "GetPlayerMapPosition", "hooksecurefunc", "Questie", "QuestieCompat",
+	"GetNumMapOverlays", "GetPlayerMapPosition", "IsIndoors", "wipe", "hooksecurefunc", "Questie", "QuestieCompat",
 	"QuestieLoader", "SetDungeonMapLevel", "SetMapByID", "SetMapToCurrentZone", "SetMapZoom",
 	"TomTom", "UnitFactionGroup", "WorldMapDetailFrame", "WorldMapFrame",
+	"LibStub", "GatherMate_Respawn", "IsFlying", "GetUnitSpeed", "GetCurrentMapZone", "UIDropDownMenu_SetWidth", "UIDropDownMenu_Initialize",
+	"UIDropDownMenu_CreateInfo", "UIDropDownMenu_AddButton", "CloseDropDownMenus",
+	"MapPlusFlightButton", "MapPlusRouteEnd", "MapPlusRouteDropText", "TomTomCrazyArrow", "CraftPlan", "GetSpellInfo", "GetNumLootItems", "GetLootSlotInfo", "GetTime", "GetRealZoneText", "time",
 }
