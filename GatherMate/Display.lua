@@ -56,21 +56,10 @@ function GatherMate:ResolveZone(zone)
 	return zone
 end
 
--- patched: недоступные по навыку точки — ярко-красное кольцо, прозрачность 0.8
-local function nodeLocked(nodeType, nodeID)
-	local rank = GatherMate.skillRank and GatherMate.skillRank[nodeType]
-	local minTable = GatherMate.nodeMinHarvest and GatherMate.nodeMinHarvest[nodeType]
-	local req = minTable and minTable[nodeID]
-	return rank and req and req > rank
-end
+-- patched: значок точки (красные кольца «навыка не хватает» убраны: навык читался до загрузки — красило зря)
 local function applyNodeTexture(texture, nodeType, nodeID)
-	if nodeLocked(nodeType, nodeID) then
-		texture:SetTexture(trackingCircle)
-		texture:SetVertexColor(1, 0, 0, 1)
-	else
-		texture:SetTexture(nodeTextures[nodeType][nodeID])
-		texture:SetVertexColor(1, 1, 1, 1)
-	end
+	texture:SetTexture(nodeTextures[nodeType][nodeID])
+	texture:SetVertexColor(1, 1, 1, 1)
 end
 
 -- patched: a 3 px ring around minimap node icons, black at the icon fading to white outside: visible on any ground
@@ -103,7 +92,7 @@ local function recyclePin(pin)
 	pin.worldmap = false
 	pin.nodeID = 0
 	pin.keep = nil
-	pin.hv, pin.hiddenNode, pin.locked = nil, nil, nil -- patched: cached Hide.lua state and skill lock
+	pin.hv, pin.hiddenNode = nil, nil -- patched: cached Hide.lua state
 	pinCache[pin] = true
 end
 --[[
@@ -341,29 +330,21 @@ end
 
 
 function Display:SKILL_LINES_CHANGED()
-	local skillname, isHeader, skillRank, _ -- patched: skillRank
+	local skillname, isHeader
 	for k,v in pairs(have_prof_skill) do
 		have_prof_skill[k] = nil
 	end
-	-- patched: текущий уровень профессий для окраски недоступных точек
-	GatherMate.skillRank = GatherMate.skillRank or {}
-	for k in pairs(GatherMate.skillRank) do
-		GatherMate.skillRank[k] = nil
-	end
 	
 	for i = 1, GetNumSkillLines() do
-		skillname, isHeader, _, skillRank = GetSkillLineInfo(i) -- patched: skillRank
+		skillname, isHeader = GetSkillLineInfo(i)
 		if not isHeader and skillname then
 			for prof, skill in pairs(profession_to_skill) do
 				if strfind(skillname, prof, 1, true) then
 					have_prof_skill[skill] = true
-					GatherMate.skillRank[skill] = skillRank -- patched
 				end
 			end
 		end
 	end
-	clearpins(minimapPins) -- patched: перекрасить значки под новый навык
-	clearpins(worldmapPins) -- patched
 	self:UpdateVisibility()
 	self:UpdateMaps()
 end
@@ -485,7 +466,7 @@ function Display:addWorldPin(coord, nodeID, nodeType, zone, index)
 		pin:SetFrameLevel(worldmapFrameLevel)
 		pin:SetHeight(12 * db.scale)
 		pin:SetWidth(12 * db.scale)
-		pin:SetAlpha(nodeLocked(nodeType, nodeID) and 0.8 or db.alpha) -- patched
+		pin:SetAlpha(db.alpha)
 		pin:EnableMouse(true)
 		applyNodeTexture(pin.texture, nodeType, nodeID) -- patched
 		setPinBg(pin, false) -- patched
@@ -519,8 +500,7 @@ function Display:getMiniPin(coord, nodeID, nodeType, zone, index)
 		pin:EnableMouse(db.minimapTooltips)
 		pin.isCircle = false
 		applyNodeTexture(pin.texture, nodeType, nodeID) -- patched
-		pin.locked = nodeLocked(nodeType, nodeID) -- patched: pins are rebuilt when the skill changes
-		setPinBg(pin, not pin.locked) -- patched
+		setPinBg(pin, true) -- patched
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin.x, pin.y = GatherMate:getXY(coord)
 		pin.x1, pin.y1 = GatherMate:PointToYards(pin.x,pin.y,zone)
@@ -548,7 +528,7 @@ function Display:addMiniPin(pin, refresh)
 		pin:SetHeight(12 * db.scale / minimapScale)
 		pin:SetWidth(12 * db.scale / minimapScale)
 		applyNodeTexture(pin.texture, pin.nodeType, pin.nodeID) -- patched
-		setPinBg(pin, not nodeLocked(pin.nodeType, pin.nodeID)) -- patched
+		setPinBg(pin, true) -- patched
 		pin.texture:SetTexCoord(0, 1, 0, 1)
 		pin.isCircle = false
 	end
@@ -607,8 +587,8 @@ function Display:addMiniPin(pin, refresh)
 		pin:Show()
 		pin:ClearAllPoints()
 		pin:SetPoint("CENTER", Minimap, "CENTER", diffX * minimapWidth, -diffY * minimapHeight)
-		-- patched: вдали 0.4 (красные кольца 0.8), ближе к 30 ярдам плавно до 1 (orig: alpha)
-		local base = pin.locked and 0.8 or 0.4
+		-- patched: вдали 0.4, ближе к 30 ярдам плавно до 1 (orig: alpha)
+		local base = 0.4
 		local k = (mapRadius - dist_2^0.5) / max(mapRadius - 30, 1)
 		if k < 0 then k = 0 elseif k > 1 then k = 1 end
 		pin:SetAlpha(alpha * (base + (1 - base) * k))
@@ -895,7 +875,7 @@ function Display:UpdateWorldMap(force)
 		for index, pin in pairs(worldmapPins) do
 			pin:SetHeight(12 * scale)
 			pin:SetWidth(12 * scale)
-			pin:SetAlpha(nodeLocked(pin.nodeType, pin.nodeID) and 0.8 or alpha) -- patched
+			pin:SetAlpha(alpha)
 		end
 		lastScale, lastAlphaPref = scale, alpha
 	end
