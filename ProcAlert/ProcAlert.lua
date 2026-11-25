@@ -23,7 +23,11 @@ local PROCS = {
 	-- needShield — без щита показывать со значком щита (первое нажатие макроса наденет сет)
 	-- sound — звук при появлении, даже если общий звук выключен (/pa alert); soundBuff — только при этом эффекте
 	{ id = 1464,  buff = 46916, buffOnly = true },                 -- Мощный удар мгновенный; эффект «Мощный удар!» (Bloodsurge)
-	{ id = 23922, cond = "ShieldSlamProc" },                      -- Мощный удар щитом: в любой стойке, щит надет, готов и ярости хватает
+	{ id = 23922, cond = "ShieldSlamProc", buff = 50227, freeBuff = true, glow = "SwordBoard", sound = true, soundBuff = true }, -- Мощный удар щитом: в любой стойке, щит надет, готов и ярости хватает;
+	                                                               -- «Щит и меч» (Sword and Board) — бесплатно: ИМБА и звук
+	{ id = 20243, cond = "DevastateFill" },                        -- Сокрушение: в «Защите» — когда Мощный удар щитом, Реванш и Ударная волна не готовы
+	{ id = 6343,  stances = { BATTLE, DEFENSIVE }, cond = "ThunderProc" }, -- Удар грома: в «Защите» — по готовности, цель рядом
+	{ id = 46968, cond = "ShockwaveProc" },                        -- Ударная волна (талант Защиты): по готовности, цель рядом
 	{ id = 772,   stances = { BATTLE, DEFENSIVE }, cond = "RendProc" }, -- Кровопускание: в боевой — всегда, когда его нет на цели;
 	                                                               -- в оборонительной — только если его держим (TRACKED), иначе оно в «Ударах»
 	{ id = 12294, cond = "MortalProc" },                           -- Смертельный удар: в берсерка — когда готов; в боевой — то же, но если нужно
@@ -37,6 +41,8 @@ local PROCS = {
 	-- alts — показать первую готовую из списка (иконка меняется)
 	{ id = 18499, anyTarget = true, cond = "Feared", sound = true, glow = "Feared" }, -- Ярость берсерка: на вас страх и т. п. (золотая рамка и звук)
 	{ id = 355, alts = { 355, 694, 1161 }, stances = { DEFENSIVE }, cond = "NotOnMe" }, -- Провокация / Дразнящий удар / Вызывающий крик: цель бьёт не вас
+	{ id = 3411,  stances = { DEFENSIVE }, cond = "InterveneProc" }, -- Вмешательство: в группе цель бьёт союзника, Провокация на перезарядке
+	{ id = 50720, anyTarget = true, cond = "NoVigilance" },          -- Бдительность: в группе её нет ни на ком
 }
 
 -- Обычные удары в порядке показа. skipDebuff — не показывать, если ваш дебафф с этим
@@ -59,8 +65,7 @@ local REGULAR = {
 	-- Смертельный удар и Вихрь — в «Срабатываниях»
 	{ id = 23881 },                                         -- Кровожадность (Bloodthirst)
 	{ id = 78 },                                            -- Удар героя (Heroic Strike)
-	{ id = 772,   stances = { DEFENSIVE }, skipDebuff = true, longFight = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»); не на слабых мобах
-	{ id = 7386, alts = { 20243, 7386 }, stances = { DEFENSIVE }, cond = "NeedSunder", sunder = true, longFight = true }, -- Сокрушение / Раскол брони: только в оборонительной; на цели меньше 5 или скоро спадёт
+	{ id = 772,   stances = { DEFENSIVE }, cond = "RendOk", skipDebuff = true, longFight = true }, -- Кровопускание (Rend): в «Ударах», пока его нет на цели (в боевой — в «Срабатываниях»); не на слабых мобах и не в «Защите»
 	{ id = 6673, alts = { "shout" }, anyTarget = true, cond = "NoShout", saveExec = true }, -- Боевой / Командирский крик: на вас нет ни одного
 	{ id = 1160, stances = { DEFENSIVE }, skipDebuff = true },                -- Деморализующий крик: нет на цели
 }
@@ -87,13 +92,13 @@ local RESERVE_SPELLS = {
 }
 -- Что снимает Ярость берсерка: страх, ошеломление, паралич (названия берутся из клиента)
 local FEAR_SPELLS = { 5782, 5484, 8122, 5246, 6358, 10326, 1513, 6770, 1776, 20066 }
-local SUNDER_REFRESH = 5 -- за сколько секунд до конца Раскола брони напоминать
+local THREAT_WARN = 90    -- в группе кто-то набрал столько % угрозы, нужной для срыва, — оранжевая рамка у моба справа
 local REND_FORGOT = 3     -- в бою с целью столько секунд нет вашего Кровопускания — его значок мигает
 local RendAlert           -- задаётся ниже (нужна анимации значков)
 local REND_REFRESH = 3   -- за сколько секунд до конца Кровопускания его значок у мобов справа мигает
 local REND_RESERVE = 3   -- за сколько секунд до конца Кровопускания держать на него ярость (запас Удара героя)
-local LOW_LEVEL_DIFF = 5  -- цель ниже вас на столько уровней (обычная) — бой короткий: без Кровопускания,
-                          -- Раскола брони и без копления на Казнь
+local LOW_LEVEL_DIFF = 5  -- цель ниже вас на столько уровней (обычная) — бой короткий: без Кровопускания
+                          -- и без копления на Казнь
 local SHIELD_TEX = "Interface\\Icons\\INV_Shield_06" -- значок в углу: нужен щит
 local OVERFLOW_RAGE = 90  -- от стольких ярости Удар героя пульсирует: ярость скоро пропадёт
 
@@ -595,7 +600,7 @@ end
 
 -- Эффекты на вас и ослабления на цели. За одну проверку (между AuraTick(true) и AuraTick(false))
 -- каждый список перебирается один раз и запоминается; вне проверки — перебирается заново при каждом вызове
-local MyBuff, HasMyDebuff, SunderInfo, AuraTick
+local MyBuff, HasMyDebuff, AuraTick
 do
 	local tickAt               -- время начала идущей проверки (GetTime в кадре) или nil
 	local buffsDone, debuffsDone = false, false
@@ -651,13 +656,6 @@ do
 		local expires = myDebuff[name]
 		if not expires then return false end
 		return true, (expires > 0) and (expires - GetTime()) or nil
-	end
-	-- Стаки Раскола брони на цели (от любого воина) и время окончания
-	SunderInfo = function()
-		ScanDebuffs()
-		local i = anyDebuff[GetSpellInfo(7386)]
-		if not i then return 0 end
-		return debuffCount[i] or 1, debuffExp[i]
 	end
 end
 
@@ -721,6 +719,26 @@ local fearNames
 local function InGroup()
 	return (GetNumRaidMembers() or 0) > 0 or (GetNumPartyMembers() or 0) > 0
 end
+-- Метки участников группы или рейда, кроме вас: fn(unit); вернула true — перебор останавливается
+local function EachGroupUnit(fn)
+	local raid = GetNumRaidMembers() or 0
+	if raid > 0 then
+		for i = 1, raid do
+			local u = "raid" .. i
+			if UnitExists(u) and not UnitIsUnit(u, "player") and fn(u) then return true end
+		end
+	else
+		for i = 1, GetNumPartyMembers() or 0 do
+			if fn("party" .. i) then return true end
+		end
+	end
+	return false
+end
+-- Готово и цель рядом (~10 м): для ударов по площади
+local function ReadyNear(spellID)
+	local n = Known(spellID)
+	return n and not CooldownOf(n) and CheckInteractDistance("target", 3) and true or false
+end
 -- Короткий бой: обычная цель заметно ниже вас по уровню
 local function LowTarget()
 	local lvl = UnitLevel("target")
@@ -773,6 +791,10 @@ do
 		return cached or nil
 	end
 end
+
+-- Ветки, в которых Кровопускание не показываем совсем
+local NO_REND = { prot = true }
+local function RendOff() return NO_REND[Spec() or ""] or false end
 
 -- Дебаффы, которые держим на цели (по ветке): висят — на цели с отсчётом, меньше REND_REFRESH с —
 -- мигают; нет на цели — иконка в срабатываниях
@@ -828,9 +850,22 @@ local CONDS = {
 		return false
 	end,
 	SweepActive = function() return MyBuff(12328) and true or false end, -- висят Размашистые удары
+	SwordBoard = function() return MyBuff(50227) and true or false end, -- «Щит и меч»: Мощный удар щитом бесплатно
+	DevastateFill = function()
+		if Spec() ~= "prot" or not Known(20243) then return false end
+		local ss = Known(23922)
+		if ss and not CooldownOf(ss) and IsUsableSpell(ss) then return false end -- Мощный удар щитом готов
+		local rev = Known(6572)
+		if rev and not CooldownOf(rev) and IsUsableSpell(rev) then return false end -- Реванш готов
+		if ReadyNear(46968) then return false end -- Ударная волна готова (Удар грома не мешает)
+		return true
+	end,
+	ThunderProc = function() return Spec() == "prot" and ReadyNear(6343) end,
+	ShockwaveProc = function() return ReadyNear(46968) end,
 	ShieldSlamProc = function()
 		local ss = Known(23922)
 		if not ss or CooldownOf(ss) then return false end
+		if MyBuff(50227) then return IsUsableSpell(ss) and true or false end -- «Щит и меч»: ярость не нужна
 		return IsUsableSpell(ss) and PlayerRage() >= (RageCost(ss) or 20) and true or false -- без щита клиент считает удар неприменимым
 	end,
 	BloodthirstProc = function()
@@ -848,7 +883,9 @@ local CONDS = {
 		local ww = Known(1680)
 		return ww and not CooldownOf(ww) and true or false
 	end,
+	RendOk = function() return not RendOff() end,
 	RendProc = function() -- на слабых мобах (LowTarget) Кровопускание не нужно
+		if RendOff() then return false end
 		local rend = Known(772)
 		if not rend or HasMyDebuff(rend) then return false end
 		local tracked = Tracking(772)
@@ -865,7 +902,7 @@ local CONDS = {
 		if stance == BATTLE then
 			-- Кровопускание нужно: Смертельный — только если ярости хватает на оба
 			-- (то же условие, что RendProc: CONDS внутри своей же таблицы ещё не виден)
-			local rend = Known(772)
+			local rend = not RendOff() and Known(772)
 			if rend and not LowTarget() and not HasMyDebuff(rend) then
 				return PlayerRage() >= (RageCost(ms) or 0) + (RageCost(rend) or 0)
 			end
@@ -924,9 +961,22 @@ local CONDS = {
 		return InGroup() and UnitAffectingCombat("target") and UnitExists("targettarget")
 			and not UnitIsUnit("targettarget", "player") and UnitIsFriend("player", "targettarget")
 	end,
-	NeedSunder = function()
-		local count, expires = SunderInfo()
-		return count < 5 or (expires and expires - GetTime() < SUNDER_REFRESH)
+	InterveneProc = function()
+		local iv = Known(3411)
+		if not iv or CooldownOf(iv) then return false end
+		if not (InGroup() and UnitAffectingCombat("target") and UnitExists("targettarget")
+			and not UnitIsUnit("targettarget", "player") and UnitIsFriend("player", "targettarget")) then return false end
+		local taunt = Known(355)
+		if taunt and not CooldownOf(taunt) then return false end -- сначала Провокация
+		return IsSpellInRange(iv, "targettarget") ~= 0
+	end,
+	NoVigilance = function()
+		local vig = Known(50720)
+		if not vig or CooldownOf(vig) or not InGroup() or UnitIsDeadOrGhost("player") then return false end
+		return not EachGroupUnit(function(u)
+			local name, _, _, _, _, _, _, caster = UnitBuff(u, vig)
+			return name and caster == "player"
+		end)
 	end,
 	NoShout = function()
 		if not (UnitAffectingCombat("player") or HasEnemyTarget()) then return false end
@@ -950,7 +1000,7 @@ local function DumpRage(name)
 		if n and r.rend then
 			local has, left = HasMyDebuff(n)
 			if has and not (left and left < REND_RESERVE) then n = nil end -- висит — запас на него не нужен
-			if LowTarget() then n = nil end -- на слабых мобах не нужно
+			if LowTarget() or RendOff() then n = nil end -- на слабых мобах и в «Защите» не нужно
 		end
 		local cost = n and RageCost(n)
 		if cost and cost > reserve then reserve = cost end
@@ -1448,7 +1498,7 @@ RendAlert = function()
 		rendGuid = nil
 		return false
 	end
-	local name = Known(772)
+	local name = not RendOff() and Known(772)
 	if not name or LowTarget() then return false end
 	local now = GetTime()
 	if HasMyDebuff(name) then
@@ -1847,6 +1897,7 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 			if (enemy or p.anyTarget) and StanceAllows(p.stances) and (hasBuff or not p.buffOnly)
 				and (not p.cond or CONDS[p.cond]()) then
 				ready, noMana = ProcState(name)
+				if p.freeBuff and hasBuff then noMana = false end -- под эффектом удар бесплатный
 				if not ready and p.needShield and NoShield() then ready, noMana, shieldOnly = true, false, true end
 			end
 			local f = procRow.bySpell[spellID]
@@ -1966,11 +2017,6 @@ checker:SetScript("OnUpdate", function(_, elapsed)
 				if r.needShield and NoShield() then f.badge:SetTexture(SHIELD_TEX) f.badge:Show() else f.badge:Hide() end
 				f.icon:SetTexture(texture)
 				if f.spellName ~= name then f.spellName = name f.key:SetText(FindKey(name) or "") end -- alts: другая способность — другая клавиша
-				if r.sunder then -- стаки «3/5» и время до конца Раскола брони
-					local count, expires = SunderInfo()
-					f.rage:SetText(count .. "/5")
-					f.buffExpires = expires
-				end
 				f.overflow = DUMP_SPELLS[r.id] and PlayerRage() >= OVERFLOW_RAGE or nil
 				f.removing = false
 			elseif f then
@@ -2303,6 +2349,11 @@ local function Sync(unit)
 	-- в бою с вами (в списке угрозы), но бьёт не вас — красная рамка (кого провоцировать)
 	local tanking, status = UnitDetailedThreatSituation("player", unit)
 	if status ~= nil then e.notOnMe = not tanking else e.notOnMe = nil end
+	-- бьёт вас, но кто-то из группы почти перехватил угрозу — оранжевая рамка
+	e.threatClose = tanking and InGroup() and EachGroupUnit(function(u)
+		local _, _, pct = UnitDetailedThreatSituation(u, unit)
+		return pct and pct >= THREAT_WARN
+	end) or nil
 	e.faceUnit = e.faceUnit or unit -- портрет снять при отрисовке, пока моб доступен по этой метке
 	syncN = syncN + 1
 	local debuffs = e.debuffs
@@ -2616,7 +2667,12 @@ frame:SetScript("OnUpdate", function(_, elapsed)
 		r.warn:SetWidth(fs + 12)
 		r.warn:SetHeight(fs + 12)
 		if e.guid == target and not vertical then r.border:Show() else r.border:Hide() end
-		if e.notOnMe and not vertical then r.warn:Show() else r.warn:Hide() end
+		if (e.notOnMe or e.threatClose) and not vertical then
+			if e.notOnMe then r.warn:SetVertexColor(1, 0.1, 0.1, 1) else r.warn:SetVertexColor(1, 0.5, 0, 1) end
+			r.warn:Show()
+		else
+			r.warn:Hide()
+		end
 		r.hp:SetWidth(vertical and TARGET_HP_W or fs)
 		r.hp:SetHeight(vertical and TARGET_HP_H or 5)
 		r.hp:ClearAllPoints()

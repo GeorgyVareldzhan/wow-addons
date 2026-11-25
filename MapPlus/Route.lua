@@ -236,13 +236,21 @@ end
 -- Для этой зоны и руды круг берётся как есть, без пересчёта и отсева; точки GatherMate рядом (MERGE) —
 -- для пропуска собранных жил
 local MANUAL = {
-	["Озеро Ледяных Оков"] = { base = 231, pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;60.30,52.00;58.00,52.80;56.61,54.79;56.30,56.80;53.30,55.60;50.22,58.31;53.60,65.00;54.90,66.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;50.01,49.57;49.40,47.80;49.60,45.70;49.20,43.40;51.70,36.90;58.50,36.10;59.80,38.00;62.20,35.00;61.90,36.00;61.80,37.50;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;48.60,35.40;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;38.90,38.20;41.30,37.30;41.30,41.60;39.69,45.82;41.00,51.30;41.90,52.50;41.90,54.20;41.00,55.00;39.20,53.20;38.60,59.40;33.80,54.50;29.60,56.40;29.70,55.10;25.40,53.30;29.50,52.10;31.60,50.10;33.40,48.70;31.40,48.10;30.90,46.10;31.80,45.40;30.00,43.90;30.18,40.69;29.60,38.50;28.40,40.70;28.50,41.60;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60" },
+	["Озеро Ледяных Оков"] = { base = 231, pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;60.30,52.00;58.00,52.80;56.61,54.79;56.30,56.80;53.30,55.60;50.22,58.31;53.60,65.00;54.90,66.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;50.01,49.57;49.40,47.80;49.60,45.70;49.20,43.40;51.70,36.90;58.50,36.10;59.80,38.00;62.20,35.00;61.90,36.00;61.80,37.50;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;48.60,35.40;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;38.90,38.20;41.30,37.30;41.30,41.60;39.69,45.82;41.00,51.30;41.90,52.50;41.90,54.20;41.00,55.00;39.20,53.20;38.60,59.40;33.80,54.50;29.60,56.40;29.70,55.10;25.40,53.30;29.50,52.10;31.60,50.10;33.40,48.70;31.40,48.10;30.90,46.10;31.80,45.40;30.00,43.90;30.18,40.69;29.60,38.50;28.40,40.70;28.50,41.60;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60",
+		alt = { name = "восьмёрка", pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.40,53.30;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;33.80,54.50;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;58.50,36.10;61.90,36.00;61.80,37.50;59.80,38.00;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,54.50;29.70,62.60;28.00,62.01;27.30,61.30;25.70,61.50;25.60,59.90;25.40,53.30;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;59.80,38.00;58.50,36.10;61.80,37.50;61.90,36.00;62.20,35.00;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60" } },
 }
+-- второй вариант круга этой зоны (alt: центр облетается дважды — «восьмёрка»), выбран в списке под картой
+local function AltOn(zone)
+	local m = MANUAL[zone]
+	return (m and m.alt and DB().alt) and true or false
+end
+local function AltSuffix(zone) return AltOn(zone) and (" (" .. MANUAL[zone].alt.name .. ")") or "" end
+
 local function ManualTour(gm, zone, base, w, h)
 	local m = MANUAL[zone]
 	if not (m and m.base == base) then return nil end
 	local t = {}
-	for x, y in m.pts:gmatch("([%d.]+),([%d.]+)") do t[#t + 1] = { tonumber(x) / 100 * w, tonumber(y) / 100 * h, 1, false, {} } end
+	for x, y in (AltOn(zone) and m.alt.pts or m.pts):gmatch("([%d.]+),([%d.]+)") do t[#t + 1] = { tonumber(x) / 100 * w, tonumber(y) / 100 * h, 1, false, {} } end
 	for coord in gm:GetNodesForZone(zone, TYPE, true) do
 		local x, y = gm:getXY(coord)
 		x, y = x * w, y * h
@@ -380,7 +388,7 @@ UpdateRoute = function()
 		local cnt = 0
 		for _ in gm:GetNodesForZone(zone, TYPE, true) do cnt = cnt + 1 end
 		local v, r = FlySpeed(), Respawn(gm, zone, base)
-		local key = zone .. "|" .. base .. "|" .. cnt .. "|" .. DB().rev .. "|" .. math.floor(v) .. "|" .. r
+		local key = zone .. "|" .. base .. "|" .. cnt .. "|" .. DB().rev .. "|" .. math.floor(v) .. "|" .. r .. "|" .. AltSuffix(zone)
 		if key ~= cacheKey and key ~= jobKey then
 			jobKey = key
 			job = coroutine.create(function()
@@ -407,7 +415,7 @@ UpdateRoute = function()
 			end
 		end
 		if key == cacheKey then
-			shown = { zone = zone, name = gm:GetNameForNode(TYPE, base) or "?", pts = n, len = cacheLen,
+			shown = { zone = zone, name = (gm:GetNameForNode(TYPE, base) or "?") .. AltSuffix(zone), pts = n, alt = AltOn(zone), len = cacheLen,
 				caves = cacheCaves, far = cacheFar, v = cacheV, r = cacheR,
 				tour = cacheTour, w = cacheW, h = cacheH, file = GetMapInfo() } -- файл карты — для TomTom
 		end
@@ -434,12 +442,13 @@ local function SetText()
 	if gm then drop:Show() else drop:Hide() return end
 	local zone = gm and ViewZone(gm)
 	local base = zone and DB().route[zone]
-	MapPlusRouteDropText:SetText("Маршрут: " .. (base and (gm:GetNameForNode(TYPE, base) or "?") or "нет"))
+	MapPlusRouteDropText:SetText("Маршрут: " .. (base and ((gm:GetNameForNode(TYPE, base) or "?") .. AltSuffix(zone)) or "нет"))
 end
 
-local function Choose(zone, id)
+local function Choose(zone, id, alt)
 	wipe(DB().route) -- маршрут один — только в этой зоне
 	DB().route[zone] = id
+	DB().alt = alt or nil
 	CloseDropDownMenus()
 	SetText()
 	UpdateRoute()
@@ -464,9 +473,17 @@ UIDropDownMenu_Initialize(drop, function(self, level)
 	for _, o in ipairs(Ores(gm, zone)) do
 		info = UIDropDownMenu_CreateInfo()
 		info.text = o.name .. " (" .. o.n .. ")"
-		info.checked = (cur == o.id)
+		info.checked = (cur == o.id) and not AltOn(zone)
 		info.func = function() Choose(zone, o.id) end
 		UIDropDownMenu_AddButton(info, level)
+		local m = MANUAL[zone]
+		if m and m.alt and m.base == o.id then
+			info = UIDropDownMenu_CreateInfo()
+			info.text = o.name .. " (" .. m.alt.name .. ")"
+			info.checked = (cur == o.id) and AltOn(zone)
+			info.func = function() Choose(zone, o.id, true) end
+			UIDropDownMenu_AddButton(info, level)
+		end
 	end
 end)
 
@@ -524,9 +541,18 @@ local function Unmark(uid)
 end
 
 
--- точка, к которой вести: без пропусков — каждая по порядку. (Раньше скрытые GatherMate перескакивались, но
--- в кучке он скрывает соседей, как только вы подлетели к одной, — и стрелка пропускала их)
+-- точка, к которой вести: по порядку, но точки, к которым вы уже подлетали на ARRIVE на этом круге (f.near,
+-- отмечаются до NEAR_AHEAD впереди стрелки), перескакиваются — Point засчитает их в «пройдено».
+-- (Скрытые GatherMate не перескакиваются: в кучке он скрывает соседей, как только вы подлетели к одной)
+-- Не дальше конца круга: к концу отмечено всё впереди (и начало) — иначе перескок обходил круг и вставал
+-- на ту же точку, засчитывая её каждый тик
 local function Visible(gm, f, i)
+	local n = #f.tour
+	local left = n - (f.steps or 0) - ((i - (f.idx or i)) % n) -- столько ещё можно перескочить до начала круга
+	for _ = 1, left do
+		if not (f.near and f.near[f.tour[i]]) then return i end
+		i = i % n + 1
+	end
 	return i
 end
 
@@ -565,7 +591,7 @@ local function Point(i, noProgress)
 	-- persistent = false: метки маршрута TomTom не хранит между перезагрузками
 	f.uid = TomTom:AddZWaypoint(f.c, f.z, p[1] / f.w * 100, p[2] / f.h * 100,
 		string.format("%s: %d/%d", f.name, (i - f.start) % n + 1 + (f.extra or 0), n + (f.extra or 0)), false)
-	DB().follow = { zone = f.zone, base = f.base, idx = i, start = f.start, n = n, extra = f.extra, steps = f.steps }
+	DB().follow = { zone = f.zone, base = f.base, alt = f.alt, idx = i, start = f.start, n = n, extra = f.extra, steps = f.steps }
 	if lapDone then Renew() end
 end
 
@@ -578,7 +604,7 @@ Renew = function()
 	local prefix = f.zone .. "|" .. f.base .. "|"
 	if cacheTour and cacheTour ~= f.tour and #cacheTour > 0 and cacheKey and cacheKey:sub(1, #prefix) == prefix then
 		tour = cacheTour
-		local bd
+		local bd = tour[idx] and Dist(cur, tour[idx]) < 1 and 0 or nil -- та же точка на том же месте — с неё
 		for k = 1, #tour do
 			local d = Dist(cur, tour[k])
 			if not bd or d < bd then idx, bd = k, d end
@@ -610,14 +636,14 @@ local function Follow(gm)
 	local c, z = ContZ(gm, shown.zone, shown.file)
 	if not c then return end
 	local old = follow and follow.uid
-	return { zone = shown.zone, base = DB().route[shown.zone], name = shown.name, tour = shown.tour,
+	return { zone = shown.zone, base = DB().route[shown.zone], alt = shown.alt, name = shown.name, tour = shown.tour,
 		w = shown.w, h = shown.h, c = c, z = z, uid = old }
 end
 
 -- тот же маршрут (зона и руда); точки ведения — свои (маршрут пересчитывается после каждой жилы,
 -- а ведение остаётся на круге, с которого начали)
 local function SameRoute(f)
-	return f and shown and f.zone == shown.zone and f.base == DB().route[shown.zone]
+	return f and shown and f.zone == shown.zone and f.base == DB().route[shown.zone] and f.alt == AltOn(f.zone)
 end
 
 local function StartRoute()
@@ -640,7 +666,7 @@ local function StartRoute()
 		end
 		follow = f
 	end
-	idx = Visible(gm, f, idx)
+	-- новый круг: старт — сама точка idx, перескакивать нечего (отметки подлёта прошлого круга не в счёт)
 	f.start, f.extra, f.mined, f.steps, f.near = idx, 0, nil, 0, nil -- новый круг: ни жил вне маршрута, ни добытых впереди, ни посещённых
 	Point(idx, true)
 	if MapPlusOreReset then MapPlusOreReset(shown.zone, shown.name, #f.tour) end -- новый круг — новая поездка
@@ -649,7 +675,8 @@ end
 CanContinue = function()
 	if SameRoute(follow) then return follow.paused or not follow.uid end
 	local s = DB().follow
-	return s and shown and s.zone == shown.zone and s.base == DB().route[shown.zone] and s.n == #shown.tour
+	return s and shown and s.zone == shown.zone and s.base == DB().route[shown.zone] and (s.alt or false) == shown.alt
+		and s.n == #shown.tour
 end
 
 Following = function() return SameRoute(follow) and true or false end
@@ -670,7 +697,7 @@ local function ContinueRoute()
 	if not SameRoute(follow) then
 		local s = DB().follow
 		local f = Follow(gm)
-		if not (f and s and s.zone == shown.zone and s.base == f.base and s.n == #shown.tour) then return end
+		if not (f and s and s.zone == shown.zone and s.base == f.base and (s.alt or false) == f.alt and s.n == #shown.tour) then return end
 		f.idx, f.start, f.extra, f.steps = s.idx, s.start, s.extra, s.steps
 		follow = f
 	end
@@ -708,10 +735,11 @@ function MapPlusRouteMined()
 	end
 	-- у другой точки круга: впереди (до половины круга от стрелки) — запомнить, засчитается, когда стрелка
 	-- до неё дойдёт или перескочит; позади — уже пройдена, не считаем
-	local n, bi, bd = #f.tour, nil, nil
+	-- в восьмёрке точка бывает в круге дважды: берём ту, что ближе впереди по кругу
+	local n, bi, bo = #f.tour, nil, nil
 	for i, p in ipairs(f.tour) do
-		local d = Dist(me, p)
-		if d <= FOUND_NEAR and (not bd or d < bd) then bi, bd = i, d end
+		local o = (i - f.idx) % n
+		if Dist(me, p) <= FOUND_NEAR and (not bo or o < bo) then bi, bo = i, o end
 	end
 	if bi then
 		if (bi - f.idx) % n <= n / 2 then
@@ -743,6 +771,7 @@ if TomTom and TomTom.ClearWaypoint then
 	end)
 end
 
+local NEAR_AHEAD = 10 -- точек вперёд от стрелки, к которым подлёт отмечается (f.near)
 local tick = CreateFrame("Frame")
 local acc = 0
 tick:SetScript("OnUpdate", function(_, el)
@@ -750,7 +779,7 @@ tick:SetScript("OnUpdate", function(_, el)
 	if acc < 0.3 or not follow then return end
 	acc = 0
 	local f, gm = follow, GM()
-	if not HasTomTom() or not gm or DB().route[f.zone] ~= f.base then -- нет TomTom или маршрут сменили
+	if not HasTomTom() or not gm or DB().route[f.zone] ~= f.base or f.alt ~= AltOn(f.zone) then -- нет TomTom или маршрут сменили
 		Unmark(f.uid)
 		follow = nil
 		return
@@ -759,7 +788,10 @@ tick:SetScript("OnUpdate", function(_, el)
 	local me = Me(gm, f.zone, f.w, f.h)
 	if not me then return end
 	-- точки круга, к которым вы подлетали на ARRIVE (засчитаются, если стрелка их потом перескочит)
-	for _, p in ipairs(f.tour) do
+	-- только ближайшие впереди: в восьмёрке та же точка через полкруга — её второй проход не трогаем
+	local n = #f.tour
+	for k = 0, math.min(NEAR_AHEAD, n - 1) do
+		local p = f.tour[(f.idx + k - 1) % n + 1]
 		if Dist(me, p) <= ARRIVE then
 			f.near = f.near or {}
 			f.near[p] = true
