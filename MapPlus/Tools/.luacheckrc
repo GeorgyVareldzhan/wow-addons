@@ -9,7 +9,7 @@ ignore = {
 
 -- Глобальные, которые аддон создаёт или меняет
 globals = {
-	"MapPlusDB", "MapPlusFogData", "MapPlusOreReset", "MapPlusOreContinue", "MapPlusOrePassed", "MapPlusOreProgress", "MapPlusOreFound", "MapPlusOreFinish", "MapPlusRouteMined", "SLASH_MAPPLUS1", "SlashCmdList",
+	"MapPlusDB", "MapPlusFogData", "MapPlusOreReset", "MapPlusOreContinue", "MapPlusOrePassed", "MapPlusOreProgress", "MapPlusOreFound", "MapPlusOreFinish", "MapPlusRouteMined", "MapPlusScouted", "MapPlusFollowZone", "MapPlusHeatRefresh", "SLASH_MAPPLUS1", "SlashCmdList",
 }
 
 -- Только читаем: API и фреймы игры, другие аддоны, свои глобальные из других файлов и имена фреймов.
@@ -22,5 +22,5 @@ read_globals = {
 	"TomTom", "UnitFactionGroup", "WorldMapDetailFrame", "WorldMapFrame",
 	"LibStub", "GatherMate_Respawn", "IsFlying", "GetUnitSpeed", "GetCurrentMapZone", "UIDropDownMenu_SetWidth", "UIDropDownMenu_Initialize",
 	"UIDropDownMenu_CreateInfo", "UIDropDownMenu_AddButton", "CloseDropDownMenus",
-	"MapPlusFlightButton", "MapPlusRouteEnd", "MapPlusRouteDropText", "TomTomCrazyArrow", "CraftPlan", "GetSpellInfo", "GetNumLootItems", "GetLootSlotInfo", "GetTime", "GetRealZoneText", "time",
+	"MapPlusFlightButton", "MapPlusRouteEnd", "MapPlusRouteDropText", "TomTomCrazyArrow", "CraftPlan", "GetSpellInfo", "GetNumLootItems", "GetLootSlotInfo", "GetTime", "GetRealZoneText", "time", "GetItemInfo", "Auctionator", "DongleStub",
 }

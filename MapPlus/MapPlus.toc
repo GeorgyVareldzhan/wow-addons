@@ -2,12 +2,13 @@
 ## Title: MapPlus
 ## Notes: Карта мира: галочка «Убрать туман войны» и кнопка «Путь к ближайшей полётке», маршрут по руде (GatherMate)
 ## Notes-ruRU: Карта мира: галочка «Убрать туман войны» и кнопка «Путь к ближайшей полётке», маршрут по руде (GatherMate)
-## Version: 0.1.53
+## Version: 0.1.93
 ## X-Sirus-Category: 11
-## OptionalDeps: Questie-335, TomTom, GatherMate
+## OptionalDeps: Questie-335, TomTom, GatherMate, Auctionator
 ## SavedVariables: MapPlusDB
 
 Data.lua
 MapPlus.lua
 Route.lua
 Stats.lua
+Heat.lua

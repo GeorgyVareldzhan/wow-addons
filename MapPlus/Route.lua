@@ -24,7 +24,6 @@ local BUDGET = 20000    -- шагов расчёта за кадр
 local function DB()
 	MapPlusDB = MapPlusDB or {}
 	MapPlusDB.route = MapPlusDB.route or {}
-	MapPlusDB.hits = MapPlusDB.hits or {} -- [зона][клетка] = сколько раз вы там копали
 	MapPlusDB.cave = MapPlusDB.cave or {} -- [зона][клетка] = true — копали в помещении (пещера)
 	MapPlusDB.rev = MapPlusDB.rev or 0    -- меняется при каждой записи — маршрут пересчитать
 	return MapPlusDB
@@ -32,14 +31,12 @@ end
 
 local function Cell(x, y) return math.floor(x / CELL) .. ":" .. math.floor(y / CELL) end
 
--- учёт ваших находок: GatherMate добавляет жилу при каждом сборе (x, y — доли зоны)
+-- пещеры: GatherMate добавляет жилу при каждом сборе (x, y — доли зоны); копали в помещении — клетка в пещере
 local function Record(gm, zone, x, y, nodeType)
 	if nodeType ~= TYPE or not (zone and gm.zoneData and rawget(gm.zoneData, zone)) then return end
 	local zd = gm.zoneData[zone]
 	local key = Cell(x * zd[1], y * zd[2])
 	local db = DB()
-	db.hits[zone] = db.hits[zone] or {}
-	db.hits[zone][key] = (db.hits[zone][key] or 0) + 1
 	if IsIndoors() then
 		db.cave[zone] = db.cave[zone] or {}
 		db.cave[zone][key] = true
@@ -98,7 +95,12 @@ local function Points(gm, zone, base)
 	local zd = gm.zoneData[zone]
 	local w, h = zd[1], zd[2]
 	local db = DB()
-	local hits, cave = db.hits[zone] or {}, db.cave[zone] or {}
+	local cave = db.cave[zone] or {}
+	local hits = {} -- [клетка] = сколько раз вы там копали — из записей тепловой карты (Heat.lua)
+	for _, r in ipairs(db.heat and db.heat[zone] or {}) do
+		local k = Cell(r[1] * w, r[2] * h)
+		hits[k] = (hits[k] or 0) + 1
+	end
 	local pts, n, caves = {}, 0, 0
 	for coord, id in gm:GetNodesForZone(zone, TYPE, true) do
 		if id == base or (rares[id] and rares[id][base]) then
@@ -237,20 +239,65 @@ end
 -- для пропуска собранных жил
 local MANUAL = {
 	["Озеро Ледяных Оков"] = { base = 231, pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;60.30,52.00;58.00,52.80;56.61,54.79;56.30,56.80;53.30,55.60;50.22,58.31;53.60,65.00;54.90,66.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;50.01,49.57;49.40,47.80;49.60,45.70;49.20,43.40;51.70,36.90;58.50,36.10;59.80,38.00;62.20,35.00;61.90,36.00;61.80,37.50;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;48.60,35.40;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;38.90,38.20;41.30,37.30;41.30,41.60;39.69,45.82;41.00,51.30;41.90,52.50;41.90,54.20;41.00,55.00;39.20,53.20;38.60,59.40;33.80,54.50;29.60,56.40;29.70,55.10;25.40,53.30;29.50,52.10;31.60,50.10;33.40,48.70;31.40,48.10;30.90,46.10;31.80,45.40;30.00,43.90;30.18,40.69;29.60,38.50;28.40,40.70;28.50,41.60;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60",
-		alt = { name = "восьмёрка", pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.40,53.30;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;33.80,54.50;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;58.50,36.10;61.90,36.00;61.80,37.50;59.80,38.00;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,54.50;29.70,62.60;28.00,62.01;27.30,61.30;25.70,61.50;25.60,59.90;25.40,53.30;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;59.80,38.00;58.50,36.10;61.80,37.50;61.90,36.00;62.20,35.00;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60" } },
+		alts = { { name = "восьмёрка", pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;22.80,62.70;20.80,62.50;21.00,59.90;20.80,58.40;25.40,53.30;25.60,59.90;25.70,61.50;27.30,61.30;28.00,62.01;29.70,62.60;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;33.80,54.50;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;58.50,36.10;61.90,36.00;61.80,37.50;59.80,38.00;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.90,56.70;60.67,57.79;54.90,66.00;53.60,65.00;45.10,65.80;45.10,62.50;45.20,60.30;43.60,58.60;43.80,55.00;41.90,54.20;41.90,52.50;41.00,51.30;39.20,53.20;41.00,55.00;38.60,59.40;33.80,54.50;29.70,62.60;28.00,62.01;27.30,61.30;25.70,61.50;25.60,59.90;25.40,53.30;29.60,56.40;29.70,55.10;29.50,52.10;31.60,50.10;31.40,48.10;30.90,46.10;30.00,43.90;28.50,41.60;28.40,40.70;29.60,38.50;30.18,40.69;31.80,45.40;33.40,48.70;39.69,45.82;41.30,41.60;38.90,38.20;41.30,37.30;48.60,35.40;51.70,36.90;49.20,43.40;49.60,45.70;49.40,47.80;50.01,49.57;50.22,58.31;53.30,55.60;56.30,56.80;56.61,54.79;58.00,52.80;60.30,52.00;59.80,38.00;58.50,36.10;61.80,37.50;61.90,36.00;62.20,35.00;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;34.00,29.30;34.80,29.40;35.70,29.20;35.80,30.20;23.01,45.24;22.70,46.40;23.50,47.20;21.70,48.60" },
+			{ name = "кольцо", pts = "16.30,38.10;15.30,43.50;14.01,43.34;7.80,52.40;6.08,66.14;7.20,65.90;9.80,65.90;11.80,65.10;17.90,66.80;19.20,67.60;21.95,68.19;20.80,62.50;21.00,59.90;20.80,58.40;22.80,62.70;25.70,61.50;25.60,59.90;27.30,61.30;28.00,62.01;29.70,62.60;33.80,70.20;33.80,71.60;34.00,73.90;33.90,75.80;46.60,76.20;46.50,73.90;46.60,71.80;48.80,71.70;51.70,76.60;51.70,77.80;51.90,82.80;58.65,85.80;58.73,84.07;57.80,80.20;64.90,77.00;64.50,72.30;63.84,69.27;68.20,72.69;69.20,63.40;67.70,57.10;69.30,56.80;73.35,56.94;75.85,58.45;79.18,57.19;78.20,59.30;79.10,66.40;79.10,67.20;79.10,68.30;77.98,67.23;78.00,69.90;79.27,78.36;79.26,81.01;86.20,76.80;86.12,76.01;89.00,71.00;86.99,67.99;84.80,65.10;83.90,45.40;83.68,43.33;82.63,41.89;74.40,44.83;72.00,47.90;72.78,49.68;66.50,51.70;65.01,53.87;63.00,52.90;60.30,52.00;58.00,52.80;59.80,38.00;58.50,36.10;62.20,35.00;61.90,36.00;61.80,37.50;64.60,41.70;67.30,41.70;72.10,43.90;72.46,41.54;72.40,27.50;70.40,24.80;71.99,21.26;67.30,20.20;61.90,17.30;59.80,17.00;58.54,16.95;58.70,20.80;57.90,25.70;54.90,30.80;53.54,31.25;51.70,36.90;48.60,35.40;46.63,35.13;45.10,30.10;42.00,25.60;39.60,26.40;41.00,23.40;39.60,21.70;38.80,18.50;41.30,17.40;39.60,9.80;35.77,12.55;35.18,13.52;34.80,12.40;33.90,13.80;29.70,17.50;28.40,19.90;26.70,22.30;25.40,24.80;34.70,26.90;35.20,27.10;35.70,29.20;35.80,30.20;34.80,29.40;34.00,29.30;29.60,38.50;30.18,40.69;28.40,40.70;28.50,41.60;30.00,43.90;31.80,45.40;30.90,46.10;31.40,48.10;33.40,48.70;31.60,50.10;29.50,52.10;29.70,55.10;29.60,56.40;25.40,53.30;23.50,47.20;23.01,45.24;22.70,46.40;21.70,48.60" },
+			{ name = "по жилам", scouted = true, pts = "14.01,43.34;23.01,45.24;30.18,40.69;29.70,17.50;35.18,13.52;35.77,12.55;38.80,18.50;46.63,35.13;53.54,31.25;58.54,16.95;61.90,17.30;71.99,21.26;72.40,27.50;82.63,41.89;83.68,43.33;84.03,45.35;74.40,44.83;72.46,41.54;72.78,49.68;73.35,56.94;75.85,58.45;79.18,57.19;77.98,67.23;79.10,68.30;79.10,67.20;79.10,66.40;84.80,65.10;86.99,67.99;86.12,76.01;79.27,78.36;79.26,81.01;77.39,88.11;58.65,85.80;58.73,84.07;68.20,72.69;63.84,69.27;65.01,53.87;60.67,57.79;56.61,54.79;50.22,58.31;50.01,49.57;39.69,45.82;36.05,49.54;28.00,62.01;21.95,68.19;20.80,58.40;6.08,66.14" } } },
 }
--- второй вариант круга этой зоны (alt: центр облетается дважды — «восьмёрка»), выбран в списке под картой
+-- другие варианты круга этой зоны (alts: «восьмёрка» — центр дважды, «кольцо» — по краям с заходами, «по жилам» — только точки, где добывались жилы; scouted — разведанный круг: жилы GatherMate
+-- дальше SCOUT_R от его точек на карте и миникарте не показываются), выбор в
+-- списке под картой; DB().alt — номер варианта (true из старых сохранений — первый), false — обычный круг
+local function AltIdx(a) if a == true then return 1 end return a or false end
 local function AltOn(zone)
-	local m = MANUAL[zone]
-	return (m and m.alt and DB().alt) and true or false
+	local m, a = MANUAL[zone], AltIdx(DB().alt)
+	return (m and m.alts and a and m.alts[a]) and a or false
 end
-local function AltSuffix(zone) return AltOn(zone) and (" (" .. MANUAL[zone].alt.name .. ")") or "" end
+local function AltSuffix(zone) local a = AltOn(zone) return a and (" (" .. MANUAL[zone].alts[a].name .. ")") or "" end
+
+-- разведанный круг выбран в зоне: жилы GatherMate не у его точек скрыты (обёртка GatherMate:IsNodeHidden ниже)
+local SCOUT_R = 30 -- ярдов от точки круга
+local scoutKeep = {} -- [coord] = true/false для текущего круга; сброс при смене маршрута
+local scoutFor
+local scoutZone = {} -- [зона] = круг или false; сброс в ScoutRefresh (миникарта спрашивает на каждой жиле)
+local function Scouted(zone)
+	local c = scoutZone[zone]
+	if c ~= nil then return c or nil end
+	local m, a = MANUAL[zone], AltOn(zone)
+	c = a and DB().route[zone] == m.base and m.alts[a].scouted and m.alts[a] or false
+	scoutZone[zone] = c
+	return c or nil
+end
+-- для Heat.lua: в зоне выбран разведанный круг
+function MapPlusScouted(zone) return Scouted(zone) and true or false end
+local function ScoutKeep(gm, zone, coord)
+	local alt = Scouted(zone)
+	if not alt then return true end
+	if scoutFor ~= alt then wipe(scoutKeep); scoutFor = alt end
+	local k = scoutKeep[coord]
+	if k == nil then
+		local zw, zh = gm:GetZoneSize(zone)
+		local x, y = gm:getXY(coord)
+		k = false
+		for px, py in alt.pts:gmatch("([%d.]+),([%d.]+)") do
+			local dx, dy = (tonumber(px) / 100 - x) * zw, (tonumber(py) / 100 - y) * zh
+			if dx * dx + dy * dy <= SCOUT_R * SCOUT_R then k = true break end
+		end
+		scoutKeep[coord] = k
+	end
+	return k
+end
+local function ScoutRefresh(gm)
+	wipe(scoutZone)
+	if not gm then return end
+	gm.hideVersion = (gm.hideVersion or 0) + 1
+	local D = gm:GetModule("Display", true)
+	if D then D:UpdateMiniMap(true); D:UpdateWorldMap(true) end
+end
 
 local function ManualTour(gm, zone, base, w, h)
 	local m = MANUAL[zone]
 	if not (m and m.base == base) then return nil end
 	local t = {}
-	for x, y in (AltOn(zone) and m.alt.pts or m.pts):gmatch("([%d.]+),([%d.]+)") do t[#t + 1] = { tonumber(x) / 100 * w, tonumber(y) / 100 * h, 1, false, {} } end
+	for x, y in (AltOn(zone) and m.alts[AltOn(zone)].pts or m.pts):gmatch("([%d.]+),([%d.]+)") do t[#t + 1] = { tonumber(x) / 100 * w, tonumber(y) / 100 * h, 1, false, {} } end
 	for coord in gm:GetNodesForZone(zone, TYPE, true) do
 		local x, y = gm:getXY(coord)
 		x, y = x * w, y * h
@@ -430,11 +477,10 @@ UpdateRoute = function()
 end
 
 ----------------------------------------------------------------------------------------------
--- выпадающий список под картой: «Маршрут: нет» / руды открытой зоны
+-- выпадающий список «Маршрут: нет» / руды открытой зоны — верх столбика справа от карты (место — у кнопки «В начало»)
 local drop = CreateFrame("Frame", "MapPlusRouteDrop", WorldMapFrame, "UIDropDownMenuTemplate")
-drop:SetPoint("LEFT", MapPlusFlightButton, "RIGHT", 0, -2)
 drop:SetFrameLevel(WorldMapDetailFrame:GetFrameLevel() + 5)
-UIDropDownMenu_SetWidth(drop, 190)
+UIDropDownMenu_SetWidth(drop, 111)
 
 local function SetText()
 	local gm = GM()
@@ -452,6 +498,8 @@ local function Choose(zone, id, alt)
 	CloseDropDownMenus()
 	SetText()
 	UpdateRoute()
+	ScoutRefresh(GM())
+	if MapPlusHeatRefresh then MapPlusHeatRefresh() end
 end
 
 UIDropDownMenu_Initialize(drop, function(self, level)
@@ -477,11 +525,11 @@ UIDropDownMenu_Initialize(drop, function(self, level)
 		info.func = function() Choose(zone, o.id) end
 		UIDropDownMenu_AddButton(info, level)
 		local m = MANUAL[zone]
-		if m and m.alt and m.base == o.id then
+		for a, v in ipairs(m and m.base == o.id and m.alts or {}) do
 			info = UIDropDownMenu_CreateInfo()
-			info.text = o.name .. " (" .. m.alt.name .. ")"
-			info.checked = (cur == o.id) and AltOn(zone)
-			info.func = function() Choose(zone, o.id, true) end
+			info.text = o.name .. " (" .. v.name .. ")"
+			info.checked = (cur == o.id) and AltOn(zone) == a
+			info.func = function() Choose(zone, o.id, a) end
 			UIDropDownMenu_AddButton(info, level)
 		end
 	end
@@ -517,16 +565,36 @@ drop:SetScript("OnLeave", function() GameTooltip:Hide() end)
 -- Метку убрали руками — ведение на паузе. Маршрут сменили или TomTom выключили — ведение снято.
 local ARRIVE = 30
 local follow -- { zone, base, name, tour, w, h, c, z, idx, start, uid, paused }
+
+-- для Heat.lua: зона круга, по которому ведём, и её номера материка/зоны (TomTom/Astrolabe)
+function MapPlusFollowZone()
+	if follow then return follow.zone, follow.c, follow.z end
+end
 local selfClear = false -- снимаем свою же метку (не пауза)
 
 local function HasTomTom() return TomTom and TomTom.AddZWaypoint and true or false end
+
+-- место в зоне круга, когда игра считает, что вы в соседней (точки круга у границы): Astrolabe из TomTom
+-- переводит в координаты зоны круга; nil — не ведём по этой зоне или место не на её карте
+local function Across(zone, w, h)
+	local f = follow
+	if not (f and f.zone == zone and f.c and DongleStub) then return end
+	local ok, A = pcall(DongleStub, "Astrolabe-0.4-Sirus")
+	if not (ok and A) then return end
+	local c, z, px, py = A:GetCurrentPlayerPosition()
+	if not c then return end
+	local x, y = A:TranslateWorldMapPosition(c, z, px, py, f.c, f.z)
+	if x and x >= 0 and x <= 1 and y >= 0 and y <= 1 then return { x * w, y * h } end
+end
 
 -- ваше место в зоне маршрута (ярды) или nil, если вы не в ней
 local function Me(gm, zone, w, h)
 	if ViewZone(gm) ~= zone then
 		if WorldMapFrame:IsShown() then return end -- карту, которую вы смотрите, не трогаем
+		-- вы в другой зоне: карту не переключаем (каждое переключение — пересчёт карты у TomTom и GatherMate)
+		if gm:ResolveZone(GetRealZoneText()) ~= zone then return Across(zone, w, h) end
 		SetMapToCurrentZone()
-		if ViewZone(gm) ~= zone then return end
+		if ViewZone(gm) ~= zone then return Across(zone, w, h) end
 	end
 	local px, py = GetPlayerMapPosition("player")
 	if px and px > 0 then return { px * w, py * h } end
@@ -599,7 +667,7 @@ end
 -- если он уже посчитан (cacheTour), и новая поездка (как «В начало»)
 Renew = function()
 	local f = follow
-	if MapPlusOreFinish then MapPlusOreFinish() end
+	if MapPlusOreFinish then MapPlusOreFinish(true) end -- круг закрыт, сессия идёт
 	local cur, tour, idx = f.tour[f.idx], f.tour, f.idx
 	local prefix = f.zone .. "|" .. f.base .. "|"
 	if cacheTour and cacheTour ~= f.tour and #cacheTour > 0 and cacheKey and cacheKey:sub(1, #prefix) == prefix then
@@ -613,7 +681,7 @@ Renew = function()
 	f.tour, f.idx = tour, idx
 	f.start, f.extra, f.mined, f.steps, f.near = idx, 0, nil, 0, nil
 	Point(idx, true)
-	if MapPlusOreReset then MapPlusOreReset(f.zone, f.name, #tour) end
+	if MapPlusOreReset then MapPlusOreReset(f.zone, f.name, #tour, true) end
 	DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffMapPlus:|r круг пройден - начат новый.")
 end
 
@@ -643,7 +711,7 @@ end
 -- тот же маршрут (зона и руда); точки ведения — свои (маршрут пересчитывается после каждой жилы,
 -- а ведение остаётся на круге, с которого начали)
 local function SameRoute(f)
-	return f and shown and f.zone == shown.zone and f.base == DB().route[shown.zone] and f.alt == AltOn(f.zone)
+	return f and shown and f.zone == shown.zone and f.base == DB().route[shown.zone] and AltIdx(f.alt) == AltOn(f.zone)
 end
 
 local function StartRoute()
@@ -675,7 +743,7 @@ end
 CanContinue = function()
 	if SameRoute(follow) then return follow.paused or not follow.uid end
 	local s = DB().follow
-	return s and shown and s.zone == shown.zone and s.base == DB().route[shown.zone] and (s.alt or false) == shown.alt
+	return s and shown and s.zone == shown.zone and s.base == DB().route[shown.zone] and AltIdx(s.alt) == shown.alt
 		and s.n == #shown.tour
 end
 
@@ -697,7 +765,7 @@ local function ContinueRoute()
 	if not SameRoute(follow) then
 		local s = DB().follow
 		local f = Follow(gm)
-		if not (f and s and s.zone == shown.zone and s.base == f.base and (s.alt or false) == f.alt and s.n == #shown.tour) then return end
+		if not (f and s and s.zone == shown.zone and s.base == f.base and AltIdx(s.alt) == AltIdx(f.alt) and s.n == #shown.tour) then return end
 		f.idx, f.start, f.extra, f.steps = s.idx, s.start, s.extra, s.steps
 		follow = f
 	end
@@ -779,7 +847,7 @@ tick:SetScript("OnUpdate", function(_, el)
 	if acc < 0.3 or not follow then return end
 	acc = 0
 	local f, gm = follow, GM()
-	if not HasTomTom() or not gm or DB().route[f.zone] ~= f.base or f.alt ~= AltOn(f.zone) then -- нет TomTom или маршрут сменили
+	if not HasTomTom() or not gm or DB().route[f.zone] ~= f.base or AltIdx(f.alt) ~= AltOn(f.zone) then -- нет TomTom или маршрут сменили
 		Unmark(f.uid)
 		follow = nil
 		return
@@ -812,7 +880,9 @@ local function NextPoint()
 	if not (f and gm and not f.paused) then return end
 	Point(Visible(gm, f, f.idx % #f.tour + 1))
 end
+local NEXT_BTN = false -- кнопка «Следующая точка» под стрелкой: пока скрыта
 local function NextBtnUpdate()
+	if not NEXT_BTN then return end
 	local arrow = TomTomCrazyArrow
 	if not arrow then return end
 	if not nextBtn then
@@ -831,10 +901,13 @@ CreateFrame("Frame"):SetScript("OnUpdate", function(_, el)
 	if nbAcc >= 0.3 then nbAcc = 0; NextBtnUpdate() end
 end)
 
+-- столбиком справа от карты, у нижнего края: выбор «Маршрут», «В начало», под ней «Закончить» или «Продолжить»
+-- (видна одна), ниже — выбор «Жилы» (Heat.lua)
 local start = CreateFrame("Button", "MapPlusRouteStart", WorldMapFrame, "UIPanelButtonTemplate")
-start:SetWidth(90)
+start:SetWidth(130)
 start:SetHeight(22)
-start:SetPoint("LEFT", drop, "RIGHT", -6, 2)
+start:SetPoint("BOTTOMLEFT", WorldMapDetailFrame, "BOTTOMRIGHT", 24, 50)
+drop:SetPoint("BOTTOMLEFT", start, "TOPLEFT", -16, -2)
 start:SetFrameLevel(WorldMapDetailFrame:GetFrameLevel() + 5)
 start:SetText("В начало")
 start:SetScript("OnClick", function() StartRoute(); UpdateRoute() end)
@@ -849,16 +922,16 @@ start:Hide()
 startBtn = start
 
 local stop = CreateFrame("Button", "MapPlusRouteEnd", WorldMapFrame, "UIPanelButtonTemplate")
-stop:SetWidth(90)
+stop:SetWidth(130)
 stop:SetHeight(22)
-stop:SetPoint("LEFT", start, "RIGHT", 2, 0)
+stop:SetPoint("TOP", start, "BOTTOM", 0, -4)
 stop:SetFrameLevel(WorldMapDetailFrame:GetFrameLevel() + 5)
 stop:SetText("Закончить")
 stop:SetScript("OnClick", EndRoute)
 stop:SetScript("OnEnter", function(self)
 	GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
 	GameTooltip:AddLine("Закончить")
-	GameTooltip:AddLine("Снять стрелку и закончить поездку: итог в чат. Если пройдено меньше 5% точек - в журнал не пишется.", 1, 1, 1, true)
+	GameTooltip:AddLine("Снять стрелку и закончить сессию: итог круга и всей сессии в чат. Если пройдено меньше 25% точек - в журнал не пишется.", 1, 1, 1, true)
 	GameTooltip:Show()
 end)
 stop:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -866,9 +939,9 @@ stop:Hide()
 endBtn = stop
 
 local cont = CreateFrame("Button", "MapPlusRouteContinue", WorldMapFrame, "UIPanelButtonTemplate")
-cont:SetWidth(100)
+cont:SetWidth(130)
 cont:SetHeight(22)
-cont:SetPoint("LEFT", MapPlusRouteEnd, "RIGHT", 2, 0)
+cont:SetPoint("TOP", start, "BOTTOM", 0, -4)
 cont:SetFrameLevel(WorldMapDetailFrame:GetFrameLevel() + 5)
 cont:SetText("Продолжить")
 cont:SetScript("OnClick", ContinueRoute)
@@ -912,5 +985,13 @@ rec:SetScript("OnEvent", function()
 	local gm = GM()
 	if gm and gm.AddNode then
 		hooksecurefunc(gm, "AddNode", function(self, zone, x, y, nodeType) Record(self, zone, x, y, nodeType) end)
+	end
+	if gm and gm.GetZoneSize then
+		local orig = gm.IsNodeHidden
+		gm.IsNodeHidden = function(self, nodeType, zone, coord)
+			if nodeType == TYPE and not ScoutKeep(self, zone, coord) then return true end
+			return orig and orig(self, nodeType, zone, coord) or false
+		end
+		ScoutRefresh(gm)
 	end
 end)
