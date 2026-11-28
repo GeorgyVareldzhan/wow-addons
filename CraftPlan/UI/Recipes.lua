@@ -62,6 +62,97 @@ local groupCheck = W.Check(f, "CraftPlanRecipesGroup", "Группировать
 	function() return DB().apGroup end,
 	function(v) DB().apGroup = v or nil; ResetScroll(); CP.RefreshRecipes() end,
 	"Разделы как в окне профессии. Изученные рецепты берут раздел из окна профессии (откройте его хотя бы раз), неизученные - по типу предмета. Щелчок по разделу сворачивает его.")
+-- "Класс" / "Ветка": hide gear the chosen class and talent tree would not use: armor — the main type (+ shield/relic
+-- where the tree uses them), weapons the tree wields, stats of its role (tank / physical / caster; by item stats when
+-- the item is in the client cache). Cloaks, rings, trinkets and non-gear always stay; no item data — stays.
+local CLASSES = {
+	{ "WARRIOR", "Воин", { "Оружие", "Неистовство", "Защита" } },
+	{ "PALADIN", "Паладин", { "Свет", "Защита", "Возмездие" } },
+	{ "DEATHKNIGHT", "Рыцарь смерти", { "Кровь", "Лед", "Нечестивость" } },
+	{ "HUNTER", "Охотник", { "Повелитель зверей", "Стрельба", "Выживание" } },
+	{ "SHAMAN", "Шаман", { "Стихии", "Совершенствование", "Исцеление" } },
+	{ "ROGUE", "Разбойник", { "Ликвидация", "Бой", "Скрытность" } },
+	{ "DRUID", "Друид", { "Баланс", "Сила зверя", "Исцеление" } },
+	{ "PRIEST", "Жрец", { "Послушание", "Свет", "Темная магия" } },
+	{ "MAGE", "Маг", { "Тайная магия", "Огонь", "Лед" } },
+	{ "WARLOCK", "Чернокнижник", { "Колдовство", "Демонология", "Разрушение" } },
+}
+local CLASS_ITEMS = { { "", "Все классы" } }
+for _, c in ipairs(CLASSES) do CLASS_ITEMS[#CLASS_ITEMS + 1] = { c[1], c[2] } end
+local SPEC_ITEMS = { { 0, "Все ветки" } } -- refilled for the chosen class
+local function FillSpecs()
+	for i = #SPEC_ITEMS, 2, -1 do SPEC_ITEMS[i] = nil end
+	for _, c in ipairs(CLASSES) do
+		if c[1] == DB().apCls then for i, n in ipairs(c[3]) do SPEC_ITEMS[#SPEC_ITEMS + 1] = { i, n } end end
+	end
+end
+local specDrop
+local clsDrop = W.Dropdown(f, "CraftPlanRecipesCls", 120, CLASS_ITEMS,
+	function() return DB().apCls or "" end,
+	function(k) DB().apCls = (k ~= "") and k or nil; DB().apSpec = nil; FillSpecs(); ResetScroll(); CP.RefreshRecipes() end)
+specDrop = W.Dropdown(f, "CraftPlanRecipesSpec", 130, SPEC_ITEMS,
+	function() return DB().apSpec or 0 end,
+	function(k) DB().apSpec = (k ~= 0) and k or nil; ResetScroll(); CP.RefreshRecipes() end)
+local function Set(t) local r = {} for _, v in ipairs(t) do r[v] = true end return r end
+local ARMOR = { -- item subclass of armor (class 4): main type, shields 6, relics 7-10
+	WARRIOR = Set { 4, 6 }, PALADIN = Set { 4, 6, 7 }, DEATHKNIGHT = Set { 4, 10 }, HUNTER = Set { 3 },
+	SHAMAN = Set { 3, 6, 9 }, ROGUE = Set { 2 }, DRUID = Set { 2, 8 }, PRIEST = Set { 1 }, MAGE = Set { 1 }, WARLOCK = Set { 1 },
+}
+local WEAPON = { -- item subclass of weapons (class 2); 14 misc, 20 fishing pole — everyone
+	WARRIOR = Set { 0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 13, 15, 16, 18 }, PALADIN = Set { 0, 1, 4, 5, 6, 7, 8 },
+	DEATHKNIGHT = Set { 0, 1, 4, 5, 6, 7, 8 }, HUNTER = Set { 0, 1, 2, 3, 6, 7, 8, 10, 13, 15, 16, 18 },
+	SHAMAN = Set { 0, 1, 4, 5, 10, 13, 15 }, ROGUE = Set { 0, 2, 3, 4, 7, 13, 15, 16, 18 },
+	DRUID = Set { 4, 5, 6, 10, 13, 15 }, PRIEST = Set { 4, 10, 15, 19 }, MAGE = Set { 7, 10, 15, 19 }, WARLOCK = Set { 7, 10, 15, 19 },
+}
+-- by talent tree (most points): role, weapons (nil — all of the class), shields
+local RANGED = { 2, 3, 16, 18 }
+local function W2(t) for _, v in ipairs(RANGED) do t[#t + 1] = v end return Set(t) end
+local SPEC = {
+	WARRIOR = { { "phys", W2 { 1, 5, 6, 8, 10 } }, { "phys" }, { "tank", W2 { 0, 4, 7, 13, 15 }, true } },
+	PALADIN = { { "caster", Set { 0, 4, 7 }, true }, { "tank", Set { 0, 4, 7 }, true }, { "phys", Set { 1, 5, 6, 8 } } },
+	DEATHKNIGHT = { { "tank" }, { "phys" }, { "phys" } },
+	HUNTER = { { "phys" }, { "phys" }, { "phys" } }, ROGUE = { { "phys" }, { "phys" }, { "phys" } },
+	SHAMAN = { { "caster", nil, true }, { "phys", Set { 0, 1, 4, 5, 13, 15 } }, { "caster", nil, true } },
+	DRUID = { { "caster" }, { "tank" }, { "caster" } },
+	PRIEST = { { "caster" }, { "caster" }, { "caster" } }, MAGE = { { "caster" }, { "caster" }, { "caster" } },
+	WARLOCK = { { "caster" }, { "caster" }, { "caster" } },
+}
+local STAT = { -- GetItemStats keys: T tank, P physical, C caster (stamina, hit, crit, haste — anyone)
+	ITEM_MOD_DEFENSE_SKILL_RATING_SHORT = "T", ITEM_MOD_DODGE_RATING_SHORT = "T", ITEM_MOD_PARRY_RATING_SHORT = "T",
+	ITEM_MOD_BLOCK_RATING_SHORT = "T", ITEM_MOD_BLOCK_VALUE_SHORT = "T",
+	ITEM_MOD_STRENGTH_SHORT = "P", ITEM_MOD_AGILITY_SHORT = "P", ITEM_MOD_ATTACK_POWER_SHORT = "P",
+	ITEM_MOD_ARMOR_PENETRATION_RATING_SHORT = "P", ITEM_MOD_EXPERTISE_RATING_SHORT = "P",
+	ITEM_MOD_INTELLECT_SHORT = "C", ITEM_MOD_SPIRIT_SHORT = "C", ITEM_MOD_SPELL_POWER_SHORT = "C",
+	ITEM_MOD_MANA_REGENERATION_SHORT = "C", ITEM_MOD_POWER_REGEN0_SHORT = "C",
+}
+local OK = { tank = { T = true, P = true }, phys = { P = true }, caster = { C = true } }
+local function StatsFit(item, role)
+	if not (role and GetItemStats) then return true end
+	local _, link = GetItemInfo(item)
+	local st = link and GetItemStats(link)
+	if not st then return true end -- not in the cache: keep
+	for k in pairs(st) do
+		local c = STAT[k]
+		if c and not OK[role][c] then return false end
+	end
+	return true
+end
+local function ForClass(item, cls, si)
+	local v = item and item > 0 and CraftPlanItemType and CraftPlanItemType[item]
+	if not v then return true end -- no item data: keep
+	local spec = si and SPEC[cls] and SPEC[cls][si]
+	local cl, sub, inv = math.floor(v / 10000), math.floor(v / 100) % 100, v % 100
+	if cl == 4 then
+		if sub == 0 or inv == 16 or not ARMOR[cls] then return true end -- rings, trinkets, shirts; cloaks
+		if sub == 6 and spec and not spec[3] then return false end -- shield: spec without one
+		return (ARMOR[cls][sub] and StatsFit(item, spec and spec[1])) or false
+	elseif cl == 2 then
+		if sub == 14 or sub == 20 or not WEAPON[cls] then return true end
+		local ws = spec and spec[2] or WEAPON[cls]
+		return (WEAPON[cls][sub] and ws[sub] and StatsFit(item, spec and spec[1])) or false
+	end
+	return true
+end
 -- sort: by skill (default), item level, required level
 local SORTS = { { "skill", "По навыку" }, { "ilvl", "Ур. предмета" }, { "req", "Треб. уровень" } }
 local sortDrop = W.Dropdown(f, "CraftPlanRecipesSort", 100, SORTS,
@@ -476,18 +567,19 @@ end
 local function List(prof, rank)
 	local group = DB().apGroup
 	local mode = DB().apSort
-	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query .. (group and "|g" or "") .. "|" .. (mode or "")
+	local key = prof .. "|" .. rank .. "|" .. (DB().apKind or "skill") .. "|" .. (DB().apTrainer and "t" or "") .. "|" .. query .. (group and "|g" or "") .. "|" .. (mode or "") .. "|" .. (DB().apCls or "") .. (DB().apSpec or "")
 	if listMemo and listKey == key then return listMemo end
 	local sk = CP.SKILL_ID[prof]
 	local set = KSET[DB().apKind or "skill"]
 	local trainerOnly = DB().apTrainer
+	local cls, si = DB().apCls, DB().apSpec
 	local out = {}
 	for _, rec in ipairs(CP.Recipes(sk)) do
 		local kind = CP.KindAt(rec.y, rec.g, rank)
 		local cnt = CP.CountIn(sk, rec.name)
 		if (cnt > 0 or set:find(LETTER[kind], 1, true)) and (query == "" or LowerName(rec.name):find(query, 1, true)) then
 			local known = CP.KnownRecipe(prof, rec.name) and true
-			if cnt > 0 or not trainerOnly or AtTrainer(sk, prof, rec.name, known) then
+			if cnt > 0 or ((not trainerOnly or AtTrainer(sk, prof, rec.name, known)) and (not cls or ForClass(rec.item, cls, si))) then
 				out[#out + 1] = { rec = rec, prof = prof, kind = kind, count = cnt, known = known, req = CP.LearnReq(sk, rec.name) }
 			end
 		end
@@ -628,6 +720,15 @@ function CP.RefreshRecipes()
 	sortDrop:SetPoint("LEFT", groupCheck.label, "RIGHT", -6, -2)
 	sortDrop.Refresh()
 	y = y - 24
+	clsDrop:ClearAllPoints()
+	clsDrop:SetPoint("TOPLEFT", f, "TOPLEFT", 4, y + 4)
+	clsDrop.Refresh()
+	FillSpecs()
+	specDrop:ClearAllPoints()
+	specDrop:SetPoint("LEFT", clsDrop, "RIGHT", -24, 0)
+	specDrop.Refresh()
+	if DB().apCls then specDrop:Show() else specDrop:Hide() end
+	y = y - 30
 	sc:SetPoint("TOPLEFT", f, "TOPLEFT", 16, y)
 	curProf, curRank = cur, cur and lines[cur].rank
 	allBtn:ClearAllPoints()
