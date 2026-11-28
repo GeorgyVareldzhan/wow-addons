@@ -319,7 +319,7 @@ function CP.RefreshBar()
 			for _, si in ipairs(data.order) do
 				for _, x in ipairs(data.trees[si].ents) do
 					local can = x.e.n
-					for _, rg in ipairs(x.rec.reag) do can = math.min(can, math.floor(CP.Have(rg.id) / rg.count)) end
+					for _, rg in ipairs(x.rec.reag) do can = math.min(can, math.floor(CP.CraftHave(rg.id) / rg.count)) end
 					local known = CP.KnownRecipe(x.prof, x.rec.name)
 					if can > 0 and known then
 						local L = data.lines[x.prof]

@@ -178,9 +178,11 @@ end
 
 do
 	local REAGENT_BAG = -4
-	local ids, stamp
+	local ids, pocket, stamp
 	local function Scan()
-		ids = CountBags()
+		pocket = CountBags()
+		ids = {}
+		for k, v in pairs(pocket) do ids[k] = v end
 		local live = CountBag(REAGENT_BAG, {})
 		-- an empty answer away from the bank doesn't wipe what we remembered (storage may not have loaded yet)
 		-- db.reagentBag = { [id] = count } (older versions: a list of { id, name, count })
@@ -198,6 +200,12 @@ do
 		local now = GetTime()
 		if stamp ~= now then Scan() stamp = now end
 		return (id and ids[id]) or 0
+	end
+	-- only the backpack and bags (no reagent storage, no bank)
+	function CP.PocketCount(id)
+		local now = GetTime()
+		if stamp ~= now then Scan() stamp = now end
+		return (id and pocket[id]) or 0
 	end
 
 	-- Crafting away from the bank also takes materials from the reagent storage, and the game does not show the
@@ -262,6 +270,36 @@ function CP.BankCount(id)
 	return (id and bank and bank[id]) or 0
 end
 function CP.Have(id) return CP.BagCount(id) + CP.BankCount(id) end
+-- What a stack may spend: with "Только сумки" (db.bagsOnly) a regular stack — only what is in the bags right now
+-- (no reagent storage, no bank); otherwise, and a stack from "План по руде" (st.orePlan) — everything.
+function CP.HaveFor(st, id)
+	if (st and st.orePlan) or not DB().bagsOnly then return CP.Have(id) end
+	return CP.PocketCount(id)
+end
+-- materials for crafting right now ("есть на одно создание", crafts on the bar): bags only with "Только сумки"
+function CP.CraftHave(id)
+	if DB().bagsOnly then return CP.PocketCount(id) end
+	return CP.Have(id)
+end
+-- Stock handed out between stacks: stock.bag (bags) / stock.bank (reagent storage + bank) = what is still free.
+-- Take — from the bags, then (bank) from the rest; returns how much was taken. Give — crafted surplus goes to the bags.
+function CP.Take(stock, id, amt, bank)
+	stock.bag, stock.bank = stock.bag or {}, stock.bank or {}
+	local b, k = stock.bag, stock.bank
+	if b[id] == nil then b[id] = CP.PocketCount(id); k[id] = CP.Have(id) - b[id] end
+	local use = math.min(b[id], amt)
+	b[id] = b[id] - use
+	if (bank or not DB().bagsOnly) and use < amt then
+		local u = math.min(k[id], amt - use)
+		k[id] = k[id] - u
+		use = use + u
+	end
+	return use
+end
+function CP.Give(stock, id, n)
+	stock.bag = stock.bag or {}
+	stock.bag[id] = (stock.bag[id] or 0) + n
+end
 
 -- Bags: written to SavedVariables on logout/reload (db.bags = { [id] = count }, db.bagsTime) — for planning outside the game
 -- On Sirus the bags are already gone at PLAYER_LOGOUT: they are saved while playing too

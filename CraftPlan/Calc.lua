@@ -77,7 +77,7 @@ function CP.Producer(id)
 				local known = CP.KnownRecipe(c.prof, rec.name) and true or false
 				local skill = L.rank < rec.g and L.rank < L.max
 				local can = true
-				for _, rg in ipairs(rec.reag) do if CP.Have(rg.id) < rg.count then can = false break end end
+				for _, rg in ipairs(rec.reag) do if CP.CraftHave(rg.id) < rg.count then can = false break end end
 				-- order: learned, still gives skill, have materials, lower yellow threshold; the first one wins a tie
 				local better = not best
 				if not better then
@@ -213,9 +213,7 @@ local function BuildStack(si, st, stock)
 		local n = Node(id)
 		n.gross = n.gross + amt
 		n.parents[parent] = (n.parents[parent] or 0) + amt
-		if stock[id] == nil then stock[id] = CP.Have(id) end
-		local use = math.min(stock[id], amt)
-		stock[id] = stock[id] - use
+		local use = CP.Take(stock, id, amt, st.orePlan) -- "Только сумки": a regular stack — only the bags (CP.HaveFor)
 		local left = amt - use
 		if left <= 0 then return end
 		local pr = CP.Producer(id)
@@ -230,7 +228,7 @@ local function BuildStack(si, st, stock)
 				Need(rg.id, rg.count * times, "i" .. id, depth + 1)
 			end
 			n.busy = nil
-			stock[id] = stock[id] + times * made - left -- surplus from "several per craft"
+			CP.Give(stock, id, times * made - left) -- surplus from "several per craft"
 		else
 			n.short = n.short + left
 		end
@@ -243,7 +241,7 @@ local function BuildStack(si, st, stock)
 	for id, n in pairs(st.add) do
 		if n > 0 then Need(id, n, "s" .. si .. "add", 1) end
 	end
-	for _, id in ipairs(t.ord) do t.nodes[id].have = CP.Have(id) end
+	for _, id in ipairs(t.ord) do t.nodes[id].have = CP.HaveFor(st, id) end
 	return t
 end
 
@@ -348,7 +346,7 @@ function CP.Compute()
 	end
 	for _, c in ipairs(todo) do
 		c.can = true -- have the materials for one craft right now
-		for _, rg in ipairs(c.rec.reag) do if CP.Have(rg.id) < rg.count then c.can = false break end end
+		for _, rg in ipairs(c.rec.reag) do if CP.CraftHave(rg.id) < rg.count then c.can = false break end end
 	end
 	local rank = {} -- expected skill per profession (oranges +1, yellow/green by chance)
 	local function Chance(c)
@@ -493,6 +491,7 @@ function CP.Merge(trees, list)
 					out.nodes[id] = n
 					out.ord[#out.ord + 1] = id
 				end
+				if a.have > n.have then n.have = a.have end -- stacks differ (bags only / with bank): the larger
 				n.gross, n.made, n.short = n.gross + a.gross, n.made + a.made, n.short + a.short
 				n.prod = n.prod or a.prod
 				for k, v in pairs(a.parents) do n.parents[k] = (n.parents[k] or 0) + v end

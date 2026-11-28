@@ -22,6 +22,11 @@ local rawCheck = W.Check(frame, "CraftPlanRawOnly", "На полосе толь�
 	function(v) DB().rawOnly = v or nil; CP.Changed() end,
 	"На полосе сверху вместо рецептов — недостающее сырьё стеков «есть/нужно».")
 rawCheck:SetPoint("TOPRIGHT", mapCheck, "TOPLEFT", -rawCheck.label:GetStringWidth() - 24, 0)
+local bagsCheck = W.Check(frame, "CraftPlanBagsOnly", "Только сумки",
+	function() return DB().bagsOnly end,
+	function(v) DB().bagsOnly = v or nil; CP.Changed() end,
+	"Обычные стеки считают только то, что сейчас в сумках: без хранилища реагентов и банка.")
+bagsCheck:SetPoint("TOPRIGHT", rawCheck, "TOPLEFT", -bagsCheck.label:GetStringWidth() - 24, 0)
 
 local scroll = CreateFrame("ScrollFrame", "CraftPlanPlanScroll", frame, "UIPanelScrollFrameTemplate")
 scroll:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, -28)
@@ -342,10 +347,9 @@ local function DrawTable(y, Wd, M, data, list)
 	-- recipe gets its own tree: stock is handed out in row order. Stacks outside the selection are counted silently
 	-- (they reserve their share); rows are drawn only for the selected ones.
 	local stock, alloc, sharedLines = {}, {}, {}
+	local curSt -- the stack whose recipe is being replayed: regular — bags only, "План по руде" — with the bank
 	local function Need(id, amt, depth, busy, owner, draw)
-		if stock[id] == nil then stock[id] = CP.Have(id) end
-		local h0 = math.min(stock[id], amt)
-		stock[id] = stock[id] - h0
+		local h0 = CP.Take(stock, id, amt, curSt and curSt.orePlan)
 		local left = amt - h0
 		local pr = CP.Producer(id)
 		local make, short, times = 0, 0, 0
@@ -361,7 +365,7 @@ local function DrawTable(y, Wd, M, data, list)
 			local lines = {}
 			local n = nodes[id]
 			local isShared = n and shared(n)
-			local shown = isShared and h0 or CP.Have(id) -- shared: how much this branch got, otherwise — how many we have
+			local shown = isShared and h0 or CP.HaveFor(curSt, id) -- shared: how much this branch got, otherwise — how many we have
 			Row(id, depth, amt, shown, h0 < amt, make, short, lines, make > 0 and pr or nil)
 			if isShared then
 				alloc[id] = alloc[id] or {}
@@ -373,7 +377,7 @@ local function DrawTable(y, Wd, M, data, list)
 			busy[id] = true
 			for _, rg in ipairs(pr.rec.reag) do Need(rg.id, rg.count * times, depth + 1, busy, CP.ItemName(id), draw) end
 			busy[id] = nil
-			stock[id] = stock[id] + make - left -- surplus from "several per craft"
+			CP.Give(stock, id, make - left) -- surplus from "several per craft"
 		end
 	end
 	local chosen = {}
@@ -449,6 +453,7 @@ local function DrawTable(y, Wd, M, data, list)
 		for _, q in ipairs(recs) do
 			local x, draw = q.x, chosen[q.si]
 			local st = g.stacks[q.si]
+			curSt = st
 			if draw and x.prof ~= lastProf then
 				lastProf = x.prof
 				Head(CP.ProfText(x.prof))
@@ -466,13 +471,14 @@ local function DrawTable(y, Wd, M, data, list)
 		-- manual additions also reserve stock (as in the calculation); their rows go to "Разное"
 		for _, si in ipairs(data.order) do
 			local st = g.stacks[si]
+			curSt = st
 			for id, n in pairs(st and st.add or {}) do
 				if n > 0 then Need(id, n, 1, {}, "добавлено вручную", false) end
 			end
 		end
 		-- shared material: the tooltip shows the total we have and who got how much
 		for _, r in ipairs(sharedLines) do
-			r.lines[#r.lines + 1] = "Всего есть " .. CP.Have(r.id) .. ": " .. table.concat(alloc[r.id], ", ") .. "."
+			r.lines[#r.lines + 1] = "В сумках " .. CP.PocketCount(r.id) .. ", в хранилище и банке " .. (CP.Have(r.id) - CP.PocketCount(r.id)) .. ": " .. table.concat(alloc[r.id], ", ") .. "."
 		end
 		-- "Итого": materials used in several branches — one row with the totals, then what they are made of
 		local sh = {}
